@@ -1,13 +1,14 @@
-import { AuthUpperArea } from "./auth/auth-upper-area";
+// import { AuthUpperArea } from "./auth/auth-upper-area";
 import { SidebarTrigger } from "./ui/sidebar";
 import { useHeaderIpc } from "./ipc/use-header-ipc";
-import { ActiveServerSelectorProps } from "./ActiveServerSelector";
+// import { ActiveServerSelectorProps } from "./ActiveServerSelector";
 
-interface HeaderProps {
-  activeServerSelectorProps?: ActiveServerSelectorProps;
-}
+// interface HeaderProps {
+//   activeServerSelectorProps?: ActiveServerSelectorProps;
+// }
 
-export const Header = ({ activeServerSelectorProps }: HeaderProps) => {
+// export const Header = ({ activeServerSelectorProps }: HeaderProps) => {
+export const Header = () => {
   const { activeIpc, dismissActiveIpc } = useHeaderIpc();
 
   return (
@@ -16,7 +17,7 @@ export const Header = ({ activeServerSelectorProps }: HeaderProps) => {
         <div className="flex items-center gap-1 lg:gap-2 no-drag">
           <SidebarTrigger className="-ml-1" />
         </div>
-        <AuthUpperArea activeServerSelectorProps={activeServerSelectorProps} />
+        {/* <AuthUpperArea activeServerSelectorProps={activeServerSelectorProps} /> */}
       </div>
       {activeIpc && activeIpc.render({ dismiss: dismissActiveIpc })}
     </header>

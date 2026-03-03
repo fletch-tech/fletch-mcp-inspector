@@ -495,7 +495,8 @@ export default function App() {
         servers={workspaceServers}
       />
       <SidebarInset className="flex flex-col min-h-0">
-        <Header activeServerSelectorProps={activeServerSelectorProps} />
+        {/* <Header activeServerSelectorProps={activeServerSelectorProps} /> */}
+        <Header />
         <div className="flex flex-1 min-h-0 flex-col overflow-hidden h-full">
           {/* Content Areas */}
           {activeTab === "servers" && (

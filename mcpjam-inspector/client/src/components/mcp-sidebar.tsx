@@ -274,10 +274,10 @@ export function MCPSidebar({
         >
           <img
             src={
-              themeMode === "dark" ? "/mcp_jam_dark.png" : "/mcp_jam_light.png"
+              themeMode === "dark" ? "/fletch_dark.svg" : "/fletch_light.svg"
             }
             alt="MCP Jam"
-            className="h-4 w-auto"
+            className="h-8 w-auto"
           />
         </button>
         {updateReady && (
