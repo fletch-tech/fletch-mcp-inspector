@@ -115,7 +115,7 @@ const config: ForgeConfig = {
     new MakerZIP({}, ["darwin", "linux"]),
     new MakerDMG({
       format: "ULFO",
-      name: "MCPJam Inspector",
+      name: "Fletch MCP Inspector",
       overwrite: true,
       additionalDMGOptions: {
         window: {
@@ -131,7 +131,7 @@ const config: ForgeConfig = {
         maintainer: "MCPJam",
         homepage: "https://mcpjam.com",
         description:
-          "MCPJam Inspector - Explore and interact with Model Context Protocol servers",
+          "Fletch MCP Inspector - Explore and interact with Model Context Protocol servers",
         categories: ["Development"],
       },
     }),
@@ -139,7 +139,7 @@ const config: ForgeConfig = {
       options: {
         homepage: "https://mcpjam.com",
         description:
-          "MCPJam Inspector - Explore and interact with Model Context Protocol servers",
+          "Fletch MCP Inspector - Explore and interact with Model Context Protocol servers",
         categories: ["Development"],
       },
     }),

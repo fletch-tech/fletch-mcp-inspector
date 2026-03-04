@@ -200,7 +200,7 @@ httpServer.listen(PORT, () => {
   console.log(`   Server running at: http://localhost:${PORT}`);
   console.log(`   MCP endpoint:      http://localhost:${PORT}/mcp`);
   console.log("");
-  console.log("   To test with MCPJam Inspector:");
+  console.log("   To test with Fletch MCP Inspector:");
   console.log("   1. Go to https://mcpjam.com/inspector");
   console.log(`   2. Enter URL: http://localhost:${PORT}/mcp`);
   console.log("");
