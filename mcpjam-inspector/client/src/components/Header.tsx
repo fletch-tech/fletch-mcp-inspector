@@ -1,6 +1,6 @@
 // import { AuthUpperArea } from "./auth/auth-upper-area";
 import { SidebarTrigger } from "./ui/sidebar";
-import { useHeaderIpc } from "./ipc/use-header-ipc";
+// import { useHeaderIpc } from "./ipc/use-header-ipc";
 // import { ActiveServerSelectorProps } from "./ActiveServerSelector";
 
 // interface HeaderProps {
@@ -9,7 +9,7 @@ import { useHeaderIpc } from "./ipc/use-header-ipc";
 
 // export const Header = ({ activeServerSelectorProps }: HeaderProps) => {
 export const Header = () => {
-  const { activeIpc, dismissActiveIpc } = useHeaderIpc();
+  // const { activeIpc, dismissActiveIpc } = useHeaderIpc();
 
   return (
     <header className="flex shrink-0 flex-col border-b transition-[width,height] ease-linear">
@@ -19,7 +19,7 @@ export const Header = () => {
         </div>
         {/* <AuthUpperArea activeServerSelectorProps={activeServerSelectorProps} /> */}
       </div>
-      {activeIpc && activeIpc.render({ dismiss: dismissActiveIpc })}
+      {/* {activeIpc && activeIpc.render({ dismiss: dismissActiveIpc })} */}
     </header>
   );
 };

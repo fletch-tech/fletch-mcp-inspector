@@ -12,7 +12,18 @@ import { ProviderRow } from "./setting/ProviderRow";
 import { Switch } from "./ui/switch";
 import { Button } from "./ui/button";
 import { usePreferencesStore } from "@/stores/preferences/preferences-provider";
-import { updateThemeMode } from "@/lib/theme-utils";
+import { updateThemeMode, updateThemePreset } from "@/lib/theme-utils";
+import {
+  type ThemePreset,
+  THEME_PRESET_OPTIONS,
+} from "@/types/preferences/theme";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "./ui/select";
 import { Plus, Pencil, Trash2 } from "lucide-react";
 import { HOSTED_MODE } from "@/lib/config";
 import type { CustomProvider } from "@mcpjam/sdk";
@@ -30,6 +41,8 @@ interface ProviderConfig {
 export function SettingsTab() {
   const themeMode = usePreferencesStore((s) => s.themeMode);
   const setThemeMode = usePreferencesStore((s) => s.setThemeMode);
+  const themePreset = usePreferencesStore((s) => s.themePreset);
+  const setThemePreset = usePreferencesStore((s) => s.setThemePreset);
   const {
     tokens,
     setToken,
@@ -241,6 +254,12 @@ export function SettingsTab() {
     setThemeMode(newTheme);
   };
 
+  const handleThemePresetChange = (value: string) => {
+    const preset = value as ThemePreset;
+    updateThemePreset(preset);
+    setThemePreset(preset);
+  };
+
   const handleCustomProviderSave = (provider: CustomProvider) => {
     if (editingCustomProviderIndex !== null) {
       updateCustomProvider(editingCustomProviderIndex, provider);
@@ -269,7 +288,7 @@ export function SettingsTab() {
         {/* Appearance */}
         <SettingsSection title="Appearance">
           <SettingsRow
-            label="Theme"
+            label="Theme mode"
             value={
               <div className="flex items-center gap-2">
                 <span className="text-xs text-muted-foreground">
@@ -281,6 +300,26 @@ export function SettingsTab() {
                   aria-label="Toggle dark mode"
                 />
               </div>
+            }
+          />
+          <SettingsRow
+            label="Theme"
+            value={
+              <Select
+                value={themePreset}
+                onValueChange={handleThemePresetChange}
+              >
+                <SelectTrigger className="w-[140px] h-9">
+                  <SelectValue placeholder="Theme" />
+                </SelectTrigger>
+                <SelectContent>
+                  {THEME_PRESET_OPTIONS.map((opt) => (
+                    <SelectItem key={opt.value} value={opt.value}>
+                      {opt.label}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
             }
           />
         </SettingsSection>

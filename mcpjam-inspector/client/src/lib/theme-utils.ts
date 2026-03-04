@@ -28,7 +28,7 @@ export function updateThemeMode(value: ThemeMode) {
   });
 }
 
-// Utility to get the initial theme preset from localStorage or fallback to 'default'.
+// Utility to get the initial theme preset from localStorage or fallback to 'fletch'.
 export function getInitialThemePreset(): ThemePreset {
   try {
     const stored = localStorage.getItem(THEME_PRESET_KEY);
@@ -39,7 +39,7 @@ export function getInitialThemePreset(): ThemePreset {
   } catch (error) {
     console.warn("Cannot access localStorage for theme preset:", error);
   }
-  return "default";
+  return "fletch";
 }
 
 export function updateThemePreset(value: ThemePreset) {

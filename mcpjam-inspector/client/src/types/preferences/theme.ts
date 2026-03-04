@@ -48,6 +48,14 @@ export const THEME_PRESET_OPTIONS = [
       dark: "oklch(0.64 0.17 36.44)",
     },
   },
+  {
+    label: "Fletch",
+    value: "fletch",
+    primary: {
+      light: "oklch(0.62 0.138 163)",
+      dark: "oklch(0.62 0.138 163)",
+    },
+  },
 ] as const;
 
 export const THEME_PRESET_VALUES = THEME_PRESET_OPTIONS.map((p) => p.value);

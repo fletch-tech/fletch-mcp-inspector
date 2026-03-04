@@ -1,0 +1,26 @@
+/*
+label: Fletch
+value: fletch
+Green primary matched to fletch_dark.svg (#15AD7A, #00895C).
+*/
+
+:root[data-theme-preset="fletch"] {
+  /* #15AD7A */
+  --primary: oklch(0.62 0.138 163);
+  --primary-foreground: oklch(1 0 0);
+  /* #00895C */
+  --ring: oklch(0.50 0.125 163);
+  --sidebar-primary: oklch(0.50 0.125 163);
+  --sidebar-primary-foreground: oklch(0.9881 0 0);
+  --sidebar-ring: oklch(0.7731 0 0);
+}
+
+.dark:root[data-theme-preset="fletch"] {
+  /* #15AD7A on dark */
+  --primary: oklch(0.62 0.138 163);
+  --primary-foreground: oklch(1 0 0);
+  --ring: oklch(0.62 0.138 163);
+  --sidebar-primary: oklch(0.62 0.138 163);
+  --sidebar-primary-foreground: oklch(0.9881 0 0);
+  --sidebar-ring: oklch(0.7731 0 0);
+}

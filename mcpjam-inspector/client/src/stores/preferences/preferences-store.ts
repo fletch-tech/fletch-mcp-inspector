@@ -15,7 +15,7 @@ export const THEME_PRESET_KEY = "themePreset";
 export const createPreferencesStore = (init?: Partial<PreferencesState>) =>
   createStore<PreferencesState>()((set) => ({
     themeMode: init?.themeMode ?? "light",
-    themePreset: init?.themePreset ?? "default",
+    themePreset: init?.themePreset ?? "fletch",
     setThemeMode: (mode) => {
       try {
         localStorage.setItem(THEME_MODE_KEY, mode);
