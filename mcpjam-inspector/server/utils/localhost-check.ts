@@ -34,26 +34,39 @@ export function isLocalhostRequest(hostHeader: string | undefined): boolean {
   // Check for localhost variants (with or without port)
   // IPv4: localhost, 127.0.0.1
   // IPv6: [::1] (brackets required in Host header for IPv6)
+  // local.fletch.co: custom local development domain
   return (
     host === "localhost" ||
     host === "127.0.0.1" ||
     host === "[::1]" ||
+    host === "local.fletch.co" ||
     host.startsWith("localhost:") ||
     host.startsWith("127.0.0.1:") ||
-    host.startsWith("[::1]:")
+    host.startsWith("[::1]:") ||
+    host.startsWith("local.fletch.co:")
   );
+}
+
+/**
+ * Check if a hostname matches an allowed host pattern.
+ * Supports exact match and wildcard subdomains (e.g. "*.fletch.co").
+ */
+function matchesPattern(hostname: string, pattern: string): boolean {
+  if (pattern.startsWith("*.")) {
+    const domain = pattern.slice(2);
+    return hostname === domain || hostname.endsWith(`.${domain}`);
+  }
+  return hostname === pattern;
 }
 
 /**
  * Check if the request is from an allowed host.
  *
- * In hosted mode (cloud deployments), this allows both localhost and
- * configured allowed hosts (MCPJAM_ALLOWED_HOSTS) to receive tokens.
- * This enables deployment to platforms like Railway while maintaining
- * security by only allowing explicitly configured hosts.
+ * Allows localhost, configured allowed hosts (MCPJAM_ALLOWED_HOSTS),
+ * and in hosted mode extends this to cloud deployment domains.
  *
  * @param hostHeader - The Host header value from the request
- * @param allowedHosts - List of additional allowed hosts (from config)
+ * @param allowedHosts - List of additional allowed hosts (supports wildcards like "*.fletch.co")
  * @param hostedMode - Whether hosted mode is enabled
  * @returns true if the request is from an allowed host, false otherwise
  */
@@ -62,27 +75,14 @@ export function isAllowedHost(
   allowedHosts: string[],
   hostedMode: boolean,
 ): boolean {
-  // Always allow localhost
   if (isLocalhostRequest(hostHeader)) {
     return true;
   }
 
-  // In hosted mode, check configured allowed hosts
-  if (hostedMode && hostHeader && allowedHosts.length > 0) {
+  if (hostHeader && allowedHosts.length > 0) {
     const host = hostHeader.toLowerCase();
-    // Extract hostname without port for comparison
     const hostWithoutPort = host.split(":")[0];
-
-    return allowedHosts.some((allowed) => {
-      // Support exact match or subdomain matching (e.g., "*.railway.app")
-      if (allowed.startsWith("*.")) {
-        const domain = allowed.slice(2);
-        return (
-          hostWithoutPort === domain || hostWithoutPort.endsWith(`.${domain}`)
-        );
-      }
-      return hostWithoutPort === allowed;
-    });
+    return allowedHosts.some((pattern) => matchesPattern(hostWithoutPort, pattern));
   }
 
   return false;

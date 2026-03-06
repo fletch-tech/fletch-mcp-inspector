@@ -18,7 +18,7 @@ import { MCPClientManager } from "@mcpjam/sdk";
 import { initElicitationCallback } from "./routes/mcp/elicitation.js";
 import { rpcLogBus } from "./services/rpc-log-bus.js";
 import { progressStore } from "./services/progress-store.js";
-import { CORS_ORIGINS, HOSTED_MODE, ALLOWED_HOSTS } from "./config.js";
+import { corsOriginCheck, HOSTED_MODE, ALLOWED_HOSTS } from "./config.js";
 import { inAppBrowserMiddleware } from "./middleware/in-app-browser.js";
 import path from "path";
 
@@ -216,7 +216,7 @@ export function createHonoApp() {
   app.use(
     "*",
     cors({
-      origin: CORS_ORIGINS,
+      origin: (origin) => corsOriginCheck(origin),
       credentials: true,
     }),
   );

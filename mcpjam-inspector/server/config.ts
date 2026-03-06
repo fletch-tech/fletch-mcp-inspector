@@ -24,21 +24,81 @@ export const WEB_ALLOWED_ORIGINS = (process.env.WEB_ALLOWED_ORIGINS ?? "")
   .map((origin) => origin.trim())
   .filter((origin) => origin.length > 0);
 
-const DEFAULT_CORS_ORIGINS = [
-  "http://localhost:5173", // Vite dev server
-  "http://localhost:8080", // Electron renderer dev server
-  `http://localhost:${SERVER_PORT}`, // Hono server
-  `http://127.0.0.1:${SERVER_PORT}`, // Hono server production
-  "https://staging.app.mcpjam.com", // Hosted deployment
-];
+const DEV_PORTS = [SERVER_PORT, 5173, 8080];
 
-// CORS origins:
-// - Hosted mode: exact allowlist from WEB_ALLOWED_ORIGINS (if provided).
-// - Local mode: defaults + WEB_ALLOWED_ORIGINS (to support local testing with hosted origins).
-export const CORS_ORIGINS =
-  HOSTED_MODE && WEB_ALLOWED_ORIGINS.length > 0
-    ? WEB_ALLOWED_ORIGINS
-    : Array.from(new Set([...DEFAULT_CORS_ORIGINS, ...WEB_ALLOWED_ORIGINS]));
+const DEFAULT_CORS_ORIGINS: string[] = [];
+for (const port of DEV_PORTS) {
+  DEFAULT_CORS_ORIGINS.push(`http://localhost:${port}`);
+  DEFAULT_CORS_ORIGINS.push(`http://127.0.0.1:${port}`);
+  DEFAULT_CORS_ORIGINS.push(`http://local.fletch.co:${port}`);
+}
+DEFAULT_CORS_ORIGINS.push("http://local.fletch.co");
+DEFAULT_CORS_ORIGINS.push("https://staging.app.mcpjam.com");
+
+/**
+ * Parse wildcard domain patterns from env (e.g. "*.fletch.co").
+ * Read dynamically so tests can modify the env var.
+ */
+function getWildcardDomains(): string[] {
+  return (process.env.CORS_WILDCARD_DOMAINS ?? "")
+    .split(",")
+    .map((d) => d.trim().toLowerCase())
+    .filter((d) => d.length > 0);
+}
+
+/**
+ * Build the exact-match origin allowlist.
+ * Supports ALLOWED_ORIGINS env var for full override (legacy),
+ * otherwise uses defaults + WEB_ALLOWED_ORIGINS.
+ * Read dynamically so tests can modify env vars.
+ */
+function getExactOrigins(): string[] {
+  if (process.env.ALLOWED_ORIGINS) {
+    return process.env.ALLOWED_ORIGINS.split(",").map((o) => o.trim());
+  }
+  if (HOSTED_MODE && WEB_ALLOWED_ORIGINS.length > 0) {
+    return WEB_ALLOWED_ORIGINS;
+  }
+  return Array.from(new Set([...DEFAULT_CORS_ORIGINS, ...WEB_ALLOWED_ORIGINS]));
+}
+
+/**
+ * Check whether an origin matches one of the wildcard domain patterns.
+ * Pattern "*.fletch.co" matches "https://app.fletch.co", "http://local.fletch.co:3000", etc.
+ */
+function matchesWildcardDomain(origin: string): boolean {
+  const patterns = getWildcardDomains();
+  if (patterns.length === 0) return false;
+  try {
+    const url = new URL(origin);
+    const hostname = url.hostname.toLowerCase();
+    return patterns.some((pattern) => {
+      if (pattern.startsWith("*.")) {
+        const domain = pattern.slice(2);
+        return hostname === domain || hostname.endsWith(`.${domain}`);
+      }
+      return hostname === pattern;
+    });
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Dynamic CORS origin checker.
+ * Returns the origin if allowed, or empty string to deny.
+ */
+export function corsOriginCheck(origin: string | undefined): string {
+  if (!origin) return "";
+  if (getExactOrigins().includes(origin)) return origin;
+  if (matchesWildcardDomain(origin)) return origin;
+  return "";
+}
+
+/** Static list for CSP frame-ancestors and other static consumers. */
+export const CORS_ORIGINS = Array.from(
+  new Set([...DEFAULT_CORS_ORIGINS, ...WEB_ALLOWED_ORIGINS]),
+);
 
 // Hosted web route timeouts (ms)
 export const WEB_CONNECT_TIMEOUT_MS = 10_000;

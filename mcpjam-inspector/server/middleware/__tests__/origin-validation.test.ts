@@ -28,20 +28,23 @@ function createTestApp(): Hono {
 
 describe("originValidationMiddleware", () => {
   let app: Hono;
-  const originalEnv = process.env.ALLOWED_ORIGINS;
+  const savedEnv: Record<string, string | undefined> = {};
 
   beforeEach(() => {
+    savedEnv.ALLOWED_ORIGINS = process.env.ALLOWED_ORIGINS;
+    savedEnv.CORS_WILDCARD_DOMAINS = process.env.CORS_WILDCARD_DOMAINS;
     app = createTestApp();
-    // Clear any custom allowed origins
     delete process.env.ALLOWED_ORIGINS;
+    delete process.env.CORS_WILDCARD_DOMAINS;
   });
 
   afterEach(() => {
-    // Restore original env
-    if (originalEnv) {
-      process.env.ALLOWED_ORIGINS = originalEnv;
-    } else {
-      delete process.env.ALLOWED_ORIGINS;
+    for (const [key, val] of Object.entries(savedEnv)) {
+      if (val !== undefined) {
+        process.env[key] = val;
+      } else {
+        delete process.env[key];
+      }
     }
   });
 
@@ -239,6 +242,138 @@ describe("originValidationMiddleware", () => {
       });
 
       // localhost is no longer allowed when custom origins are set
+      expect(res.status).toBe(403);
+    });
+  });
+
+  describe("local.fletch.co origins (default allowed)", () => {
+    it("allows http://local.fletch.co:6274", async () => {
+      const res = await app.request("/api/test", {
+        headers: { Origin: "http://local.fletch.co:6274" },
+      });
+      expect(res.status).toBe(200);
+    });
+
+    it("allows http://local.fletch.co:5173", async () => {
+      const res = await app.request("/api/test", {
+        headers: { Origin: "http://local.fletch.co:5173" },
+      });
+      expect(res.status).toBe(200);
+    });
+
+    it("allows http://local.fletch.co:8080", async () => {
+      const res = await app.request("/api/test", {
+        headers: { Origin: "http://local.fletch.co:8080" },
+      });
+      expect(res.status).toBe(200);
+    });
+
+    it("allows http://local.fletch.co without port", async () => {
+      const res = await app.request("/api/test", {
+        headers: { Origin: "http://local.fletch.co" },
+      });
+      expect(res.status).toBe(200);
+    });
+  });
+
+  describe("wildcard domain matching via CORS_WILDCARD_DOMAINS", () => {
+    it("allows *.fletch.co subdomains when configured", async () => {
+      process.env.CORS_WILDCARD_DOMAINS = "*.fletch.co";
+      app = createTestApp();
+
+      const res = await app.request("/api/test", {
+        headers: { Origin: "https://app.fletch.co" },
+      });
+      expect(res.status).toBe(200);
+    });
+
+    it("allows any subdomain of fletch.co", async () => {
+      process.env.CORS_WILDCARD_DOMAINS = "*.fletch.co";
+      app = createTestApp();
+
+      for (const sub of ["inspector", "staging", "api", "dashboard"]) {
+        const res = await app.request("/api/test", {
+          headers: { Origin: `https://${sub}.fletch.co` },
+        });
+        expect(res.status).toBe(200);
+      }
+    });
+
+    it("allows HTTPS origins on *.fletch.co", async () => {
+      process.env.CORS_WILDCARD_DOMAINS = "*.fletch.co";
+      app = createTestApp();
+
+      const res = await app.request("/api/test", {
+        headers: { Origin: "https://secure.fletch.co" },
+      });
+      expect(res.status).toBe(200);
+    });
+
+    it("allows origins with ports on *.fletch.co", async () => {
+      process.env.CORS_WILDCARD_DOMAINS = "*.fletch.co";
+      app = createTestApp();
+
+      const res = await app.request("/api/test", {
+        headers: { Origin: "https://app.fletch.co:8443" },
+      });
+      expect(res.status).toBe(200);
+    });
+
+    it("blocks non-matching domains even with wildcard configured", async () => {
+      process.env.CORS_WILDCARD_DOMAINS = "*.fletch.co";
+      app = createTestApp();
+
+      const res = await app.request("/api/test", {
+        headers: { Origin: "https://evil.com" },
+      });
+      expect(res.status).toBe(403);
+    });
+
+    it("blocks similar but different domains", async () => {
+      process.env.CORS_WILDCARD_DOMAINS = "*.fletch.co";
+      app = createTestApp();
+
+      const blocked = [
+        "https://notfletch.co",
+        "https://fletch.co.evil.com",
+        "https://evil-fletch.co",
+      ];
+
+      for (const origin of blocked) {
+        const res = await app.request("/api/test", {
+          headers: { Origin: origin },
+        });
+        expect(res.status).toBe(403);
+      }
+    });
+
+    it("supports multiple wildcard patterns", async () => {
+      process.env.CORS_WILDCARD_DOMAINS = "*.fletch.co, *.example.com";
+      app = createTestApp();
+
+      const res1 = await app.request("/api/test", {
+        headers: { Origin: "https://app.fletch.co" },
+      });
+      expect(res1.status).toBe(200);
+
+      const res2 = await app.request("/api/test", {
+        headers: { Origin: "https://app.example.com" },
+      });
+      expect(res2.status).toBe(200);
+
+      const res3 = await app.request("/api/test", {
+        headers: { Origin: "https://other.org" },
+      });
+      expect(res3.status).toBe(403);
+    });
+
+    it("does not match when CORS_WILDCARD_DOMAINS is empty", async () => {
+      process.env.CORS_WILDCARD_DOMAINS = "";
+      app = createTestApp();
+
+      const res = await app.request("/api/test", {
+        headers: { Origin: "https://app.fletch.co" },
+      });
       expect(res.status).toBe(403);
     });
   });

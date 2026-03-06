@@ -15,7 +15,7 @@ import { adapterHttp, managerHttp } from "../../http-adapters.js";
 import { sessionAuthMiddleware } from "../../../../middleware/session-auth.js";
 import { originValidationMiddleware } from "../../../../middleware/origin-validation.js";
 import { securityHeadersMiddleware } from "../../../../middleware/security-headers.js";
-import { CORS_ORIGINS } from "../../../../config.js";
+import { corsOriginCheck } from "../../../../config.js";
 
 /**
  * Route configuration for test app creation
@@ -90,7 +90,7 @@ export function createTestApp(
     app.use(
       "*",
       cors({
-        origin: CORS_ORIGINS,
+        origin: (origin) => corsOriginCheck(origin),
         credentials: true,
       }),
     );

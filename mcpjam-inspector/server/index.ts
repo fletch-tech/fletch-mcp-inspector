@@ -90,7 +90,7 @@ import { tunnelManager } from "./services/tunnel-manager";
 import {
   SERVER_PORT,
   SERVER_HOSTNAME,
-  CORS_ORIGINS,
+  corsOriginCheck,
   HOSTED_MODE,
   ALLOWED_HOSTS,
 } from "./config";
@@ -293,7 +293,7 @@ if (enableHttpLogs) {
 app.use(
   "*",
   cors({
-    origin: CORS_ORIGINS,
+    origin: (origin) => corsOriginCheck(origin),
     credentials: true,
   }),
 );
@@ -449,7 +449,8 @@ const displayPort = process.env.ENVIRONMENT === "dev" ? 5173 : SERVER_PORT;
  * DOCKER_CONTAINER is set in Dockerfile. Do not set manually.
  */
 const isDocker = process.env.DOCKER_CONTAINER === "true";
-const hostname = isDocker ? "0.0.0.0" : "127.0.0.1";
+const isProduction = process.env.ENVIRONMENT === "production";
+const hostname = isDocker || isProduction ? "0.0.0.0" : "127.0.0.1";
 
 appLogger.info(`🎵 MCPJam: http://127.0.0.1:${displayPort}`);
 

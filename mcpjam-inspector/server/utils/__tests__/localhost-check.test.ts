@@ -6,7 +6,7 @@
  */
 
 import { describe, it, expect } from "vitest";
-import { isLocalhostRequest } from "../localhost-check.js";
+import { isLocalhostRequest, isAllowedHost } from "../localhost-check.js";
 
 describe("isLocalhostRequest", () => {
   describe("valid localhost values", () => {
@@ -174,6 +174,129 @@ describe("isLocalhostRequest", () => {
     it("allows legitimate local development requests", () => {
       expect(isLocalhostRequest("localhost:6274")).toBe(true);
       expect(isLocalhostRequest("127.0.0.1:6274")).toBe(true);
+    });
+  });
+
+  describe("local.fletch.co (custom local dev domain)", () => {
+    it("returns true for 'local.fletch.co'", () => {
+      expect(isLocalhostRequest("local.fletch.co")).toBe(true);
+    });
+
+    it("returns true for 'local.fletch.co:6274' (with port)", () => {
+      expect(isLocalhostRequest("local.fletch.co:6274")).toBe(true);
+    });
+
+    it("returns true for any port on local.fletch.co", () => {
+      expect(isLocalhostRequest("local.fletch.co:5173")).toBe(true);
+      expect(isLocalhostRequest("local.fletch.co:8080")).toBe(true);
+      expect(isLocalhostRequest("local.fletch.co:3000")).toBe(true);
+    });
+
+    it("handles uppercase 'LOCAL.FLETCH.CO'", () => {
+      expect(isLocalhostRequest("LOCAL.FLETCH.CO")).toBe(true);
+      expect(isLocalhostRequest("LOCAL.FLETCH.CO:6274")).toBe(true);
+    });
+
+    it("does not match other *.fletch.co subdomains", () => {
+      expect(isLocalhostRequest("app.fletch.co")).toBe(false);
+      expect(isLocalhostRequest("staging.fletch.co")).toBe(false);
+      expect(isLocalhostRequest("fletch.co")).toBe(false);
+    });
+
+    it("does not match similar domain names", () => {
+      expect(isLocalhostRequest("local.fletch.com")).toBe(false);
+      expect(isLocalhostRequest("notlocal.fletch.co")).toBe(false);
+      expect(isLocalhostRequest("local.fletch.co.evil.com")).toBe(false);
+    });
+  });
+});
+
+describe("isAllowedHost", () => {
+  describe("localhost passthrough", () => {
+    it("allows localhost regardless of allowedHosts", () => {
+      expect(isAllowedHost("localhost:6274", [], false)).toBe(true);
+      expect(isAllowedHost("127.0.0.1:6274", [], false)).toBe(true);
+      expect(isAllowedHost("local.fletch.co:6274", [], false)).toBe(true);
+    });
+  });
+
+  describe("wildcard patterns", () => {
+    it("matches subdomains with *.fletch.co", () => {
+      const hosts = ["*.fletch.co"];
+      expect(isAllowedHost("app.fletch.co", hosts, false)).toBe(true);
+      expect(isAllowedHost("inspector.fletch.co", hosts, false)).toBe(true);
+      expect(isAllowedHost("staging.fletch.co:443", hosts, false)).toBe(true);
+    });
+
+    it("matches the bare domain with *.fletch.co", () => {
+      expect(isAllowedHost("fletch.co", ["*.fletch.co"], false)).toBe(true);
+    });
+
+    it("matches deeply nested subdomains", () => {
+      expect(isAllowedHost("a.b.c.fletch.co", ["*.fletch.co"], false)).toBe(
+        true,
+      );
+    });
+
+    it("does not match different domains", () => {
+      const hosts = ["*.fletch.co"];
+      expect(isAllowedHost("evil.com", hosts, false)).toBe(false);
+      expect(isAllowedHost("notfletch.co", hosts, false)).toBe(false);
+      expect(isAllowedHost("fletch.co.evil.com", hosts, false)).toBe(false);
+    });
+
+    it("strips port before matching", () => {
+      expect(
+        isAllowedHost("app.fletch.co:8080", ["*.fletch.co"], false),
+      ).toBe(true);
+    });
+
+    it("is case insensitive", () => {
+      expect(isAllowedHost("APP.FLETCH.CO", ["*.fletch.co"], false)).toBe(
+        true,
+      );
+    });
+  });
+
+  describe("exact host patterns", () => {
+    it("matches exact host", () => {
+      expect(
+        isAllowedHost("app.fletch.co", ["app.fletch.co"], false),
+      ).toBe(true);
+    });
+
+    it("does not match subdomains for exact pattern", () => {
+      expect(
+        isAllowedHost("sub.app.fletch.co", ["app.fletch.co"], false),
+      ).toBe(false);
+    });
+  });
+
+  describe("works without hosted mode", () => {
+    it("checks allowedHosts even when hostedMode is false", () => {
+      expect(isAllowedHost("app.fletch.co", ["*.fletch.co"], false)).toBe(
+        true,
+      );
+    });
+
+    it("checks allowedHosts when hostedMode is true", () => {
+      expect(isAllowedHost("app.fletch.co", ["*.fletch.co"], true)).toBe(
+        true,
+      );
+    });
+  });
+
+  describe("edge cases", () => {
+    it("returns false for undefined host", () => {
+      expect(isAllowedHost(undefined, ["*.fletch.co"], false)).toBe(false);
+    });
+
+    it("returns false when allowedHosts is empty and not localhost", () => {
+      expect(isAllowedHost("app.fletch.co", [], false)).toBe(false);
+    });
+
+    it("returns false for empty string host", () => {
+      expect(isAllowedHost("", ["*.fletch.co"], false)).toBe(false);
     });
   });
 });
