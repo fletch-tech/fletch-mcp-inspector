@@ -1,4 +1,4 @@
-import { useAuth } from "@workos-inc/authkit-react";
+import { useAuth } from "@/lib/auth/jwt-auth-context";
 import { useConvexAuth } from "convex/react";
 import { usePostHog } from "posthog-js/react";
 import { Button } from "@/components/ui/button";
@@ -18,7 +18,7 @@ interface AuthUpperAreaProps {
 export function AuthUpperArea({
   activeServerSelectorProps,
 }: AuthUpperAreaProps) {
-  const { user, signIn, signUp } = useAuth();
+  const { user, signIn } = useAuth();
   const { isLoading } = useConvexAuth();
   const posthog = usePostHog();
 
@@ -65,35 +65,19 @@ export function AuthUpperArea({
         {communityLinks}
         <NotificationBell />
         {!user && !isLoading && (
-          <>
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => {
-                posthog.capture("login_button_clicked", {
-                  location: "header",
-                  platform: detectPlatform(),
-                  environment: detectEnvironment(),
-                });
-                signIn();
-              }}
-            >
-              Sign in
-            </Button>
-            <Button
-              size="sm"
-              onClick={() => {
-                posthog.capture("sign_up_button_clicked", {
-                  location: "header",
-                  platform: detectPlatform(),
-                  environment: detectEnvironment(),
-                });
-                signUp();
-              }}
-            >
-              Create account
-            </Button>
-          </>
+          <Button
+            size="sm"
+            onClick={() => {
+              posthog.capture("login_button_clicked", {
+                location: "header",
+                platform: detectPlatform(),
+                environment: detectEnvironment(),
+              });
+              signIn();
+            }}
+          >
+            Sign in
+          </Button>
         )}
       </div>
     </div>

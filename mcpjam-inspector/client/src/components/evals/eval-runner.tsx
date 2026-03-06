@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { ChevronLeft, ChevronRight, Plus, X } from "lucide-react";
 import { toast } from "sonner";
 import { useConvexAuth } from "convex/react";
-import { useAuth } from "@workos-inc/authkit-react";
+import { useAuth } from "@/lib/auth/jwt-auth-context";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,

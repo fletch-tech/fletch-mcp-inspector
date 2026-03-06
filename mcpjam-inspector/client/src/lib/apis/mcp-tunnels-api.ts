@@ -23,7 +23,7 @@ export interface TunnelError {
 
 /**
  * Create a shared tunnel for all MCP servers
- * @param accessToken - Optional WorkOS access token for authenticated requests
+ * @param accessToken - Optional access token for authenticated requests
  */
 export async function createTunnel(
   accessToken?: string,
@@ -52,7 +52,7 @@ export async function createTunnel(
 /**
  * Create a tunnel scoped to an individual MCP server
  * @param serverId - The MCP server ID
- * @param accessToken - Optional WorkOS access token for authenticated requests
+ * @param accessToken - Optional access token for authenticated requests
  */
 export async function createServerTunnel(
   serverId: string,
@@ -84,7 +84,7 @@ export async function createServerTunnel(
 
 /**
  * Get existing shared tunnel URL
- * @param accessToken - Optional WorkOS access token for authenticated requests
+ * @param accessToken - Optional access token for authenticated requests
  */
 export async function getTunnel(
   accessToken?: string,
@@ -117,7 +117,7 @@ export async function getTunnel(
 /**
  * Get server-specific tunnel URL
  * @param serverId - The MCP server ID
- * @param accessToken - Optional WorkOS access token for authenticated requests
+ * @param accessToken - Optional access token for authenticated requests
  */
 export async function getServerTunnel(
   serverId: string,
@@ -153,7 +153,7 @@ export async function getServerTunnel(
 
 /**
  * Close the shared tunnel
- * @param accessToken - Optional WorkOS access token for authenticated requests
+ * @param accessToken - Optional access token for authenticated requests
  */
 export async function closeTunnel(accessToken?: string): Promise<void> {
   const headers: Record<string, string> = {
@@ -178,7 +178,7 @@ export async function closeTunnel(accessToken?: string): Promise<void> {
 /**
  * Close a tunnel for an individual MCP server
  * @param serverId - The MCP server ID
- * @param accessToken - Optional WorkOS access token for authenticated requests
+ * @param accessToken - Optional access token for authenticated requests
  */
 export async function closeServerTunnel(
   serverId: string,
@@ -208,7 +208,7 @@ export async function closeServerTunnel(
 
 /**
  * Cleanup all orphaned tunnels for the current user
- * @param accessToken - Optional WorkOS access token for authenticated requests
+ * @param accessToken - Optional access token for authenticated requests
  */
 export async function cleanupOrphanedTunnels(
   accessToken?: string,

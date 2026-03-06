@@ -1,6 +1,6 @@
 import { useState, useRef } from "react";
 import { useConvexAuth } from "convex/react";
-import { useAuth } from "@workos-inc/authkit-react";
+import { useAuth } from "@/lib/auth/jwt-auth-context";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { EditableText } from "@/components/ui/editable-text";

@@ -30,7 +30,7 @@ vi.mock("@/lib/apis/mcp-tunnels-api", () => ({
   cleanupOrphanedTunnels: vi.fn().mockResolvedValue(undefined),
 }));
 
-vi.mock("@workos-inc/authkit-react", () => ({
+vi.mock("@/lib/auth/jwt-auth-context", () => ({
   useAuth: () => ({
     getAccessToken: vi.fn().mockResolvedValue("test-token"),
   }),

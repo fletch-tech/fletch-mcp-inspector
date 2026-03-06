@@ -9,7 +9,7 @@ const mockUseOrganizationQueries = vi.fn();
 const mockUseOrganizationMembers = vi.fn();
 const mockUseOrganizationBilling = vi.mocked(useOrganizationBilling);
 
-vi.mock("@workos-inc/authkit-react", () => ({
+vi.mock("@/lib/auth/jwt-auth-context", () => ({
   useAuth: (...args: unknown[]) => mockUseAuth(...args),
 }));
 

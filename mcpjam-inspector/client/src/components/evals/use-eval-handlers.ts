@@ -1,6 +1,6 @@
 import { useCallback, useState } from "react";
 import { useConvex } from "convex/react";
-import { useAuth } from "@workos-inc/authkit-react";
+import { useAuth } from "@/lib/auth/jwt-auth-context";
 import { toast } from "sonner";
 import posthog from "posthog-js";
 import { detectPlatform, detectEnvironment } from "@/lib/PosthogUtils";

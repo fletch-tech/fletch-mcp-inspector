@@ -26,7 +26,7 @@ import {
   generateId,
   lastAssistantMessageIsCompleteWithApprovalResponses,
 } from "ai";
-import { useAuth } from "@workos-inc/authkit-react";
+import { useAuth } from "@/lib/auth/jwt-auth-context";
 import { useConvexAuth } from "convex/react";
 import { ModelDefinition, isGPT5Model } from "@/shared/types";
 import {
@@ -266,7 +266,7 @@ export function useChatSession({
     }
     const isGpt5 = isGPT5Model(selectedModel.id);
 
-    // Merge session auth headers with workos auth headers
+    // Merge session auth headers with JWT auth headers
     const sessionHeaders = getSessionAuthHeaders();
     const mergedHeaders = { ...sessionHeaders, ...authHeaders } as Record<
       string,

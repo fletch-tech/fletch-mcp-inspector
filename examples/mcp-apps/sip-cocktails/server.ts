@@ -228,7 +228,11 @@ async function getCurrentUser(
     return null;
   }
   try {
-    return await convexClient.action(api.users.syncCurrent, {});
+    let user = await convexClient.query(api.users.getCurrentUser, {});
+    if (!user) {
+      user = await convexClient.action(api.users.syncCurrent, {});
+    }
+    return user;
   } catch {
     return null;
   }

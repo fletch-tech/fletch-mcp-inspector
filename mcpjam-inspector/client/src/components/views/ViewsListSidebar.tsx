@@ -2,7 +2,7 @@ import { Trash2, Pencil, Copy } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { type AnyView } from "@/hooks/useViews";
-import { User } from "@workos-inc/authkit-js";
+import { type User } from "@/lib/auth/jwt-auth-context";
 import { WorkspaceMembersFacepile } from "@/components/workspace/WorkspaceMembersFacepile";
 import { WorkspaceShareButton } from "@/components/workspace/WorkspaceShareButton";
 

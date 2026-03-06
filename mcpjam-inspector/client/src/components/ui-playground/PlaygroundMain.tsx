@@ -13,7 +13,7 @@
 
 import { FormEvent, useState, useEffect, useCallback, useMemo } from "react";
 import { ArrowDown, Braces, Loader2, Trash2 } from "lucide-react";
-import { useAuth } from "@workos-inc/authkit-react";
+import { useAuth } from "@/lib/auth/jwt-auth-context";
 import type { ContentBlock } from "@modelcontextprotocol/sdk/types.js";
 import { ModelDefinition } from "@/shared/types";
 import { cn } from "@/lib/utils";

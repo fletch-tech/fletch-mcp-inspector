@@ -1,5 +1,6 @@
 /**
  * Shared utilities for running MCP servers with Streamable HTTP transport.
+ * Auth: external JWT (URL token → cookie, or Bearer). Invalid token → redirect to MAIN_URL or 401.
  */
 
 import { createMcpExpressApp } from "@modelcontextprotocol/sdk/server/express.js";
@@ -7,12 +8,15 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import cors from "cors";
 import type { Request, Response } from "express";
-import { createRemoteJWKSet, jwtVerify } from "jose";
+import { validateJwt } from "./auth/jwt.js";
 
 export interface ServerOptions {
   port: number;
   name?: string;
 }
+
+const AUTH_COOKIE_NAME = "auth_token";
+const TOKEN_QUERY_PARAM = "token";
 
 /**
  * Starts an MCP server with Streamable HTTP transport in stateless mode.
@@ -30,43 +34,77 @@ export async function startServer(
 ): Promise<void> {
   const { port, name = "MCP Server" } = options;
   const baseUrl = process.env.PUBLIC_URL ?? `http://localhost:${port}`;
-  const authkitIssuer = normalizeIssuer(process.env.AUTHKIT_DOMAIN);
-  if (!authkitIssuer) {
-    throw new Error("Missing AUTHKIT_DOMAIN.");
+  const mainUrl = process.env.MAIN_URL;
+  if (!mainUrl) {
+    throw new Error("Missing MAIN_URL.");
   }
 
   const app = createMcpExpressApp({ host: "0.0.0.0" });
   app.use(cors());
-  app.use(createAuthMetadataRoutes({ app, baseUrl, authkitIssuer }));
+
+  // Landing: ?token=<base64(jwt)> → validate, set cookie, redirect without token; else redirect to MAIN_URL
+  app.get("/auth/landing", async (req: Request, res: Response) => {
+    const tokenParam = req.query[TOKEN_QUERY_PARAM];
+    if (typeof tokenParam !== "string" || !tokenParam) {
+      res.redirect(302, mainUrl);
+      return;
+    }
+
+    let rawJwt: string;
+    try {
+      rawJwt = Buffer.from(tokenParam, "base64url").toString("utf8");
+    } catch {
+      rawJwt = tokenParam;
+    }
+
+    const result = await validateJwt(rawJwt);
+    if (!result.valid) {
+      res.redirect(302, mainUrl);
+      return;
+    }
+
+    const maxAge = result.claims.exp
+      ? Math.max(0, result.claims.exp - Math.floor(Date.now() / 1000))
+      : 3600;
+    res
+      .cookie(AUTH_COOKIE_NAME, rawJwt, {
+        httpOnly: true,
+        secure: process.env.NODE_ENV === "production",
+        sameSite: "lax",
+        maxAge: maxAge * 1000,
+        path: "/",
+      })
+      .redirect(302, baseUrl.replace(/\/+$/, "") + "/mcp");
+  });
 
   app.all(
     "/mcp",
-    authkitBearerAuth({ baseUrl, authkitIssuer, allowAnonymous: true }),
+    jwtAuthMiddleware({ mainUrl, allowAnonymous: true }),
     async (req: Request, res: Response) => {
-    const authToken = extractBearerToken(req.headers.authorization);
-    const server = createServer({ authToken });
-    const transport = new StreamableHTTPServerTransport({
-      sessionIdGenerator: undefined,
-    });
+      const authToken = getAuthToken(req);
+      const server = createServer({ authToken });
+      const transport = new StreamableHTTPServerTransport({
+        sessionIdGenerator: undefined,
+      });
 
-    res.on("close", () => {
-      transport.close().catch(() => {});
-      server.close().catch(() => {});
-    });
+      res.on("close", () => {
+        transport.close().catch(() => {});
+        server.close().catch(() => {});
+      });
 
-    try {
-      await server.connect(transport);
-      await transport.handleRequest(req, res, req.body);
-    } catch (error) {
-      console.error("MCP error:", error);
-      if (!res.headersSent) {
-        res.status(500).json({
-          jsonrpc: "2.0",
-          error: { code: -32603, message: "Internal server error" },
-          id: null,
-        });
+      try {
+        await server.connect(transport);
+        await transport.handleRequest(req, res, req.body);
+      } catch (error) {
+        console.error("MCP error:", error);
+        if (!res.headersSent) {
+          res.status(500).json({
+            jsonrpc: "2.0",
+            error: { code: -32603, message: "Internal server error" },
+            id: null,
+          });
+        }
       }
-    }
     },
   );
 
@@ -87,97 +125,65 @@ export async function startServer(
   process.on("SIGTERM", shutdown);
 }
 
-function extractBearerToken(value: string | undefined): string | undefined {
-  if (!value) {
-    return undefined;
+function parseCookies(cookieHeader: string | undefined): Record<string, string> {
+  const out: Record<string, string> = {};
+  if (!cookieHeader) return out;
+  for (const part of cookieHeader.split(";")) {
+    const eq = part.indexOf("=");
+    if (eq === -1) continue;
+    const key = part.slice(0, eq).trim();
+    const value = part.slice(eq + 1).trim();
+    if (key) out[key] = value;
   }
-  const [type, token] = value.split(" ");
-  if (type?.toLowerCase() !== "bearer" || !token) {
-    return undefined;
-  }
-  return token;
+  return out;
 }
 
-function normalizeIssuer(domain: string | undefined): string | undefined {
-  if (!domain) {
-    return undefined;
+function getAuthToken(req: Request): string | undefined {
+  const bearer = req.headers.authorization;
+  if (bearer?.startsWith("Bearer ")) {
+    return bearer.slice(7).trim() || undefined;
   }
-  if (domain.startsWith("http://") || domain.startsWith("https://")) {
-    return domain.replace(/\/+$/, "");
-  }
-  return `https://${domain.replace(/\/+$/, "")}`;
+  const cookies = parseCookies(req.headers.cookie);
+  return cookies[AUTH_COOKIE_NAME];
 }
 
-function createAuthMetadataRoutes({
-  app,
-  baseUrl,
-  authkitIssuer,
-}: {
-  app: ReturnType<typeof createMcpExpressApp>;
-  baseUrl: string;
-  authkitIssuer: string;
-}) {
-  app.get("/.well-known/oauth-protected-resource", (_req, res) => {
-    res.json({
-      resource: baseUrl,
-      authorization_servers: [authkitIssuer],
-      bearer_methods_supported: ["header"],
-    });
-  });
-
-  app.get("/.well-known/oauth-authorization-server", async (_req, res) => {
-    const response = await fetch(
-      `${authkitIssuer}/.well-known/oauth-authorization-server`,
-    );
-    const metadata = await response.json();
-    res.json(metadata);
-  });
-
-  return (_req: Request, _res: Response, next: () => void) => next();
-}
-
-function authkitBearerAuth({
-  baseUrl,
-  authkitIssuer,
+function jwtAuthMiddleware({
+  mainUrl,
   allowAnonymous,
 }: {
-  baseUrl: string;
-  authkitIssuer: string;
+  mainUrl: string;
   allowAnonymous?: boolean;
 }) {
-  const jwks = createRemoteJWKSet(new URL(`${authkitIssuer}/oauth2/jwks`));
-  const resourceMetadata = new URL(
-    "/.well-known/oauth-protected-resource",
-    baseUrl,
-  ).toString();
-  const wwwAuthenticate = [
-    'Bearer error="unauthorized"',
-    'error_description="Authorization needed"',
-    `resource_metadata="${resourceMetadata}"`,
-  ].join(", ");
-
   return async (req: Request, res: Response, next: () => void) => {
-    const token = extractBearerToken(req.headers.authorization);
+    const token = getAuthToken(req);
     if (!token) {
       if (allowAnonymous) {
         next();
         return;
       }
-      res
-        .set("WWW-Authenticate", wwwAuthenticate)
-        .status(401)
-        .json({ error: "No token provided." });
+      if (acceptsJson(req)) {
+        res.status(401).json({ error: "No token provided." });
+        return;
+      }
+      res.redirect(302, mainUrl);
       return;
     }
 
-    try {
-      await jwtVerify(token, jwks, { issuer: authkitIssuer });
+    const result = await validateJwt(token);
+    if (result.valid) {
       next();
-    } catch {
-      res
-        .set("WWW-Authenticate", wwwAuthenticate)
-        .status(401)
-        .json({ error: "Invalid bearer token." });
+      return;
     }
+
+    if (acceptsJson(req)) {
+      res.status(401).json({ error: "Invalid token.", detail: result.error });
+      return;
+    }
+    res.redirect(302, mainUrl);
   };
+}
+
+function acceptsJson(req: Request): boolean {
+  const accept = req.headers.accept ?? "";
+  return accept.includes("application/json") || req.headers.authorization !== undefined;
 }

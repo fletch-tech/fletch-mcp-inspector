@@ -49,7 +49,7 @@ import {
   createServerTunnel,
   getServerTunnel,
 } from "@/lib/apis/mcp-tunnels-api";
-import { useAuth } from "@workos-inc/authkit-react";
+import { useAuth } from "@/lib/auth/jwt-auth-context";
 import { useConvexAuth } from "convex/react";
 import { HOSTED_MODE } from "@/lib/config";
 import { ShareServerDialog } from "./ShareServerDialog";

@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { useAuth } from "@workos-inc/authkit-react";
+import { useAuth } from "@/lib/auth/jwt-auth-context";
 import { useConvexAuth, useQuery } from "convex/react";
 import {
   DropdownMenu,
@@ -44,11 +44,10 @@ export function SidebarUser() {
     isAuthenticated,
   });
 
-  // Prefer convexUser name (can be edited) over WorkOS user name
-  const workOsName = user
+  const authName = user
     ? [user.firstName, user.lastName].filter(Boolean).join(" ")
     : "";
-  const displayName = convexUser?.name || workOsName || "User";
+  const displayName = convexUser?.name || authName || "User";
   const email = user?.email ?? "";
   const initials = getInitials(displayName);
 

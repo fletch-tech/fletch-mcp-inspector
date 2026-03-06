@@ -21,10 +21,15 @@ An MCP App that serves cocktail recipes with a React UI widget and Convex-backed
 
 ## Getting Started
 
+1. Copy `.env.example` to `.env.local` and set at least `MAIN_URL`, `CONVEX_URL`, and JWT config (`JWT_ISSUER` and either `JWT_JWKS_URL` or `AWS_REGION` + `USER_POOL_ID` for Cognito). See [docs/SELF_AUTH_PLAN.md](docs/SELF_AUTH_PLAN.md) for auth flow.
+2. In the Convex dashboard, set the same JWT env vars for the Convex deployment (`JWT_ISSUER`, `JWT_JWKS_URL` or `AWS_REGION` + `USER_POOL_ID`, and optionally `JWT_AUDIENCE`).
+
 ```bash
 npm install
 npm run dev
 ```
+
+**Landing URL (from main app):** Send users to `GET /auth/landing?token=<base64(jwt)>` so the server can validate the token, set the auth cookie, and redirect to the app.
 
 ## How It Works
 

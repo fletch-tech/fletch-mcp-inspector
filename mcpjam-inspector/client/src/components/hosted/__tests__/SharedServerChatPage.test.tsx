@@ -23,7 +23,7 @@ vi.mock("convex/react", () => ({
   useMutation: () => mockResolveShareForViewer,
 }));
 
-vi.mock("@workos-inc/authkit-react", () => ({
+vi.mock("@/lib/auth/jwt-auth-context", () => ({
   useAuth: () => ({
     getAccessToken: mockGetAccessToken,
   }),

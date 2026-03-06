@@ -25,7 +25,7 @@ import { LoggerView } from "./logger-view";
 import { useJsonRpcPanelVisibility } from "@/hooks/use-json-rpc-panel";
 import { Skeleton } from "./ui/skeleton";
 import { useConvexAuth } from "convex/react";
-import { useAuth } from "@workos-inc/authkit-react";
+import { useAuth } from "@/lib/auth/jwt-auth-context";
 import { Workspace } from "@/state/app-types";
 import { useWorkspaceServers as useRemoteWorkspaceServers } from "@/hooks/useWorkspaces";
 import {

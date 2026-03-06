@@ -8,13 +8,15 @@ import {
   isPostHogDisabled,
 } from "./lib/PosthogUtils.js";
 import { PostHogProvider } from "posthog-js/react";
-import { AuthKitProvider, useAuth } from "@workos-inc/authkit-react";
-import { ConvexReactClient } from "convex/react";
-import { ConvexProviderWithAuthKit } from "@convex-dev/workos";
+import { ConvexReactClient, ConvexProviderWithAuth } from "convex/react";
 import { initSentry } from "./lib/sentry.js";
 import { IframeRouterError } from "./components/IframeRouterError.jsx";
 import { initializeSessionToken } from "./lib/session-token.js";
 import { HOSTED_MODE } from "./lib/config";
+import {
+  JwtAuthProvider,
+  useConvexJwtAuth,
+} from "./lib/auth/jwt-auth-context.js";
 
 // Initialize Sentry before React mounts
 initSentry();
@@ -41,82 +43,23 @@ if (isInIframe) {
   );
 } else {
   const convexUrl = import.meta.env.VITE_CONVEX_URL as string;
-  const workosClientId = import.meta.env.VITE_WORKOS_CLIENT_ID as string;
-  const workosDevMode = (() => {
-    const explicit = import.meta.env.VITE_WORKOS_DEV_MODE as string | undefined;
-    if (explicit === "true") return true;
-    if (explicit === "false") return false;
-    if (import.meta.env.DEV) return true;
-    // Match SDK default: enable devMode on localhost so refresh tokens
-    // persist in localStorage across hard refreshes for local prod builds.
-    return (
-      location.hostname === "localhost" || location.hostname === "127.0.0.1"
-    );
-  })();
+  const mainUrl =
+    (import.meta.env.VITE_MAIN_URL as string) || "http://localhost:3001";
 
-  // Compute redirect URI safely across environments
-  const workosRedirectUri = (() => {
-    const envRedirect =
-      (import.meta.env.VITE_WORKOS_REDIRECT_URI as string) || undefined;
-    if (typeof window === "undefined") return envRedirect ?? "/callback";
-    const isBrowserHttp =
-      window.location.protocol === "http:" ||
-      window.location.protocol === "https:";
-    if (isBrowserHttp) return `${window.location.origin}/callback`;
-    if (envRedirect) return envRedirect;
-    if ((window as any)?.isElectron) return "mcpjam://oauth/callback";
-    return `${window.location.origin}/callback`;
-  })();
-
-  // Warn if critical env vars are missing
   if (!convexUrl) {
     console.warn(
       "[main] VITE_CONVEX_URL is not set; Convex features may not work.",
     );
   }
-  if (!workosClientId) {
-    console.warn(
-      "[main] VITE_WORKOS_CLIENT_ID is not set; authentication will not work.",
-    );
-  }
-
-  const workosClientOptions = (() => {
-    const envApiHostname = import.meta.env.VITE_WORKOS_API_HOSTNAME as
-      | string
-      | undefined;
-    if (envApiHostname) {
-      return { apiHostname: envApiHostname };
-    }
-
-    // Dev mode: proxy through Vite dev server to avoid CORS
-    if (typeof window === "undefined") return {};
-    const disableProxy =
-      (import.meta.env.VITE_WORKOS_DISABLE_LOCAL_PROXY as
-        | string
-        | undefined) === "true";
-    if (!import.meta.env.DEV || disableProxy) return {};
-    const { protocol, hostname, port } = window.location;
-    const parsedPort = port ? Number(port) : undefined;
-    return {
-      apiHostname: hostname,
-      https: protocol === "https:",
-      ...(parsedPort ? { port: parsedPort } : {}),
-    };
-  })();
 
   const convex = new ConvexReactClient(convexUrl);
 
   const Providers = (
-    <AuthKitProvider
-      clientId={workosClientId}
-      redirectUri={workosRedirectUri}
-      devMode={workosDevMode}
-      {...workosClientOptions}
-    >
-      <ConvexProviderWithAuthKit client={convex} useAuth={useAuth}>
+    <JwtAuthProvider mainUrl={mainUrl}>
+      <ConvexProviderWithAuth client={convex} useAuth={useConvexJwtAuth}>
         <App />
-      </ConvexProviderWithAuthKit>
-    </AuthKitProvider>
+      </ConvexProviderWithAuth>
+    </JwtAuthProvider>
   );
 
   // Async bootstrap to initialize session token before rendering

@@ -22,4 +22,11 @@ export default defineWorkspace([
       root: "./shared",
     },
   },
+  {
+    extends: "./convex/vitest.config.ts",
+    test: {
+      name: "convex",
+      root: "./convex",
+    },
+  },
 ]);

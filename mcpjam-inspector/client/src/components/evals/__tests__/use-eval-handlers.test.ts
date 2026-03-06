@@ -21,7 +21,7 @@ vi.mock("@/lib/session-token", () => ({
 
 // Mock useAuth
 const mockGetAccessToken = vi.fn();
-vi.mock("@workos-inc/authkit-react", () => ({
+vi.mock("@/lib/auth/jwt-auth-context", () => ({
   useAuth: () => ({
     getAccessToken: mockGetAccessToken,
   }),

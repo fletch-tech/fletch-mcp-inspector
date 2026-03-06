@@ -1,6 +1,6 @@
 import { useRef, useState } from "react";
-import { useAuth } from "@workos-inc/authkit-react";
-import { useAction, useMutation, useQuery } from "convex/react";
+import { useAuth } from "@/lib/auth/jwt-auth-context";
+import { useMutation, useQuery } from "convex/react";
 import { Button } from "@/components/ui/button";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { EditableText } from "@/components/ui/editable-text";
@@ -15,7 +15,7 @@ export function ProfileTab() {
 
   const { profilePictureUrl } = useProfilePicture();
   const convexUser = useQuery("users:getCurrentUser" as any);
-  const generateUploadUrl = useAction(
+  const generateUploadUrl = useMutation(
     "users:generateProfilePictureUploadUrl" as any,
   );
   const updateProfilePicture = useMutation("users:updateProfilePicture" as any);
@@ -92,7 +92,7 @@ export function ProfileTab() {
     );
   }
 
-  // Prefer convexUser name (can be edited) over WorkOS user name
+  // Prefer convexUser name (can be edited) over auth provider user name
   const displayName =
     convexUser?.name ||
     [user.firstName, user.lastName].filter(Boolean).join(" ") ||

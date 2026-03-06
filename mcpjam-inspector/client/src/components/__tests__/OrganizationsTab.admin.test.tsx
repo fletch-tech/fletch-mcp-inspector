@@ -17,7 +17,7 @@ const mockRemoveMember = vi.fn();
 const mockGenerateLogoUploadUrl = vi.fn();
 const mockUpdateOrganizationLogo = vi.fn();
 
-vi.mock("@workos-inc/authkit-react", () => ({
+vi.mock("@/lib/auth/jwt-auth-context", () => ({
   useAuth: (...args: unknown[]) => mockUseAuth(...args),
 }));
 

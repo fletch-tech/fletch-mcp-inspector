@@ -1,17 +1,15 @@
-import { useAuth } from "@workos-inc/authkit-react";
+import { useAuth } from "@/lib/auth/jwt-auth-context";
 import { useQuery } from "convex/react";
 
 /**
  * Centralized hook for getting the current user's profile picture URL.
- * Uses custom uploaded picture from Convex if available, otherwise falls back to WorkOS.
+ * Uses custom uploaded picture from Convex if available.
  */
 export function useProfilePicture() {
   const { user } = useAuth();
   const convexUser = useQuery("users:getCurrentUser" as any);
 
-  // Priority: Custom uploaded picture > WorkOS picture > undefined
-  const profilePictureUrl =
-    convexUser?.profilePictureUrl || user?.profilePictureUrl || undefined;
+  const profilePictureUrl = convexUser?.profilePictureUrl || undefined;
 
   return {
     profilePictureUrl,

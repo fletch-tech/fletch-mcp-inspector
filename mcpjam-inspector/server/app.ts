@@ -34,6 +34,7 @@ import {
 } from "./middleware/session-auth.js";
 import { originValidationMiddleware } from "./middleware/origin-validation.js";
 import { securityHeadersMiddleware } from "./middleware/security-headers.js";
+import { validateJwt } from "./auth/jwt.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -137,6 +138,41 @@ export function createHonoApp() {
   app.use("*", async (c, next) => {
     c.mcpClientManager = mcpClientManager;
     await next();
+  });
+
+  // ===== AUTH LANDING ROUTE =====
+  // Must be before session auth middleware so unauthenticated users can hit it.
+  // Validates JWT from URL (?token=<base64(jwt)>), stores in cookie, redirects to app root.
+  const mainUrl = process.env.MAIN_URL;
+  app.get("/auth/landing", async (c) => {
+    const tokenParam = c.req.query("token");
+    if (!tokenParam) {
+      return mainUrl ? c.redirect(mainUrl, 302) : c.text("Missing token", 400);
+    }
+
+    let rawJwt: string;
+    try {
+      rawJwt = Buffer.from(tokenParam, "base64url").toString("utf8");
+      if (!rawJwt.includes(".")) rawJwt = tokenParam;
+    } catch {
+      rawJwt = tokenParam;
+    }
+
+    const result = await validateJwt(rawJwt);
+    if (!result.valid) {
+      appLogger.warn(`[auth/landing] Invalid token: ${result.error}`);
+      return mainUrl ? c.redirect(mainUrl, 302) : c.text("Invalid token", 401);
+    }
+
+    const maxAge = result.claims.exp
+      ? Math.max(0, result.claims.exp - Math.floor(Date.now() / 1000))
+      : 3600;
+
+    c.header(
+      "Set-Cookie",
+      `auth_token=${rawJwt}; HttpOnly; SameSite=Lax; Max-Age=${maxAge}; Path=/`,
+    );
+    return c.redirect("/", 302);
   });
 
   // ===== SECURITY MIDDLEWARE STACK =====

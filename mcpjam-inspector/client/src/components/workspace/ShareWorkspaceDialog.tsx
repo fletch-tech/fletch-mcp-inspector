@@ -22,7 +22,7 @@ import {
 import { useConvexAuth } from "convex/react";
 import { useProfilePicture } from "@/hooks/useProfilePicture";
 import { serializeServersForSharing } from "@/lib/workspace-serialization";
-import { User } from "@workos-inc/authkit-js";
+import { type User } from "@/lib/auth/jwt-auth-context";
 interface ShareWorkspaceDialogProps {
   isOpen: boolean;
   onClose: () => void;

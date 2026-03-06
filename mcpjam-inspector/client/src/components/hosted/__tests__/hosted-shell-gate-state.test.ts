@@ -8,34 +8,34 @@ describe("resolveHostedShellGateState", () => {
         hostedMode: false,
         isConvexAuthLoading: false,
         isConvexAuthenticated: false,
-        isWorkOsLoading: false,
-        hasWorkOsUser: false,
+        isAuthProviderLoading: false,
+        hasAuthUser: false,
         isLoadingRemoteWorkspaces: false,
       }),
     ).toBe("ready");
   });
 
-  it("returns auth-loading while WorkOS is still loading", () => {
+  it("returns auth-loading while auth provider is still loading", () => {
     expect(
       resolveHostedShellGateState({
         hostedMode: true,
         isConvexAuthLoading: false,
         isConvexAuthenticated: false,
-        isWorkOsLoading: true,
-        hasWorkOsUser: false,
+        isAuthProviderLoading: true,
+        hasAuthUser: false,
         isLoadingRemoteWorkspaces: false,
       }),
     ).toBe("auth-loading");
   });
 
-  it("returns auth-loading when WorkOS user exists but Convex auth has not settled", () => {
+  it("returns auth-loading when auth user exists but Convex auth has not settled", () => {
     expect(
       resolveHostedShellGateState({
         hostedMode: true,
         isConvexAuthLoading: false,
         isConvexAuthenticated: false,
-        isWorkOsLoading: false,
-        hasWorkOsUser: true,
+        isAuthProviderLoading: false,
+        hasAuthUser: true,
         isLoadingRemoteWorkspaces: false,
       }),
     ).toBe("auth-loading");
@@ -47,8 +47,8 @@ describe("resolveHostedShellGateState", () => {
         hostedMode: true,
         isConvexAuthLoading: false,
         isConvexAuthenticated: false,
-        isWorkOsLoading: false,
-        hasWorkOsUser: false,
+        isAuthProviderLoading: false,
+        hasAuthUser: false,
         isLoadingRemoteWorkspaces: false,
       }),
     ).toBe("logged-out");
@@ -60,8 +60,8 @@ describe("resolveHostedShellGateState", () => {
         hostedMode: true,
         isConvexAuthLoading: false,
         isConvexAuthenticated: true,
-        isWorkOsLoading: false,
-        hasWorkOsUser: true,
+        isAuthProviderLoading: false,
+        hasAuthUser: true,
         isLoadingRemoteWorkspaces: true,
       }),
     ).toBe("workspace-loading");
@@ -73,8 +73,8 @@ describe("resolveHostedShellGateState", () => {
         hostedMode: true,
         isConvexAuthLoading: false,
         isConvexAuthenticated: true,
-        isWorkOsLoading: false,
-        hasWorkOsUser: true,
+        isAuthProviderLoading: false,
+        hasAuthUser: true,
         isLoadingRemoteWorkspaces: false,
       }),
     ).toBe("ready");

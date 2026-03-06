@@ -1,10 +1,10 @@
 import { useEffect, useRef } from "react";
 import { useMutation, useConvexAuth } from "convex/react";
-import { useAuth } from "@workos-inc/authkit-react";
+import { useAuth } from "@/lib/auth/jwt-auth-context";
 import * as Sentry from "@sentry/react";
 
 /**
- * Ensure the authenticated WorkOS user has a row in Convex `users`.
+ * Ensure the authenticated user has a row in Convex `users`.
  * - Runs only after Convex auth is established
  * - Idempotent and re-runs when the authenticated user changes
  */
@@ -24,19 +24,23 @@ export function useEnsureDbUser() {
 
   useEffect(() => {
     if (isLoading) return;
-    // WorkOS user hydration can briefly lead Convex auth. This is expected
-    // during callback completion; wait for isAuthenticated instead of throwing.
+    // Auth provider hydration can briefly lead Convex auth. Wait for
+    // isAuthenticated before proceeding.
     if (!isAuthenticated) return;
     if (!user) return;
 
-    // Only (re)ensure when the authenticated WorkOS user changes.
+    // Only (re)ensure when the authenticated user changes.
     if (lastEnsuredUserIdRef.current === user.id) return;
 
-    ensureUser()
+    const fullName = [user.firstName, user.lastName]
+      .filter(Boolean)
+      .join(" ");
+    ensureUser({
+      email: user.email || undefined,
+      name: fullName || undefined,
+    })
       .then((id: string | null) => {
-        // eslint-disable-next-line no-console
         lastEnsuredUserIdRef.current = user.id;
-        // Set Sentry user context for error tracking
         Sentry.setUser({ id: user.id });
       })
       .catch((err: unknown) => {

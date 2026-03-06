@@ -4,8 +4,8 @@ interface ResolveHostedShellGateStateOptions {
   hostedMode: boolean;
   isConvexAuthLoading: boolean;
   isConvexAuthenticated: boolean;
-  isWorkOsLoading: boolean;
-  hasWorkOsUser: boolean;
+  isAuthProviderLoading: boolean;
+  hasAuthUser: boolean;
   isLoadingRemoteWorkspaces: boolean;
 }
 
@@ -13,8 +13,8 @@ export function resolveHostedShellGateState({
   hostedMode,
   isConvexAuthLoading,
   isConvexAuthenticated,
-  isWorkOsLoading,
-  hasWorkOsUser,
+  isAuthProviderLoading,
+  hasAuthUser,
   isLoadingRemoteWorkspaces,
 }: ResolveHostedShellGateStateOptions): HostedShellGateState {
   if (!hostedMode) {
@@ -22,14 +22,14 @@ export function resolveHostedShellGateState({
   }
 
   const isAuthSettling =
-    isWorkOsLoading ||
+    isAuthProviderLoading ||
     isConvexAuthLoading ||
-    (hasWorkOsUser && !isConvexAuthenticated);
+    (hasAuthUser && !isConvexAuthenticated);
   if (isAuthSettling) {
     return "auth-loading";
   }
 
-  if (!hasWorkOsUser && !isConvexAuthenticated) {
+  if (!hasAuthUser && !isConvexAuthenticated) {
     return "logged-out";
   }
 

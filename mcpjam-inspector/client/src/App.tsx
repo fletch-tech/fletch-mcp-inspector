@@ -1,6 +1,6 @@
 import { useConvexAuth, useQuery } from "convex/react";
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { useAuth } from "@workos-inc/authkit-react";
+import { useAuth } from "@/lib/auth/jwt-auth-context";
 import { toast } from "sonner";
 import { ServersTab } from "./components/ServersTab";
 import { ToolsTab } from "./components/ToolsTab";
@@ -25,7 +25,6 @@ import { SidebarInset, SidebarProvider } from "./components/ui/sidebar";
 import { useAppState } from "./hooks/use-app-state";
 import { PreferencesStoreProvider } from "./stores/preferences/preferences-provider";
 import { Toaster } from "./components/ui/sonner";
-import { useElectronOAuth } from "./hooks/useElectronOAuth";
 import { useEnsureDbUser } from "./hooks/useEnsureDbUser";
 import { usePostHog } from "posthog-js/react";
 import { usePostHogIdentify } from "./hooks/usePostHogIdentify";
@@ -40,7 +39,6 @@ import {
   getInitialThemePreset,
   updateThemePreset,
 } from "./lib/theme-utils";
-import CompletingSignInLoading from "./components/CompletingSignInLoading";
 import LoadingScreen from "./components/LoadingScreen";
 import { Header } from "./components/Header";
 import { ThemePreset } from "./types/preferences/theme";
@@ -59,10 +57,8 @@ import { HOSTED_MODE } from "./lib/config";
 import { resolveHostedNavigation } from "./lib/hosted-navigation";
 import { buildOAuthTokensByServerId } from "./lib/oauth/oauth-tokens";
 import {
-  clearSharedSignInReturnPath,
   hasActiveSharedSession,
   readSharedServerSession,
-  readSharedSignInReturnPath,
   slugify,
   SHARED_OAUTH_PENDING_KEY,
   writeSharedSignInReturnPath,
@@ -77,14 +73,12 @@ export default function App() {
     string | undefined
   >(undefined);
   const [chatHasMessages, setChatHasMessages] = useState(false);
-  const [callbackCompleted, setCallbackCompleted] = useState(false);
-  const [callbackRecoveryExpired, setCallbackRecoveryExpired] = useState(false);
   const posthog = usePostHog();
   const {
     getAccessToken,
     signIn,
-    user: workOsUser,
-    isLoading: isWorkOsLoading,
+    user: authUser,
+    isLoading: isAuthProviderLoading,
   } = useAuth();
   const { isAuthenticated, isLoading: isAuthLoading } = useConvexAuth();
   const convexUser = useQuery(
@@ -162,39 +156,11 @@ export default function App() {
     updateThemePreset(initialThemePreset);
   }, []);
 
-  // Set up Electron OAuth callback handling
-  useElectronOAuth();
-  // Ensure a `users` row exists after Convex auth
   useEnsureDbUser();
 
   const isDebugCallback = window.location.pathname.startsWith(
     "/oauth/callback/debug",
   );
-  const isOAuthCallback = window.location.pathname === "/callback";
-
-  useEffect(() => {
-    if (!isOAuthCallback) {
-      setCallbackCompleted(false);
-      setCallbackRecoveryExpired(false);
-      return;
-    }
-
-    // Let AuthKit + Convex auth settle before leaving /callback.
-    if (!isAuthLoading && isAuthenticated) {
-      const sharedReturnPath = readSharedSignInReturnPath();
-      clearSharedSignInReturnPath();
-      window.history.replaceState({}, "", sharedReturnPath ?? "/");
-      setCallbackCompleted(true);
-      setCallbackRecoveryExpired(false);
-      return;
-    }
-
-    const timeout = setTimeout(() => {
-      setCallbackRecoveryExpired(true);
-    }, 15000);
-
-    return () => clearTimeout(timeout);
-  }, [isOAuthCallback, isAuthLoading, isAuthenticated]);
 
   const {
     appState,
@@ -398,39 +364,6 @@ export default function App() {
     return <LoadingScreen />;
   }
 
-  if (isOAuthCallback && !callbackCompleted) {
-    if (callbackRecoveryExpired) {
-      return (
-        <div
-          className="flex min-h-screen flex-col items-center justify-center gap-4 p-6 text-center"
-          data-testid="callback-auth-timeout"
-        >
-          <p className="text-sm text-muted-foreground">
-            Sign-in is taking longer than expected.
-          </p>
-          <div className="flex gap-2">
-            <button
-              type="button"
-              className="rounded bg-primary px-4 py-2 text-sm font-medium text-primary-foreground"
-              onClick={() => signIn()}
-            >
-              Try sign in again
-            </button>
-            <button
-              type="button"
-              className="rounded border px-4 py-2 text-sm font-medium"
-              onClick={() => window.location.reload()}
-            >
-              Reload
-            </button>
-          </div>
-        </div>
-      );
-    }
-
-    return <CompletingSignInLoading />;
-  }
-
   if (isLoading && !isSharedChatRoute) {
     return <LoadingScreen />;
   }
@@ -439,16 +372,16 @@ export default function App() {
     hostedMode: HOSTED_MODE,
     isConvexAuthLoading: isAuthLoading,
     isConvexAuthenticated: isAuthenticated,
-    isWorkOsLoading,
-    hasWorkOsUser: !!workOsUser,
+    isAuthProviderLoading,
+    hasAuthUser: !!authUser,
     isLoadingRemoteWorkspaces,
   });
   const sharedHostedShellGateState = resolveHostedShellGateState({
     hostedMode: HOSTED_MODE,
     isConvexAuthLoading: isAuthLoading,
     isConvexAuthenticated: isAuthenticated,
-    isWorkOsLoading,
-    hasWorkOsUser: !!workOsUser,
+    isAuthProviderLoading,
+    hasAuthUser: !!authUser,
     isLoadingRemoteWorkspaces: false,
   });
 

@@ -6,7 +6,7 @@ import { ShareWorkspaceDialog } from "./ShareWorkspaceDialog";
 import { useWorkspaceMembers } from "@/hooks/useWorkspaces";
 import { useProfilePicture } from "@/hooks/useProfilePicture";
 import { cn } from "@/lib/utils";
-import { User } from "@workos-inc/authkit-js";
+import { type User } from "@/lib/auth/jwt-auth-context";
 import { usePostHog } from "posthog-js/react";
 import { detectEnvironment, detectPlatform } from "@/lib/PosthogUtils";
 

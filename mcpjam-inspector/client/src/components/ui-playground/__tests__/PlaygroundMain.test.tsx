@@ -106,7 +106,7 @@ vi.mock("@/lib/PosthogUtils", () => ({
 }));
 
 // Mock authkit
-vi.mock("@workos-inc/authkit-react", () => ({
+vi.mock("@/lib/auth/jwt-auth-context", () => ({
   useAuth: () => ({
     signUp: vi.fn(),
     user: { id: "test-user" },

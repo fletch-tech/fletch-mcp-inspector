@@ -8,7 +8,7 @@
  * - Referrer-Policy: Controls referrer information
  *
  * Note: CSP is intentionally not included as the app integrates with many
- * external services (WorkOS, PostHog, Sentry, Convex, MCP servers with OAuth)
+ * external services (PostHog, Sentry, Convex, MCP servers with OAuth)
  * that make a restrictive CSP impractical. The primary security controls are
  * session token authentication and origin validation.
  */

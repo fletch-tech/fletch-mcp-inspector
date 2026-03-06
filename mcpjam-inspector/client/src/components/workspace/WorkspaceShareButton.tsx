@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { Users } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { useAuth } from "@workos-inc/authkit-react";
+import { useAuth } from "@/lib/auth/jwt-auth-context";
 import { useConvexAuth } from "convex/react";
 import { ShareWorkspaceDialog } from "./ShareWorkspaceDialog";
 import { usePostHog } from "posthog-js/react";
