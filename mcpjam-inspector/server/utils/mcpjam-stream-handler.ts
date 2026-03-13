@@ -36,6 +36,10 @@ import {
   type ToolDefinition,
 } from "./mcpjam-tool-helpers";
 import { logger } from "./logger";
+import {
+  CONVEX_HTTP_URL,
+  getConvexServerAuthHeaders,
+} from "../config.js";
 
 const MAX_STEPS = 20;
 
@@ -621,10 +625,11 @@ async function processOneStep(
   );
 
   // Call Convex /stream endpoint
-  const res = await fetch(`${process.env.CONVEX_HTTP_URL}/stream`, {
+  const res = await fetch(`${CONVEX_HTTP_URL}/stream`, {
     method: "POST",
     headers: {
       "content-type": "application/json",
+      ...getConvexServerAuthHeaders(),
       ...(authHeader ? { authorization: authHeader } : {}),
     },
     body: JSON.stringify({

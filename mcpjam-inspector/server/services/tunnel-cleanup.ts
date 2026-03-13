@@ -1,4 +1,8 @@
 import log from "electron-log";
+import {
+  CONVEX_HTTP_URL,
+  getConvexServerAuthHeaders,
+} from "../config.js";
 
 /**
  * Cleanup all orphaned tunnels for the current user
@@ -7,9 +11,8 @@ import log from "electron-log";
 export async function cleanupOrphanedTunnels(
   authHeader?: string,
 ): Promise<void> {
-  const convexUrl = process.env.CONVEX_HTTP_URL;
-  if (!convexUrl) {
-    log.warn("CONVEX_HTTP_URL not configured, skipping tunnel cleanup");
+  if (!CONVEX_HTTP_URL) {
+    log.warn("Convex not configured, skipping tunnel cleanup");
     return;
   }
 
@@ -24,11 +27,12 @@ export async function cleanupOrphanedTunnels(
 
     const headers: Record<string, string> = {
       "Content-Type": "application/json",
+      ...getConvexServerAuthHeaders(),
       Authorization: authHeader,
     };
 
     // Call the cleanup endpoint
-    const response = await fetch(`${convexUrl}/tunnels/cleanup-orphaned`, {
+    const response = await fetch(`${CONVEX_HTTP_URL}/tunnels/cleanup-orphaned`, {
       method: "POST",
       headers,
     });

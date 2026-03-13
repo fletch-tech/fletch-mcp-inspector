@@ -112,3 +112,30 @@ export const ALLOWED_HOSTS = process.env.MCPJAM_ALLOWED_HOSTS
       h.trim().toLowerCase(),
     )
   : [];
+
+// ── Convex (self-hosted or cloud) ────────────────────────────────────────
+
+/** Effective Convex HTTP URL: CONVEX_SELF_HOSTED_URL if set, else CONVEX_HTTP_URL. Used for server-side fetch to Convex. */
+export const CONVEX_HTTP_URL =
+  process.env.CONVEX_SELF_HOSTED_URL?.trim() ||
+  process.env.CONVEX_HTTP_URL?.trim() ||
+  "";
+
+/** When using self-hosted Convex, optional admin key for server-to-server auth (Bearer). */
+export const CONVEX_SELF_HOSTED_ADMIN_KEY =
+  process.env.CONVEX_SELF_HOSTED_ADMIN_KEY?.trim() || "";
+
+/**
+ * Headers to send for server-to-server Convex requests when using self-hosted with an admin key.
+ * Merge with request headers; omit when not self-hosted or no admin key.
+ */
+export function getConvexServerAuthHeaders(): Record<string, string> {
+  if (!CONVEX_SELF_HOSTED_ADMIN_KEY) return {};
+  return { Authorization: `Bearer ${CONVEX_SELF_HOSTED_ADMIN_KEY}` };
+}
+
+/** True when Convex is configured (either CONVEX_HTTP_URL or CONVEX_SELF_HOSTED_URL). */
+export const HAS_CONVEX = CONVEX_HTTP_URL.length > 0;
+
+/** Same as CONVEX_HTTP_URL; used by ConvexHttpClient (evals) when CONVEX_URL is not set. */
+export const CONVEX_URL = process.env.CONVEX_URL?.trim() || CONVEX_HTTP_URL;

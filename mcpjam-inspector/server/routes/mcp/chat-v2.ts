@@ -117,9 +117,13 @@ chatV2.post("/", async (c) => {
 
     // MCPJam-provided models: delegate to stream handler
     if (modelDefinition.id && isMCPJamProvidedModel(modelDefinition.id)) {
-      if (!process.env.CONVEX_HTTP_URL) {
+      const { CONVEX_HTTP_URL } = await import("../../config.js");
+      if (!CONVEX_HTTP_URL) {
         return c.json(
-          { error: "Server missing CONVEX_HTTP_URL configuration" },
+          {
+            error:
+              "Server missing Convex configuration (CONVEX_SELF_HOSTED_URL or CONVEX_HTTP_URL)",
+          },
           500,
         );
       }

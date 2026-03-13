@@ -23,19 +23,19 @@ models.get("/", async (c) => {
       );
     }
 
-    const convexHttpUrl = process.env.CONVEX_HTTP_URL;
-    if (!convexHttpUrl) {
+    const { CONVEX_HTTP_URL } = await import("../../config.js");
+    if (!CONVEX_HTTP_URL) {
       return c.json(
         {
           ok: false,
-          error: "Server missing CONVEX_HTTP_URL configuration",
+          error: "Server missing Convex configuration (CONVEX_SELF_HOSTED_URL or CONVEX_HTTP_URL)",
         },
         500,
       );
     }
 
     // Proxy the request to Convex backend with the same auth header
-    const response = await fetch(`${convexHttpUrl}/models`, {
+    const response = await fetch(`${CONVEX_HTTP_URL}/models`, {
       method: "GET",
       headers: {
         "Content-Type": "application/json",

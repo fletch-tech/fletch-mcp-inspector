@@ -30,6 +30,8 @@ const UNPROTECTED_ROUTES = [
   "/api/mcp/health", // Health check - no sensitive data
   "/api/apps/health", // Health check - no sensitive data
   "/api/session-token", // Token endpoint - protected by localhost check instead
+  "/api/convex-config", // Read-only Convex URL for verification - no sensitive data
+  "/api/mcp-cli-config", // Read-only MCP CLI config from env - no sensitive data; needed in hosted mode (no session token)
 ];
 
 /**

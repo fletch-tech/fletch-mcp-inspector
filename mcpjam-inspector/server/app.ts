@@ -1,6 +1,7 @@
 import { Hono } from "hono";
 import fixPath from "fix-path";
 import { cors } from "hono/cors";
+import { getCookie } from "hono/cookie";
 import { bodyLimit } from "hono/body-limit";
 import { logger } from "hono/logger";
 import { logger as appLogger } from "./utils/logger.js";
@@ -67,10 +68,12 @@ export function createHonoApp() {
 
   dotenv.config({ path: envPath });
 
-  // Validate required env vars
-  if (!process.env.CONVEX_HTTP_URL) {
+  // Validate required env vars (Convex: use CONVEX_SELF_HOSTED_URL or CONVEX_HTTP_URL)
+  const hasConvex =
+    (process.env.CONVEX_SELF_HOSTED_URL || process.env.CONVEX_HTTP_URL)?.trim();
+  if (!hasConvex) {
     throw new Error(
-      `CONVEX_HTTP_URL is required but not set. Tried loading from: ${envPath}\n` +
+      `Convex is required. Set CONVEX_SELF_HOSTED_URL or CONVEX_HTTP_URL. Tried loading from: ${envPath}\n` +
         `IS_PACKAGED=${process.env.IS_PACKAGED}, resourcesPath=${(process as any).resourcesPath}\n` +
         `File exists: ${existsSync(envPath)}`,
     );
@@ -320,6 +323,16 @@ export function createHonoApp() {
           );
           const warningScript = `<script>console.error("MCPJam: Access via allowed host required for full functionality");</script>`;
           html = html.replace("</head>", `${warningScript}</head>`);
+        }
+
+        // If user landed via /auth/landing?token=..., we set auth_token cookie and redirected here.
+        // Inject JWT so the client can store it in localStorage (client cannot read HttpOnly cookie).
+        if (isAllowedHost(host, ALLOWED_HOSTS, HOSTED_MODE)) {
+          const authCookie = getCookie(c, "auth_token");
+          if (authCookie) {
+            const jwtScript = `<script>window.__JWT_FROM_COOKIE__=${JSON.stringify(authCookie)};</script>`;
+            html = html.replace("</head>", `${jwtScript}</head>`);
+          }
         }
 
         return c.html(html);

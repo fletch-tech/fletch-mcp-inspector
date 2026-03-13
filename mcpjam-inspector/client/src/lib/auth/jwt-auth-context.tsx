@@ -11,6 +11,12 @@ import {
 const AUTH_TOKEN_KEY = "jwt_auth_token";
 const TOKEN_QUERY_PARAM = "token";
 
+declare global {
+  interface Window {
+    __JWT_FROM_COOKIE__?: string;
+  }
+}
+
 export interface JwtUser {
   id: string;
   email: string;
@@ -18,7 +24,7 @@ export interface JwtUser {
   lastName: string | null;
 }
 
-/** Alias for compatibility with components that typed against the WorkOS User shape */
+/** Alias for compatibility with components that expect an auth user shape */
 export type User = JwtUser;
 
 interface JwtAuthContextValue {
@@ -113,37 +119,105 @@ function clearStoredToken() {
 }
 
 /**
+ * Read JWT from server-injected window.__JWT_FROM_COOKIE__ (set when user landed via /auth/landing?token=...).
+ * Server sets HttpOnly cookie and redirects to /; we inject the token so the client can store it in localStorage.
+ */
+function consumeTokenFromCookie(): string | null {
+  if (typeof window === "undefined") return null;
+  const raw = window.__JWT_FROM_COOKIE__;
+  if (!raw || typeof raw !== "string") return null;
+  delete window.__JWT_FROM_COOKIE__;
+  const claims = decodeJwtPayload(raw);
+  if (!claims || isTokenExpired(claims)) return null;
+  if (!claimsToUser(claims)) return null;
+  storeToken(raw);
+  return raw;
+}
+
+/**
+ * Get token query param from both location.search and location.hash (some redirects put it in hash).
+ */
+function getTokenParamFromLocation(): string | null {
+  const fromSearch = new URLSearchParams(window.location.search).get(
+    TOKEN_QUERY_PARAM,
+  );
+  if (fromSearch) return fromSearch;
+  const hash = window.location.hash;
+  if (hash) {
+    const hashQuery = hash.indexOf("?");
+    if (hashQuery !== -1) {
+      return new URLSearchParams(hash.slice(hashQuery)).get(TOKEN_QUERY_PARAM);
+    }
+  }
+  return null;
+}
+
+/**
+ * Decode base64 or base64url string to raw JWT. atob needs padding for base64url.
+ */
+function decodeTokenParam(tokenParam: string): string {
+  const normalized = tokenParam.replace(/-/g, "+").replace(/_/g, "/");
+  try {
+    const padded =
+      normalized.length % 4 === 0
+        ? normalized
+        : normalized + "=".repeat(4 - (normalized.length % 4));
+    const decoded = atob(padded);
+    return decoded.includes(".") ? decoded : tokenParam;
+  } catch {
+    return tokenParam;
+  }
+}
+
+/**
  * Read `?token=<base64(jwt)>` from the URL, decode, validate, store,
  * then strip the param from the URL to avoid leaking it in history/logs.
  */
 function consumeTokenFromUrl(): string | null {
   if (typeof window === "undefined") return null;
-  const params = new URLSearchParams(window.location.search);
-  const tokenParam = params.get(TOKEN_QUERY_PARAM);
+  const tokenParam = getTokenParamFromLocation();
   if (!tokenParam) return null;
 
-  let rawJwt: string;
-  try {
-    rawJwt = atob(tokenParam.replace(/-/g, "+").replace(/_/g, "/"));
-    if (!rawJwt.includes(".")) rawJwt = tokenParam;
-  } catch {
-    rawJwt = tokenParam;
-  }
-
+  const rawJwt = decodeTokenParam(tokenParam);
   const claims = decodeJwtPayload(rawJwt);
-  if (!claims || isTokenExpired(claims)) return null;
 
-  // Reject tokens that don't contain a valid email address
-  if (!claimsToUser(claims)) return null;
+  if (!claims) {
+    console.warn(
+      "[Auth] Token in URL was ignored: invalid or malformed JWT (check encoding).",
+    );
+    return null;
+  }
+  if (isTokenExpired(claims)) {
+    console.warn("[Auth] Token in URL was ignored: expired.");
+    return null;
+  }
+  if (!claimsToUser(claims)) {
+    console.warn(
+      "[Auth] Token in URL was ignored: no valid email in claims (expected email, preferred_username, or cognito:username).",
+    );
+    return null;
+  }
 
   storeToken(rawJwt);
 
+  const params = new URLSearchParams(window.location.search);
   params.delete(TOKEN_QUERY_PARAM);
-  const remaining = params.toString();
+  const searchPart = params.toString();
+  let hashPart = window.location.hash;
+  if (hashPart && hashPart.includes("token=")) {
+    const hashIdx = hashPart.indexOf("?");
+    if (hashIdx !== -1) {
+      const hashParams = new URLSearchParams(hashPart.slice(hashIdx));
+      hashParams.delete(TOKEN_QUERY_PARAM);
+      const hashRest = hashParams.toString();
+      hashPart =
+        hashPart.slice(0, hashIdx) + (hashRest ? `?${hashRest}` : "");
+    }
+  }
   const newUrl =
     window.location.pathname +
-    (remaining ? `?${remaining}` : "") +
-    window.location.hash;
+    (searchPart ? `?${searchPart}` : "") +
+    hashPart;
   window.history.replaceState({}, "", newUrl);
 
   return rawJwt;
@@ -156,7 +230,11 @@ interface JwtAuthProviderProps {
 
 export function JwtAuthProvider({ mainUrl, children }: JwtAuthProviderProps) {
   const [token, setToken] = useState<string | null>(() => {
-    return consumeTokenFromUrl() ?? readStoredToken();
+    return (
+      consumeTokenFromUrl() ??
+      consumeTokenFromCookie() ??
+      readStoredToken()
+    );
   });
   const [isLoading, setIsLoading] = useState(true);
 

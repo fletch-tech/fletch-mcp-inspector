@@ -334,7 +334,7 @@ export function SharedServerChatPage({
           } catch (error) {
             if (cancelled) return;
             const message =
-              "OAuth preflight could not retrieve a WorkOS bearer token yet. Retrying...";
+              "OAuth preflight could not retrieve a bearer token yet. Retrying...";
             if (!warnedMissingToken) {
               console.error("[SharedServerChatPage] " + message, error);
               warnedMissingToken = true;
@@ -349,7 +349,7 @@ export function SharedServerChatPage({
 
           if (!token) {
             const message =
-              "OAuth preflight waiting for WorkOS bearer token. Retrying...";
+              "OAuth preflight waiting for bearer token. Retrying...";
             if (!warnedMissingToken) {
               console.warn("[SharedServerChatPage] " + message, {
                 workspaceId: session.payload.workspaceId,

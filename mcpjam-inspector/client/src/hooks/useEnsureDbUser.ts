@@ -40,13 +40,20 @@ export function useEnsureDbUser() {
       name: fullName || undefined,
     })
       .then((id: string | null) => {
-        lastEnsuredUserIdRef.current = user.id;
-        Sentry.setUser({ id: user.id });
+        if (id) {
+          lastEnsuredUserIdRef.current = user.id;
+          Sentry.setUser({ id: user.id });
+        } else {
+          // Convex returned null: no identity (JWT not validated) or no email in token
+          lastEnsuredUserIdRef.current = null;
+          console.warn(
+            "[auth] ensureUser returned null — user not synced to Convex. " +
+              "For self-hosted Convex, set JWT_ISSUER and JWT_JWKS_URL (or USER_POOL_ID + AWS_REGION) on the Convex backend so it can validate the same Cognito JWT.",
+          );
+        }
       })
       .catch((err: unknown) => {
-        // eslint-disable-next-line no-console
         console.error("[auth] ensureUser failed", err);
-        // allow retry next effect pass
         lastEnsuredUserIdRef.current = null;
       });
   }, [isAuthenticated, isLoading, user, ensureUser]);

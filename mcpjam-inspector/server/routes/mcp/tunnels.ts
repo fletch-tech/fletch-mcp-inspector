@@ -1,6 +1,10 @@
 import { Hono } from "hono";
 import { tunnelManager } from "../../services/tunnel-manager";
-import { LOCAL_SERVER_ADDR } from "../../config";
+import {
+  LOCAL_SERVER_ADDR,
+  CONVEX_HTTP_URL,
+  getConvexServerAuthHeaders,
+} from "../../config";
 import { cleanupOrphanedTunnels } from "../../services/tunnel-cleanup";
 import "../../types/hono";
 import { logger } from "../../utils/logger";
@@ -14,20 +18,20 @@ async function fetchNgrokToken(authHeader?: string): Promise<{
   domain: string;
   domainId: string;
 }> {
-  const convexUrl = process.env.CONVEX_HTTP_URL;
-  if (!convexUrl) {
-    throw new Error("CONVEX_HTTP_URL not configured");
+  if (!CONVEX_HTTP_URL) {
+    throw new Error("Convex not configured (CONVEX_SELF_HOSTED_URL or CONVEX_HTTP_URL)");
   }
 
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
+    ...getConvexServerAuthHeaders(),
   };
 
   if (authHeader) {
     headers["Authorization"] = authHeader;
   }
 
-  const response = await fetch(`${convexUrl}/tunnels/token`, {
+  const response = await fetch(`${CONVEX_HTTP_URL}/tunnels/token`, {
     method: "GET",
     headers,
   });
@@ -71,14 +75,14 @@ async function recordTunnel(
   domain?: string,
   authHeader?: string,
 ): Promise<void> {
-  const convexUrl = process.env.CONVEX_HTTP_URL;
-  if (!convexUrl) {
-    logger.warn("CONVEX_HTTP_URL not configured, skipping tunnel recording");
+  if (!CONVEX_HTTP_URL) {
+    logger.warn("Convex not configured, skipping tunnel recording");
     return;
   }
 
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
+    ...getConvexServerAuthHeaders(),
   };
 
   if (authHeader) {
@@ -86,7 +90,7 @@ async function recordTunnel(
   }
 
   try {
-    await fetch(`${convexUrl}/tunnels/record`, {
+    await fetch(`${CONVEX_HTTP_URL}/tunnels/record`, {
       method: "POST",
       headers,
       body: JSON.stringify({ serverId, url, credentialId, domainId, domain }),
@@ -102,13 +106,13 @@ async function reportTunnelClosure(
   serverId: string,
   authHeader?: string,
 ): Promise<void> {
-  const convexUrl = process.env.CONVEX_HTTP_URL;
-  if (!convexUrl) {
+  if (!CONVEX_HTTP_URL) {
     return;
   }
 
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
+    ...getConvexServerAuthHeaders(),
   };
 
   if (authHeader) {
@@ -116,7 +120,7 @@ async function reportTunnelClosure(
   }
 
   try {
-    await fetch(`${convexUrl}/tunnels/close`, {
+    await fetch(`${CONVEX_HTTP_URL}/tunnels/close`, {
       method: "POST",
       headers,
       body: JSON.stringify({ serverId }),
@@ -132,13 +136,13 @@ async function cleanupCredential(
   domainId?: string,
   authHeader?: string,
 ): Promise<void> {
-  const convexUrl = process.env.CONVEX_HTTP_URL;
-  if (!convexUrl) {
+  if (!CONVEX_HTTP_URL) {
     return;
   }
 
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
+    ...getConvexServerAuthHeaders(),
   };
 
   if (authHeader) {
@@ -146,7 +150,7 @@ async function cleanupCredential(
   }
 
   try {
-    await fetch(`${convexUrl}/tunnels/cleanup`, {
+    await fetch(`${CONVEX_HTTP_URL}/tunnels/cleanup`, {
       method: "POST",
       headers,
       body: JSON.stringify({ credentialId, domainId }),

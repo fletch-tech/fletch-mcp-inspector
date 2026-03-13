@@ -14,6 +14,10 @@ import { startSuiteRunWithRecorder } from "../../services/evals/recorder";
 import type { MCPClientManager } from "@mcpjam/sdk";
 import "../../types/hono";
 import { logger } from "../../utils/logger";
+import {
+  CONVEX_HTTP_URL as CONFIG_CONVEX_HTTP_URL,
+  CONVEX_URL as CONFIG_CONVEX_URL,
+} from "../../config.js";
 
 // Helper to compute config revision (same as in Convex)
 function normalizeForSignature(value: unknown): unknown {
@@ -176,14 +180,14 @@ evals.post("/run", async (c) => {
     const clientManager = c.mcpClientManager;
     const resolvedServerIds = resolveServerIdsOrThrow(serverIds, clientManager);
 
-    const convexUrl = process.env.CONVEX_URL;
+    const convexUrl = CONFIG_CONVEX_URL;
     if (!convexUrl) {
-      throw new Error("CONVEX_URL is not set");
+      throw new Error("Convex not configured (CONVEX_SELF_HOSTED_URL or CONVEX_HTTP_URL)");
     }
 
-    const convexHttpUrl = process.env.CONVEX_HTTP_URL;
+    const convexHttpUrl = CONFIG_CONVEX_HTTP_URL;
     if (!convexHttpUrl) {
-      throw new Error("CONVEX_HTTP_URL is not set");
+      throw new Error("Convex not configured (CONVEX_SELF_HOSTED_URL or CONVEX_HTTP_URL)");
     }
 
     const convexClient = new ConvexHttpClient(convexUrl);
@@ -477,14 +481,14 @@ evals.post("/run-test-case", async (c) => {
     const clientManager = c.mcpClientManager;
     const resolvedServerIds = resolveServerIdsOrThrow(serverIds, clientManager);
 
-    const convexUrl = process.env.CONVEX_URL;
+    const convexUrl = CONFIG_CONVEX_URL;
     if (!convexUrl) {
-      throw new Error("CONVEX_URL is not set");
+      throw new Error("Convex not configured (CONVEX_SELF_HOSTED_URL or CONVEX_HTTP_URL)");
     }
 
-    const convexHttpUrl = process.env.CONVEX_HTTP_URL;
+    const convexHttpUrl = CONFIG_CONVEX_HTTP_URL;
     if (!convexHttpUrl) {
-      throw new Error("CONVEX_HTTP_URL is not set");
+      throw new Error("Convex not configured (CONVEX_SELF_HOSTED_URL or CONVEX_HTTP_URL)");
     }
 
     const convexClient = new ConvexHttpClient(convexUrl);
@@ -576,9 +580,9 @@ evals.post("/cancel", async (c) => {
       return c.json({ error: "convexAuthToken is required" }, 401);
     }
 
-    const convexUrl = process.env.CONVEX_URL;
+    const convexUrl = CONFIG_CONVEX_URL;
     if (!convexUrl) {
-      throw new Error("CONVEX_URL is not set");
+      throw new Error("Convex not configured (CONVEX_SELF_HOSTED_URL or CONVEX_HTTP_URL)");
     }
 
     const convexClient = new ConvexHttpClient(convexUrl);
@@ -652,9 +656,9 @@ evals.post("/generate-tests", async (c) => {
       );
     }
 
-    const convexHttpUrl = process.env.CONVEX_HTTP_URL;
+    const convexHttpUrl = CONFIG_CONVEX_HTTP_URL;
     if (!convexHttpUrl) {
-      throw new Error("CONVEX_HTTP_URL is not set");
+      throw new Error("Convex not configured (CONVEX_SELF_HOSTED_URL or CONVEX_HTTP_URL)");
     }
 
     // Generate test cases using the agent
@@ -725,9 +729,9 @@ evals.post("/generate-negative-tests", async (c) => {
       );
     }
 
-    const convexHttpUrl = process.env.CONVEX_HTTP_URL;
+    const convexHttpUrl = CONFIG_CONVEX_HTTP_URL;
     if (!convexHttpUrl) {
-      throw new Error("CONVEX_HTTP_URL is not set");
+      throw new Error("Convex not configured (CONVEX_SELF_HOSTED_URL or CONVEX_HTTP_URL)");
     }
 
     // Generate negative test cases using the agent

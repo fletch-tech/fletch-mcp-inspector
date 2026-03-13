@@ -151,17 +151,22 @@ export async function countToolsTokens(
   modelId: string,
   logPrefix = "[tools]",
 ): Promise<number> {
-  const convexHttpUrl = process.env.CONVEX_HTTP_URL;
+  const { CONVEX_HTTP_URL, getConvexServerAuthHeaders } = await import(
+    "../config.js"
+  );
   const mappedModelId = mapModelIdToTokenizerBackend(modelId);
-  const useBackendTokenizer = mappedModelId !== null && !!convexHttpUrl;
+  const useBackendTokenizer = mappedModelId !== null && !!CONVEX_HTTP_URL;
 
   try {
     const toolsText = JSON.stringify(tools);
 
     if (useBackendTokenizer && mappedModelId) {
-      const response = await fetch(`${convexHttpUrl}/tokenizer/count`, {
+      const response = await fetch(`${CONVEX_HTTP_URL}/tokenizer/count`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          ...getConvexServerAuthHeaders(),
+        },
         body: JSON.stringify({ text: toolsText, model: mappedModelId }),
       });
 

@@ -5,7 +5,7 @@ import type { ChatV2Request } from "@/shared/chat-v2";
 import { isMCPAuthError } from "@mcpjam/sdk";
 import { handleMCPJamFreeChatModel } from "../../utils/mcpjam-stream-handler.js";
 import { isMCPJamProvidedModel } from "@/shared/types";
-import { WEB_STREAM_TIMEOUT_MS } from "../../config.js";
+import { WEB_STREAM_TIMEOUT_MS, CONVEX_HTTP_URL } from "../../config.js";
 import { prepareChatV2 } from "../../utils/chat-v2-orchestration.js";
 import {
   hostedChatSchema,
@@ -106,11 +106,11 @@ chatV2.post("/", async (c) => {
       } = prepared;
 
       if (modelDefinition.id && isMCPJamProvidedModel(modelDefinition.id)) {
-        if (!process.env.CONVEX_HTTP_URL) {
+        if (!CONVEX_HTTP_URL) {
           throw new WebRouteError(
             500,
             ErrorCode.INTERNAL_ERROR,
-            "Server missing CONVEX_HTTP_URL configuration",
+            "Server missing Convex configuration (CONVEX_SELF_HOSTED_URL or CONVEX_HTTP_URL)",
           );
         }
       } else {

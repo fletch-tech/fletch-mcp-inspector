@@ -57,6 +57,24 @@ If you're seeing **401 Unauthorized** errors when trying to connect to your serv
 - Typos in server URLs or commands
 - Missing file permissions or executable flags
 
+## Self-hosted Convex: WebSocket 1011 InternalServerError
+
+If you use **self-hosted Convex** (e.g. `fletch-convex` or your own Convex backend) and the browser shows **WebSocket closed with code 1011: InternalServerError** (sometimes followed by "WebSocket reconnected at t=…"), the Convex **backend** is closing the connection. The fix is in the backend environment, not in the Inspector app.
+
+**Cause:** Often the backend cannot validate the JWT (e.g. Cognito) because JWT-related environment variables are not set (or differ from the app).
+
+**Fix:**
+
+1. **Ensure the Convex backend has JWT config** – Same issuer and JWKS as the app:
+   - `JWT_ISSUER` (e.g. Cognito issuer URL)
+   - `JWT_JWKS_URL` (or `AWS_REGION` + `USER_POOL_ID` for Cognito)
+   - `JWT_AUDIENCE` if your app validates `aud`
+2. **If using `fletch-convex`** – Set these in the backend service environment (see `fletch-convex/README.md`). The `docker-compose.yml` there passes them through; add a `.env` or set them in your deployment.
+3. **Set public origin** – If the app is at `https://sandbox-mcp-inspector.fletch.co` and Convex at `https://sb-convex-cloud.fletch.co`, set `CONVEX_CLOUD_ORIGIN=https://sb-convex-cloud.fletch.co` (and `CONVEX_SITE_ORIGIN` if needed) in the backend env. Unset or localhost values can cause 1011.
+4. **Debug** – On the backend host, run `fletch-convex/scripts/debug-1011-capture.sh` (or set `RUST_LOG=debug`, restart, then `docker compose logs -f backend`). Reproduce the 1011 in the browser and read the backend log line at disconnect time. See `fletch-convex/README.md` for a table of common backend messages and fixes.
+
+The Inspector client will log a short hint when it receives this disconnect (e.g. "If you're not signed in, sign in and refresh") and, for 1011, a pointer to the debug script. Convex then auto-reconnects; fixing the backend JWT/origin config reduces or eliminates 1011s.
+
 ## Getting Help
 
 If you're still experiencing issues:

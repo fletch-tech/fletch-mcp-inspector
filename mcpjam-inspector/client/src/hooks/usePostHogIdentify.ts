@@ -17,7 +17,7 @@ export function usePostHogIdentify() {
 
     // User is authenticated - identify them
     if (isAuthenticated && user) {
-      // Identify the user with their WorkOS ID
+      // Identify the user with their auth ID
       posthog.identify(user.id, {
         email: user.email,
         name:

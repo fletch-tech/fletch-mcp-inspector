@@ -25,16 +25,10 @@ FROM deps AS build
 
 ENV NODE_OPTIONS="--max-old-space-size=4096"
 
-# Build-time arguments for Vite environment variables
-# These are baked into the client bundle during build
-# On Railway: set VITE_MCPJAM_HOSTED_MODE=true as a build-time variable
-ARG VITE_MCPJAM_HOSTED_MODE
-
-ARG VITE_WORKOS_API_HOSTNAME
-
-ARG VITE_CONVEX_URL
-
-ARG VITE_WORKOS_CLIENT_ID
+# Build-time arguments for Vite environment variables (baked into the client bundle)
+# Docker build defaults: hosted mode true, Convex URL sb-convex-cloud. Override with --build-arg if needed.
+ARG VITE_MCPJAM_HOSTED_MODE=true
+ARG VITE_CONVEX_URL=https://sb-convex-cloud.fletch.co
 
 # Layer 1: Copy configuration files (rarely change)
 COPY mcpjam-inspector/tsconfig.json mcpjam-inspector/package.json ./
@@ -63,11 +57,10 @@ RUN npm run build:server
 # Layer 7: Build client (changes most frequently, depends on SDK and shared)
 COPY mcpjam-inspector/client ./client
 COPY mcpjam-inspector/.env.production ./
-RUN if [ -n "$VITE_MCPJAM_HOSTED_MODE" ]; then export VITE_MCPJAM_HOSTED_MODE; fi; \
-    if [ -n "$VITE_WORKOS_API_HOSTNAME" ]; then export VITE_WORKOS_API_HOSTNAME; fi; \
-    if [ -n "$VITE_CONVEX_URL" ]; then export VITE_CONVEX_URL; fi; \
-    if [ -n "$VITE_WORKOS_CLIENT_ID" ]; then export VITE_WORKOS_CLIENT_ID; fi; \
-    npm run build:client
+RUN export VITE_MCPJAM_HOSTED_MODE="${VITE_MCPJAM_HOSTED_MODE:-true}"; \
+    export VITE_CONVEX_URL="${VITE_CONVEX_URL:-https://sb-convex-cloud.fletch.co}"; \
+    npm run build:client && \
+    echo ">>> Docker build complete: client built with VITE_CONVEX_URL=${VITE_CONVEX_URL} VITE_MCPJAM_HOSTED_MODE=${VITE_MCPJAM_HOSTED_MODE}"
 
 ################################################################################
 # Create a new stage to run the application with minimal runtime dependencies

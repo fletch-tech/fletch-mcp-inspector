@@ -105,7 +105,7 @@ vi.mock("@/lib/PosthogUtils", () => ({
   detectPlatform: vi.fn().mockReturnValue("web"),
 }));
 
-// Mock authkit
+// Mock auth
 vi.mock("@/lib/auth/jwt-auth-context", () => ({
   useAuth: () => ({
     signUp: vi.fn(),

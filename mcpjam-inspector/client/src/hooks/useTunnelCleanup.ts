@@ -30,7 +30,7 @@ export function useTunnelCleanup() {
 
     const cleanupTunnels = async () => {
       try {
-        // Get the WorkOS access token
+        // Get the auth access token
         const accessToken = await getAccessToken();
 
         const headers: Record<string, string> = {

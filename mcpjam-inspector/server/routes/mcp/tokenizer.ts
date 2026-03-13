@@ -5,6 +5,10 @@ import {
   estimateTokensFromChars,
 } from "../../utils/tokenizer-helpers";
 import { logger } from "../../utils/logger";
+import {
+  CONVEX_HTTP_URL,
+  getConvexServerAuthHeaders,
+} from "../../config.js";
 
 const tokenizer = new Hono();
 
@@ -52,12 +56,11 @@ tokenizer.post("/count-tools", async (c) => {
 
     const mcpClientManager = c.mcpClientManager;
 
-    const convexHttpUrl = process.env.CONVEX_HTTP_URL;
-    if (!convexHttpUrl) {
+    if (!CONVEX_HTTP_URL) {
       return c.json(
         {
           ok: false,
-          error: "Server missing CONVEX_HTTP_URL configuration",
+          error: "Server missing Convex configuration (CONVEX_SELF_HOSTED_URL or CONVEX_HTTP_URL)",
         },
         500,
       );
@@ -81,10 +84,11 @@ tokenizer.post("/count-tools", async (c) => {
 
           if (useBackendTokenizer && mappedModelId) {
             // Use backend tokenizer API for mapped models
-            const response = await fetch(`${convexHttpUrl}/tokenizer/count`, {
+            const response = await fetch(`${CONVEX_HTTP_URL}/tokenizer/count`, {
               method: "POST",
               headers: {
                 "Content-Type": "application/json",
+                ...getConvexServerAuthHeaders(),
               },
               body: JSON.stringify({
                 text: toolsText,
@@ -187,12 +191,11 @@ tokenizer.post("/count-text", async (c) => {
       );
     }
 
-    const convexHttpUrl = process.env.CONVEX_HTTP_URL;
-    if (!convexHttpUrl) {
+    if (!CONVEX_HTTP_URL) {
       return c.json(
         {
           ok: false,
-          error: "Server missing CONVEX_HTTP_URL configuration",
+          error: "Server missing Convex configuration (CONVEX_SELF_HOSTED_URL or CONVEX_HTTP_URL)",
         },
         500,
       );
@@ -204,10 +207,11 @@ tokenizer.post("/count-text", async (c) => {
     if (useBackendTokenizer && mappedModelId) {
       try {
         // Use backend tokenizer API for mapped models
-        const response = await fetch(`${convexHttpUrl}/tokenizer/count`, {
+        const response = await fetch(`${CONVEX_HTTP_URL}/tokenizer/count`, {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
+            ...getConvexServerAuthHeaders(),
           },
           body: JSON.stringify({
             text,

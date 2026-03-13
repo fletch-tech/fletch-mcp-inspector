@@ -47,10 +47,16 @@ export async function initializeSessionToken(): Promise<string> {
     return cachedToken;
   }
 
-  // Fetch from API (development)
+  // Fetch from API (development, or production when token not injected)
   if (!initPromise) {
     initPromise = fetch("/api/session-token")
       .then(async (response) => {
+        // 403 = host not allowed (e.g. production domain missing MCPJAM_ALLOWED_HOSTS)
+        // 410 = disabled in hosted mode; use JWT/cookie auth instead
+        if (response.status === 403 || response.status === 410) {
+          cachedToken = "";
+          return "";
+        }
         if (!response.ok) {
           throw new Error(`Failed to get session token: ${response.status}`);
         }

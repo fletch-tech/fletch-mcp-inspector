@@ -115,7 +115,7 @@ describe("SharedServerChatPage", () => {
     toastSuccess.mockReset();
     toastError.mockReset();
 
-    mockGetAccessToken.mockResolvedValue("workos-token");
+    mockGetAccessToken.mockResolvedValue("test-token");
     mockGetStoredTokens.mockReturnValue(null);
     mockInitiateOAuth.mockResolvedValue({ success: false });
     mockClipboardWriteText.mockResolvedValue(undefined);

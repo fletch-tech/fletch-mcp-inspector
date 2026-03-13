@@ -52,7 +52,32 @@ if (isInIframe) {
     );
   }
 
-  const convex = new ConvexReactClient(convexUrl);
+  // Debug: log which Convex backend the client uses (add ?convex_debug=1 to URL)
+  if (typeof window !== "undefined" && new URLSearchParams(window.location.search).get("convex_debug") === "1") {
+    console.log("[Convex] Client is using this backend URL (set at build time via VITE_CONVEX_URL):", convexUrl || "(not set)");
+  }
+
+  const convex = new ConvexReactClient(convexUrl, {
+    onServerDisconnectError(message) {
+      // WebSocket closed abnormally (e.g. 1011 InternalServerError). The backend closed the connection;
+      // the real error is in the backend logs, not in this message.
+      console.warn(
+        "[Convex] Connection closed by server:",
+        message,
+        HOSTED_MODE
+          ? "— If you're not signed in, sign in and refresh. Otherwise this may be a temporary backend issue."
+          : "",
+      );
+      if (typeof message === "string" && message.includes("1011")) {
+        console.warn(
+          "[Convex] To find the root cause: on the Convex backend host run with RUST_LOG=debug, restart, then reproduce this disconnect and check backend logs for auth/JWKS/origin errors. See fletch-convex/scripts/debug-1011-capture.sh",
+        );
+      }
+    },
+    // In hosted mode, hold requests until we have an auth token to reduce 1011 from
+    // connecting before auth is ready (backend may require auth).
+    ...(HOSTED_MODE ? { expectAuth: true } : {}),
+  });
 
   const Providers = (
     <JwtAuthProvider mainUrl={mainUrl}>

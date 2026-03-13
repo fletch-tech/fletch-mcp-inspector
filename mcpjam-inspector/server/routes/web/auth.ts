@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { MCPClientManager } from "@mcpjam/sdk";
 import type { HttpServerConfig } from "@mcpjam/sdk";
-import { WEB_CALL_TIMEOUT_MS } from "../../config.js";
+import { WEB_CALL_TIMEOUT_MS, CONVEX_HTTP_URL } from "../../config.js";
 import {
   ErrorCode,
   WebRouteError,
@@ -103,18 +103,17 @@ export async function authorizeServer(
     shareToken?: string;
   },
 ): Promise<ConvexAuthorizeResponse> {
-  const convexUrl = process.env.CONVEX_HTTP_URL;
-  if (!convexUrl) {
+  if (!CONVEX_HTTP_URL) {
     throw new WebRouteError(
       500,
       ErrorCode.INTERNAL_ERROR,
-      "Server missing CONVEX_HTTP_URL configuration",
+      "Server missing Convex configuration (CONVEX_SELF_HOSTED_URL or CONVEX_HTTP_URL)",
     );
   }
 
   let response: Response;
   try {
-    response = await fetch(`${convexUrl}/web/authorize`, {
+    response = await fetch(`${CONVEX_HTTP_URL}/web/authorize`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",

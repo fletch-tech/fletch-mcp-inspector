@@ -4,6 +4,7 @@ import fixPath from "fix-path";
 import { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { cors } from "hono/cors";
+import { getCookie } from "hono/cookie";
 import { bodyLimit } from "hono/body-limit";
 import { logger } from "hono/logger";
 import { logger as appLogger } from "./utils/logger";
@@ -24,6 +25,7 @@ import {
   scrubTokenFromUrl,
 } from "./middleware/session-auth";
 import { originValidationMiddleware } from "./middleware/origin-validation";
+import { validateJwt } from "./auth/jwt";
 import { securityHeadersMiddleware } from "./middleware/security-headers";
 import { inAppBrowserMiddleware } from "./middleware/in-app-browser";
 
@@ -93,6 +95,8 @@ import {
   corsOriginCheck,
   HOSTED_MODE,
   ALLOWED_HOSTS,
+  HAS_CONVEX,
+  CONVEX_HTTP_URL,
 } from "./config";
 import "./types/hono"; // Type extensions
 
@@ -226,10 +230,10 @@ if (
 
 dotenv.config({ path: envPath });
 
-// Validate required env vars
-if (!process.env.CONVEX_HTTP_URL) {
+// Validate required env vars (Convex: use CONVEX_SELF_HOSTED_URL or CONVEX_HTTP_URL)
+if (!HAS_CONVEX) {
   throw new Error(
-    "CONVEX_HTTP_URL is required but not set. Please set it via environment variable or .env file.",
+    "Convex is required. Set CONVEX_SELF_HOSTED_URL or CONVEX_HTTP_URL via environment variable or .env file.",
   );
 }
 
@@ -251,6 +255,42 @@ const mcpClientManager = new MCPClientManager(
 app.use("*", async (c, next) => {
   c.mcpClientManager = mcpClientManager;
   await next();
+});
+
+// ===== AUTH LANDING ROUTE =====
+// Must be before session auth middleware so unauthenticated users can hit it.
+// Validates JWT from URL (?token=<base64url(jwt)>), stores in cookie, redirects to app root.
+// Used by sandbox/hosted: user signs in at MAIN_URL, gets redirected here with token.
+const mainUrl = process.env.MAIN_URL;
+app.get("/auth/landing", async (c) => {
+  const tokenParam = c.req.query("token");
+  if (!tokenParam) {
+    return mainUrl ? c.redirect(mainUrl, 302) : c.text("Missing token", 400);
+  }
+
+  let rawJwt: string;
+  try {
+    rawJwt = Buffer.from(tokenParam, "base64url").toString("utf8");
+    if (!rawJwt.includes(".")) rawJwt = tokenParam;
+  } catch {
+    rawJwt = tokenParam;
+  }
+
+  const result = await validateJwt(rawJwt);
+  if (!result.valid) {
+    appLogger.warn(`[auth/landing] Invalid token: ${result.error}`);
+    return mainUrl ? c.redirect(mainUrl, 302) : c.text("Invalid token", 401);
+  }
+
+  const maxAge = result.claims.exp
+    ? Math.max(0, result.claims.exp - Math.floor(Date.now() / 1000))
+    : 3600;
+
+  c.header(
+    "Set-Cookie",
+    `auth_token=${rawJwt}; HttpOnly; SameSite=Lax; Max-Age=${maxAge}; Path=/`,
+  );
+  return c.redirect("/", 302);
 });
 
 // ===== SECURITY MIDDLEWARE STACK =====
@@ -339,6 +379,14 @@ app.get("/health", (c) => {
   return c.json({ status: "ok", timestamp: new Date().toISOString() });
 });
 
+// Convex config (for verifying server uses self-hosted backend)
+app.get("/api/convex-config", (c) => {
+  return c.json({
+    serverConvexUrl: CONVEX_HTTP_URL || null,
+    hint: "Client Convex URL is set at build time (VITE_CONVEX_URL). Add ?convex_debug=1 to the app URL and check the browser console to see which URL the client uses.",
+  });
+});
+
 // Session token endpoint (for dev mode where HTML isn't served by this server)
 // Token is only served to localhost or allowed hosts (in hosted mode) to prevent leakage
 app.get("/api/session-token", (c) => {
@@ -416,6 +464,16 @@ if (process.env.NODE_ENV === "production") {
       if (mcpConfig) {
         const configScript = `<script>window.MCP_CLI_CONFIG = ${JSON.stringify(mcpConfig)};</script>`;
         htmlContent = htmlContent.replace("</head>", `${configScript}</head>`);
+      }
+
+      // If user landed via /auth/landing?token=..., we set auth_token cookie and redirected here.
+      // The client cannot read HttpOnly cookies, so inject the JWT for the client to store in localStorage.
+      if (isAllowedHost(host, ALLOWED_HOSTS, HOSTED_MODE)) {
+        const authCookie = getCookie(c, "auth_token");
+        if (authCookie) {
+          const jwtScript = `<script>window.__JWT_FROM_COOKIE__=${JSON.stringify(authCookie)};</script>`;
+          htmlContent = htmlContent.replace("</head>", `${jwtScript}</head>`);
+        }
       }
 
       return c.html(htmlContent);

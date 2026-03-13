@@ -250,18 +250,23 @@ export function useWorkspaceState({
 
     const migrateWorkspace = async (workspace: Workspace) => {
       try {
-        const serializedServers = serializeServersForSharing(workspace.servers);
         await convexCreateWorkspace({
           name: workspace.name,
-          description: workspace.description,
-          servers: serializedServers,
         });
         logger.info("Migrated workspace to Convex", { name: workspace.name });
       } catch (error) {
-        logger.error("Failed to migrate workspace", {
-          name: workspace.name,
-          error: error instanceof Error ? error.message : "Unknown error",
-        });
+        const message = error instanceof Error ? error.message : "Unknown error";
+        // Backend may still have workspaces stubbed as "not yet implemented"
+        if (message.includes("not yet implemented")) {
+          logger.debug("Workspace migration skipped (backend not yet implemented)", {
+            name: workspace.name,
+          });
+        } else {
+          logger.error("Failed to migrate workspace", {
+            name: workspace.name,
+            error: message,
+          });
+        }
       }
     };
 
@@ -281,7 +286,6 @@ export function useWorkspaceState({
         try {
           const workspaceId = await convexCreateWorkspace({
             name,
-            servers: {},
           });
           if (switchTo && workspaceId) {
             setConvexActiveWorkspaceId(workspaceId as string);
@@ -396,8 +400,6 @@ export function useWorkspaceState({
           );
           await convexCreateWorkspace({
             name: newName,
-            description: sourceWorkspace.description,
-            servers: serializedServers,
           });
           toast.success(`Workspace duplicated as "${newName}"`);
         } catch (error) {
@@ -469,8 +471,6 @@ export function useWorkspaceState({
           );
           await convexCreateWorkspace({
             name: workspaceData.name,
-            description: workspaceData.description,
-            servers: serializedServers,
           });
           toast.success(`Workspace "${workspaceData.name}" imported`);
         } catch (error) {

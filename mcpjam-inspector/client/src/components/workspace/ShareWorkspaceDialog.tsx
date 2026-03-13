@@ -21,7 +21,6 @@ import {
 } from "@/hooks/useWorkspaces";
 import { useConvexAuth } from "convex/react";
 import { useProfilePicture } from "@/hooks/useProfilePicture";
-import { serializeServersForSharing } from "@/lib/workspace-serialization";
 import { type User } from "@/lib/auth/jwt-auth-context";
 interface ShareWorkspaceDialogProps {
   isOpen: boolean;
@@ -117,10 +116,8 @@ export function ShareWorkspaceDialog({
       let currentWorkspaceId = sharedWorkspaceId;
 
       if (!currentWorkspaceId) {
-        const serializedServers = serializeServersForSharing(workspaceServers);
         currentWorkspaceId = await createWorkspace({
           name: workspaceName,
-          servers: serializedServers,
         });
 
         if (currentWorkspaceId) {

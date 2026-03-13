@@ -29,7 +29,7 @@ export function useModelMetadata() {
       setError(null);
 
       try {
-        // Get WorkOS access token to pass to the inspector server
+        // Get access token to pass to the inspector server
         const accessToken = await getAccessToken();
 
         // Call the local inspector server which proxies to Convex
