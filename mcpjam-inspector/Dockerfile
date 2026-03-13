@@ -81,9 +81,6 @@ ENV NODE_ENV=production
 # SECURITY: Users MUST run with -p 127.0.0.1:6274:6274 to prevent network exposure
 ENV DOCKER_CONTAINER=true
 
-# Run the application as a non-root user.
-USER node
-
 # Copy package.json so that package manager commands can be used.
 COPY mcpjam-inspector/package.json .
 COPY sdk/package.json ../sdk/
@@ -96,6 +93,12 @@ COPY --from=build /usr/src/app/mcpjam-inspector/bin ./bin
 COPY --from=build /usr/src/app/mcpjam-inspector/dist ./dist
 COPY --from=build /usr/src/app/sdk/dist ../sdk/dist
 COPY --from=build /usr/src/app/mcpjam-inspector/.env.production ./.env.production
+
+# Ensure the node user can read all files (ECS/non-root runs; COPY preserves build-stage ownership).
+RUN chown -R node:node /usr/src/app/mcpjam-inspector /usr/src/app/sdk
+
+# Run the application as a non-root user.
+USER node
 
 # Expose the port that the application listens on.
 EXPOSE 6274
