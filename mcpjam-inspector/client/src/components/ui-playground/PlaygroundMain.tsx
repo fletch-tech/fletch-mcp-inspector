@@ -62,6 +62,7 @@ import { ToolRenderOverride } from "@/components/chat-v2/thread/tool-render-over
 import { useConvexAuth } from "convex/react";
 import { useWorkspaceServers } from "@/hooks/useViews";
 import { buildOAuthTokensByServerId } from "@/lib/oauth/oauth-tokens";
+import { HOSTED_MODE } from "@/lib/config";
 
 /** Custom device config - dimensions come from store */
 const CUSTOM_DEVICE_BASE = {
@@ -228,7 +229,14 @@ export function PlaygroundMain({
 
   // Hosted mode context (workspaceId, serverIds, OAuth tokens)
   const activeWorkspace = appState.workspaces[appState.activeWorkspaceId];
-  const convexWorkspaceId = activeWorkspace?.sharedWorkspaceId ?? null;
+  const rawWorkspaceId =
+    activeWorkspace?.sharedWorkspaceId ?? activeWorkspace?.id ?? null;
+  const convexWorkspaceId =
+    HOSTED_MODE &&
+    rawWorkspaceId != null &&
+    (rawWorkspaceId === "default" || rawWorkspaceId === "none")
+      ? null
+      : rawWorkspaceId;
   const { serversByName } = useWorkspaceServers({
     isAuthenticated: isConvexAuthenticated,
     workspaceId: convexWorkspaceId,

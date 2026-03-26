@@ -75,6 +75,59 @@ If you use **self-hosted Convex** (e.g. `fletch-convex` or your own Convex backe
 
 The Inspector client will log a short hint when it receives this disconnect (e.g. "If you're not signed in, sign in and refresh") and, for 1011, a pointer to the debug script. Convex then auto-reconnects; fixing the backend JWT/origin config reduces or eliminates 1011s.
 
+## "This Convex deployment does not have HTTP actions enabled"
+
+This error appears when the **Inspector server** calls Convex (e.g. for chat/stream, `/web/authorize`, tools list) but the URL it uses points at the **sync** port instead of the **HTTP-actions** port. Self-hosted Convex often has two endpoints:
+
+- **Sync (e.g. port 3210)** – WebSocket/sync; used by the **client** via `VITE_CONVEX_URL`.
+- **HTTP actions (e.g. port 3211 or site host)** – HTTP endpoints like `/stream`, `/web/authorize`; used by the **Inspector server**.
+
+**Fix:** On the **Inspector server** (the Node process), set the environment so the effective Convex URL is the **HTTP-actions** base:
+
+1. **Preferred:** Set `CONVEX_HTTP_URL` to the HTTP-actions base and leave `CONVEX_SELF_HOSTED_URL` unset (or set it to the same value).
+   - Examples: `CONVEX_HTTP_URL=https://sb-convex-site.fletch.co` or `CONVEX_HTTP_URL=http://127.0.0.1:3211`.
+2. **If you set both:** The server uses `CONVEX_SELF_HOSTED_URL` first (see `server/config.ts`). So either set both to the **same** HTTP-actions URL, or leave `CONVEX_SELF_HOSTED_URL` unset and only set `CONVEX_HTTP_URL` to the HTTP-actions base.
+3. **Wrong:** Do not point the server at the sync URL only (e.g. `CONVEX_SELF_HOSTED_URL=https://sb-convex-cloud.fletch.co` with nothing on 3211). That causes "HTTP actions enabled" errors.
+
+After changing env, restart the Inspector server and retry.
+
+## POST /api/web/chat-v2 returns 400 Bad Request
+
+The response body is JSON with `code` and `message`. Check the **message** to see why the request was rejected.
+
+| Cause | `code` | `message` (or similar) |
+|-------|--------|------------------------|
+| Missing or invalid request body | `VALIDATION_ERROR` | "Invalid JSON body" |
+| Missing/invalid hosted fields | `VALIDATION_ERROR` | Zod message, e.g. "workspaceId" / "selectedServerIds" required |
+| No messages or empty array | `VALIDATION_ERROR` | "messages are required" |
+| Missing or unsupported model | `VALIDATION_ERROR` | "model is not supported" |
+| Anthropic model with invalid tool names | `VALIDATION_ERROR` | "Invalid tool name(s) for Anthropic..." |
+| **Non–MCPJam model in hosted mode** | `FEATURE_NOT_SUPPORTED` | "Only MCPJam hosted models are supported in hosted mode" |
+
+**Hosted mode:** At `https://sandbox-mcp-inspector.fletch.co` only **MCPJam-provided** models (e.g. from `/api/web/models`) are allowed. If the client sends a custom or third-party model id (e.g. `openai/gpt-4o` or a custom provider id), the server returns 400 with `FEATURE_NOT_SUPPORTED`. Use a model from the MCPJam models list and ensure the request body includes `workspaceId`, `selectedServerIds`, `messages`, and `model` with an MCPJam model id.
+
+Server logs: for 400 responses the server logs `[web/chat-v2] 400 Bad Request: <message> (<code>)` so you can see the reason in ECS/CloudWatch.
+
+## POST /api/web/servers/validate returns "Authorization failed (404)" or NOT_FOUND
+
+The Inspector server calls **Convex** at `CONVEX_HTTP_URL` + `/web/authorize` (trailing slashes on the base are stripped). A **404** means that URL is wrong or the HTTP action is not deployed.
+
+**Causes:**
+
+1. **Missing `/http` path on the base URL** – Many self-hosted setups use one hostname for sync and HTTP actions with a **path prefix** for HTTP actions (see `CONVEX_SITE_ORIGIN` on the Convex backend, e.g. `https://sb-convex-cloud.fletch.co/http`). The Inspector must use that **same** base including `/http`:
+   - ✅ `CONVEX_HTTP_URL=https://sb-convex-cloud.fletch.co/http` → request goes to `.../http/web/authorize`
+   - ❌ `CONVEX_HTTP_URL=https://sb-convex-cloud.fletch.co` → request goes to `.../web/authorize` on the **sync** side → **404**
+   If you use a **dedicated site hostname** (e.g. `https://sb-convex-site.fletch.co`) with no path prefix, set `CONVEX_HTTP_URL` to that host only.
+2. **Convex backend has no `/web/authorize` HTTP action** – Deploy `convex/http.ts` from the app repo (`npx convex deploy` to the cloud URL). If cloud and site are separate tasks, use **shared modules storage** (e.g. S3) so the site serves the same routes.
+3. **Wrong host** – `CONVEX_HTTP_URL` must be the **HTTP-actions** entrypoint (site host or `.../http`), not the bare sync URL when sync does not serve HTTP actions at `/web/authorize`.
+
+**What to do:**
+
+- Ensure the **Convex backend** (e.g. `fletch-convex` or your Convex app) defines and deploys the **HTTP action** that handles `POST /web/authorize` and that the host/port behind `CONVEX_HTTP_URL` is the one serving that action.
+- Verify the Inspector server env: `CONVEX_HTTP_URL` should be the base URL of the HTTP-actions/site service (e.g. `https://sb-convex-site.fletch.co`), not the sync URL.
+
+After the fix, the Inspector will return **404** with `code: "NOT_FOUND"` and a message pointing at the authorize endpoint and `CONVEX_HTTP_URL`. Server logs will show `[web/auth] Convex POST /web/authorize returned 404` with the URL used.
+
 ## Getting Help
 
 If you're still experiencing issues:

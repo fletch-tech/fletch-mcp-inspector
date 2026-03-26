@@ -2,6 +2,7 @@ import { z } from "zod";
 import { MCPClientManager } from "@mcpjam/sdk";
 import type { HttpServerConfig } from "@mcpjam/sdk";
 import { WEB_CALL_TIMEOUT_MS, CONVEX_HTTP_URL } from "../../config.js";
+import { logger } from "../../utils/logger.js";
 import {
   ErrorCode,
   WebRouteError,
@@ -111,9 +112,11 @@ export async function authorizeServer(
     );
   }
 
+  const authorizeUrl = `${CONVEX_HTTP_URL.replace(/\/+$/, "")}/web/authorize`;
+
   let response: Response;
   try {
-    response = await fetch(`${CONVEX_HTTP_URL}/web/authorize`, {
+    response = await fetch(authorizeUrl, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -143,11 +146,25 @@ export async function authorizeServer(
 
   if (!response.ok) {
     const code =
-      typeof body?.code === "string" ? body.code : ErrorCode.INTERNAL_ERROR;
+      typeof body?.code === "string"
+        ? body.code
+        : response.status === 404
+          ? ErrorCode.NOT_FOUND
+          : response.status >= 500
+            ? ErrorCode.INTERNAL_ERROR
+            : ErrorCode.INTERNAL_ERROR;
     const message =
       typeof body?.message === "string"
         ? body.message
-        : `Authorization failed (${response.status})`;
+        : response.status === 404
+          ? "Authorization endpoint not found (404). Deploy convex/http.ts (POST /web/authorize) and set CONVEX_HTTP_URL to the HTTP-actions base. If your backend uses path routing (e.g. CONVEX_SITE_ORIGIN=https://host/http), include that path: CONVEX_HTTP_URL=https://host/http — not the sync URL alone."
+          : `Authorization failed (${response.status})`;
+    if (response.status === 404) {
+      logger.warn(
+        `[web/auth] Convex POST ${authorizeUrl} returned 404 — wrong base or route not deployed`,
+        { workspaceId, serverId, convexBase: CONVEX_HTTP_URL },
+      );
+    }
     throw new WebRouteError(response.status, code as ErrorCode, message);
   }
 

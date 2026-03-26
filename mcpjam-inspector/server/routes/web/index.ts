@@ -9,11 +9,13 @@ import apps from "./apps.js";
 import oauthWeb from "./oauth.js";
 import xrayPayload from "./xray-payload.js";
 import exporter from "./export.js";
+import skills from "./skills.js";
 
 const web = new Hono();
 
 web.route("/servers", servers);
 web.route("/tools", tools);
+web.route("/skills", skills);
 web.route("/resources", resources);
 web.route("/prompts", prompts);
 web.route("/export", exporter);

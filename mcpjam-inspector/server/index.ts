@@ -87,6 +87,9 @@ function logBox(content: string, title?: string) {
 import mcpRoutes from "./routes/mcp/index";
 import appsRoutes from "./routes/apps/index";
 import webRoutes from "./routes/web/index";
+import { handleValidate } from "./routes/web/servers";
+import webTools from "./routes/web/tools";
+import webSkills from "./routes/web/skills";
 import { rpcLogBus } from "./services/rpc-log-bus";
 import { tunnelManager } from "./services/tunnel-manager";
 import {
@@ -353,12 +356,18 @@ app.use(
   }),
 );
 
-// API Routes
+// API Routes — explicit /api/web routes first so they never 404 from sub-app mount
+app.get("/api/web/ok", (c) => c.json({ ok: true, message: "Web API reachable" }));
+app.all("/api/web/servers/validate", handleValidate);
+app.all("/api/web/servers/validate/", handleValidate);
+app.route("/api/web/tools", webTools);
+app.route("/api/web/skills", webSkills);
+app.route("/api/web", webRoutes);
+
 if (!HOSTED_MODE) {
   app.route("/api/apps", appsRoutes);
   app.route("/api/mcp", mcpRoutes);
 }
-app.route("/api/web", webRoutes);
 
 // Fallback for clients that post to "/sse/message" instead of the rewritten proxy messages URL.
 // We resolve the upstream messages endpoint via sessionId and forward with any injected auth.

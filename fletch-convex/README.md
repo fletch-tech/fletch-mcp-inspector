@@ -40,6 +40,8 @@ the backend cannot find the **deployed app package** (your Convex functions/auth
 4. **Restart the backend after deploy (if needed)**  
    Usually not required; the backend loads the new package. If you still see the same key error, restart the backend and try again.
 
+**Separate site and cloud servers (same DB, same INSTANCE_SECRET):** Deploy only to the **cloud** URL. For the **site** server to serve the same deployed code (including HTTP actions like `/web/authorize`), both backends must use the **same database**, the **same INSTANCE_SECRET**, and **shared modules storage** (e.g. the same `S3_STORAGE_MODULES_BUCKET` and credentials on both). Then the cloud server writes the new package on deploy and the site server reads it from the same bucket. Without shared modules storage, the site server would not see updates from deploy.
+
 After a successful deploy, reload the app; the 1011 from “Src Pkg storage key not found” should stop.
 
 ## WebSocket 1011 InternalServerError (other causes)
@@ -71,6 +73,8 @@ If your app is served at `https://sandbox-mcp-inspector.fletch.co` and the clien
 
 - `CONVEX_CLOUD_ORIGIN=https://sb-convex-cloud.fletch.co`
 - `CONVEX_SITE_ORIGIN=https://sb-convex-cloud.fletch.co/http` (site/proxy URL if you use HTTP actions)
+
+**MCP Inspector server:** Set `CONVEX_HTTP_URL` (or `CONVEX_SELF_HOSTED_URL`) to match how HTTP actions are reached—**including the `/http` path** when you use the pattern above, e.g. `CONVEX_HTTP_URL=https://sb-convex-cloud.fletch.co/http`. If you omit `/http`, the Inspector calls `https://…/web/authorize` on the sync path and gets **404** for `/web/authorize`.
 
 If these are unset or left as `http://127.0.0.1:3210` / `http://127.0.0.1:3211`, the backend can close WebSocket connections with 1011. Add them to your `.env` (or deployment secrets) and restart the backend. See `fletch-convex/.env.example`.
 
@@ -110,6 +114,31 @@ Reproduce the disconnect, then stop the log stream. Search the output for the ti
 | Could not decode token / invalid token | JWKS URL wrong or unreachable from backend; issuer mismatch; or token not from same Cognito pool. Check JWT_JWKS_URL / USER_POOL_ID and that the app’s token issuer matches. |
 | Origin / CORS / forbidden origin | Set `CONVEX_CLOUD_ORIGIN` to the public URL clients use (e.g. `https://sb-convex-cloud.fletch.co`). |
 | Connection reset / timeout | ALB idle timeout closing WebSocket; increase to 3600. Or security group not allowing ALB → backend on port 3210. |
+
+### Dashboard CORS: "No 'Access-Control-Allow-Origin' header" for `/api/app_metrics/stream_function_logs`
+
+If the **Convex dashboard** is served from a different origin than the backend (e.g. dashboard at `https://sb-convex.fletch.co`, backend at `https://sb-convex-cloud.fletch.co`), the browser will block requests from the dashboard to the backend (e.g. `stream_function_logs`) with:
+
+```text
+Access to fetch at 'https://sb-convex-cloud.fletch.co/api/app_metrics/stream_function_logs?...'
+from origin 'https://sb-convex.fletch.co' has been blocked by CORS policy:
+No 'Access-Control-Allow-Origin' header is present on the requested resource.
+```
+
+**Cause:** The backend only sends CORS headers for certain origins (typically its own `CONVEX_CLOUD_ORIGIN`). The dashboard origin is different, so the backend does not include `Access-Control-Allow-Origin` for it.
+
+**Fix options:**
+
+1. **Allow the dashboard origin in the backend**  
+   If the [Convex backend](https://github.com/get-convex/convex-backend) supports an env var for additional allowed origins (e.g. `ADDITIONAL_ALLOWED_ORIGINS`, `CONVEX_DASHBOARD_ORIGIN`, or similar), set it to the dashboard’s public URL (e.g. `https://sb-convex.fletch.co`) on the **backend** container and restart. Check the backend repo’s README or config for CORS / allowed-origins.
+
+2. **Serve dashboard and backend under the same origin (recommended)**  
+   Use a single domain and path-based routing so the dashboard and API share an origin and CORS is not needed:
+   - Example: serve the dashboard at `https://sb-convex.fletch.co/` and proxy `https://sb-convex.fletch.co/api/` to the Convex backend (e.g. to `sb-convex-cloud` internally).
+   - Set the dashboard’s `NEXT_PUBLIC_DEPLOYMENT_URL` to this same origin (e.g. `https://sb-convex.fletch.co`). Then all dashboard requests go to the same origin and the browser does not require CORS.
+
+3. **Add CORS via a reverse proxy**  
+   Put a reverse proxy in front of the backend that responds to requests whose `Origin` is the dashboard URL with `Access-Control-Allow-Origin: https://sb-convex.fletch.co` (and other CORS headers as needed). The backend stays unchanged; the proxy adds the headers for dashboard requests.
 
 ### Infrastructure: security groups and ALB (for `wss://sb-convex-cloud.fletch.co`)
 
@@ -175,6 +204,37 @@ The admin key is derived from **INSTANCE_SECRET** (and instance name). If each E
    - App / deploy pipeline: `CONVEX_SELF_HOSTED_ADMIN_KEY` from Secrets Manager (the key you generated in step 2).
 
 Then every new or replaced ECS task uses the same `INSTANCE_SECRET` → same backend identity → the same admin key works for deploy and for the app. If you ever rotate `INSTANCE_SECRET`, you must generate a new admin key and update the app and deploy config.
+
+## Site URL shows “This Convex deployment does not have HTTP actions enabled” (even on `/`, port 3211)
+
+That text is the backend’s **default when no app HTTP bundle is loaded** on the HTTP-actions listener. It is **not** fixed by path prefix or Inspector env if you’re already on **3211**.
+
+1. **Deploy the app** from `mcpjam-inspector` (must include `convex/http.ts`):
+   ```bash
+   CONVEX_SELF_HOSTED_URL='https://sb-convex-cloud.fletch.co' CONVEX_SELF_HOSTED_ADMIN_KEY='<key>' npx convex deploy
+   ```
+2. **Same modules everywhere** – Cloud and site ECS tasks must use the **same** `INSTANCE_SECRET`, **same** `S3_STORAGE_MODULES_BUCKET`, and IAM that can **read** the objects the cloud task wrote after deploy.
+3. **Confirm deploy** – In the self-hosted dashboard, check that an **`http`** function (router) exists. If deploy fails (TypeScript errors, wrong URL/key), the bundle never lands in S3 and the site keeps showing that message.
+4. **After a good deploy** – `GET https://<site>/` should return plain text `Convex HTTP actions OK...` (see `mcpjam-inspector/convex/http.ts`). If you still see the old message, the site process is not reading the same deployment (wrong bucket, credentials, or `INSTANCE_SECRET`).
+
+## S3 storage configuration
+
+The Convex backend can store data in S3 instead of the local volume. **Bucket names are required** for each storage type you enable; the value of each env var is the **bucket name** (e.g. `convex-modules`).
+
+**Minimum for shared modules only** (so separate cloud and site backends share deployed code):
+
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `AWS_REGION` | Yes | e.g. `us-east-2` |
+| `AWS_ACCESS_KEY_ID` | Yes | IAM credentials with read/write to the bucket |
+| `AWS_SECRET_ACCESS_KEY` | Yes | IAM credentials |
+| `S3_STORAGE_MODULES_BUCKET` | Yes | Bucket name (e.g. `convex-modules`). Create the bucket in AWS (or your S3-compatible store); use the **same** bucket name and credentials on both cloud and site backends. |
+
+**Optional** (other storage types): `S3_STORAGE_EXPORTS_BUCKET`, `S3_STORAGE_SNAPSHOT_IMPORTS_BUCKET`, `S3_STORAGE_FILES_BUCKET`, `S3_STORAGE_SEARCH_BUCKET`. If unset, the backend uses local storage for those.
+
+**Optional** for R2 or non-AWS S3: `S3_ENDPOINT_URL` (e.g. `https://<account>.r2.cloudflarestorage.com`). For standard AWS S3, omit it.
+
+See [Convex backend: Using S3 Storage](https://github.com/get-convex/convex-backend/blob/main/self-hosted/advanced/s3_storage.md) and `fletch-convex/.env.example`.
 
 ## Quick start
 

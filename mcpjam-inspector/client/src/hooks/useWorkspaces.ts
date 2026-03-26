@@ -1,5 +1,6 @@
 import { useMemo } from "react";
 import { useQuery, useMutation } from "convex/react";
+import { HOSTED_MODE } from "@/lib/config";
 
 export type WorkspaceMembershipRole = "owner" | "admin" | "member";
 
@@ -58,12 +59,14 @@ export function useWorkspaceQueries({
 }: {
   isAuthenticated: boolean;
 }) {
+  const shouldQuery = HOSTED_MODE && isAuthenticated;
+
   const workspaces = useQuery(
     "workspaces:getMyWorkspaces" as any,
-    isAuthenticated ? ({} as any) : "skip",
+    shouldQuery ? ({} as any) : "skip",
   ) as RemoteWorkspace[] | undefined;
 
-  const isLoading = isAuthenticated && workspaces === undefined;
+  const isLoading = shouldQuery && workspaces === undefined;
 
   const sortedWorkspaces = useMemo(() => {
     if (!workspaces) return [];
@@ -85,7 +88,7 @@ export function useWorkspaceMembers({
   isAuthenticated: boolean;
   workspaceId: string | null;
 }) {
-  const enableQuery = isAuthenticated && !!workspaceId;
+  const enableQuery = HOSTED_MODE && isAuthenticated && !!workspaceId;
 
   const members = useQuery(
     "workspaces:getWorkspaceMembers" as any,
@@ -155,12 +158,14 @@ export function useWorkspaceServers({
   workspaceId: string | null;
   isAuthenticated: boolean;
 }) {
+  const enableQuery = HOSTED_MODE && isAuthenticated && !!workspaceId;
+
   const servers = useQuery(
     "servers:getWorkspaceServers" as any,
-    isAuthenticated && workspaceId ? ({ workspaceId } as any) : "skip",
+    enableQuery ? ({ workspaceId } as any) : "skip",
   ) as RemoteServer[] | undefined;
 
-  const isLoading = isAuthenticated && workspaceId && servers === undefined;
+  const isLoading = enableQuery && servers === undefined;
 
   // Convert array to record keyed by server name
   const serversRecord = useMemo(() => {

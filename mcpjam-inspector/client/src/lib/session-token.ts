@@ -156,9 +156,22 @@ export function addTokenToUrl(url: string): string {
 }
 
 /**
+ * Returns true if the URL is a hosted web API route that requires Bearer auth.
+ */
+function isHostedWebApiUrl(input: RequestInfo | URL): boolean {
+  if (!HOSTED_MODE) return false;
+  const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+  return url.includes("/api/web/");
+}
+
+/**
  * Authenticated fetch wrapper.
  * Automatically adds session auth headers to all requests.
  * Use this instead of native fetch for API calls.
+ *
+ * In hosted mode, /api/web/* routes require a Convex JWT (Bearer). If the token
+ * is not available yet (e.g. user not signed in or context not ready), this throws
+ * instead of sending a request that would get 401.
  *
  * @param input - URL or Request object
  * @param init - Optional RequestInit configuration
@@ -170,6 +183,13 @@ export async function authFetch(
 ): Promise<Response> {
   const sessionHeaders = getAuthHeaders();
   const hostedAuthHeader = await getHostedAuthorizationHeader();
+
+  if (isHostedWebApiUrl(input) && !hostedAuthHeader) {
+    throw new Error(
+      "Sign-in required. Hosted API requests need a valid session. Please sign in and try again.",
+    );
+  }
+
   const hostedHeaders = hostedAuthHeader
     ? ({ Authorization: hostedAuthHeader } as HeadersInit)
     : {};

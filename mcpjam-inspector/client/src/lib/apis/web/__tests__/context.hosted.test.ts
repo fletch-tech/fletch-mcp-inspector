@@ -61,7 +61,7 @@ describe("injectHostedServerMapping", () => {
     expect(resolveHostedServerId("existing-server")).toBe("id-existing");
   });
 
-  it("injected mapping is lost if setHostedApiContext fires before subscription catches up", () => {
+  it("preserves injected mapping when setHostedApiContext is stale", () => {
     injectHostedServerMapping("new-server", "id-new");
 
     // If setHostedApiContext fires with stale data (without the new server),
@@ -73,8 +73,12 @@ describe("injectHostedServerMapping", () => {
       },
     });
 
-    expect(() => resolveHostedServerId("new-server")).toThrow(
-      'Hosted server not found for "new-server"',
+    expect(resolveHostedServerId("new-server")).toBe("id-new");
+  });
+
+  it("still throws for unresolved server names", () => {
+    expect(() => resolveHostedServerId("unknown-server-name")).toThrow(
+      'Hosted server not found for "unknown-server-name"',
     );
   });
 });

@@ -1,3 +1,4 @@
+import { HOSTED_MODE } from "@/lib/config";
 import { authFetch } from "@/lib/session-token";
 import type {
   Skill,
@@ -5,6 +6,8 @@ import type {
   SkillFile,
   SkillFileContent,
 } from "../../../../shared/skill-types";
+
+const skillsBase = () => (HOSTED_MODE ? "/api/web/skills" : "/api/mcp/skills");
 
 export interface ListSkillsResponse {
   skills: SkillListItem[];
@@ -23,7 +26,7 @@ export interface UploadSkillResponse {
  * List all available skills from .mcpjam/skills/
  */
 export async function listSkills(): Promise<SkillListItem[]> {
-  const res = await authFetch("/api/mcp/skills/list", {
+  const res = await authFetch(`${skillsBase()}/list`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({}),
@@ -46,7 +49,7 @@ export async function listSkills(): Promise<SkillListItem[]> {
  * Get full skill content by name
  */
 export async function getSkill(name: string): Promise<Skill> {
-  const res = await authFetch("/api/mcp/skills/get", {
+  const res = await authFetch(`${skillsBase()}/get`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ name }),
@@ -73,7 +76,7 @@ export async function uploadSkill(data: {
   description: string;
   content: string;
 }): Promise<Skill> {
-  const res = await authFetch("/api/mcp/skills/upload", {
+  const res = await authFetch(`${skillsBase()}/upload`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(data),
@@ -113,7 +116,7 @@ export async function uploadSkillFolder(
     formData.append("files", file, pathWithinSkill);
   }
 
-  const res = await authFetch("/api/mcp/skills/upload-folder", {
+  const res = await authFetch(`${skillsBase()}/upload-folder`, {
     method: "POST",
     body: formData,
   });
@@ -135,7 +138,7 @@ export async function uploadSkillFolder(
  * Delete a skill by name
  */
 export async function deleteSkill(name: string): Promise<void> {
-  const res = await authFetch("/api/mcp/skills/delete", {
+  const res = await authFetch(`${skillsBase()}/delete`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ name }),
@@ -156,7 +159,7 @@ export async function deleteSkill(name: string): Promise<void> {
  * List all files in a skill directory
  */
 export async function listSkillFiles(name: string): Promise<SkillFile[]> {
-  const res = await authFetch("/api/mcp/skills/files", {
+  const res = await authFetch(`${skillsBase()}/files`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ name }),
@@ -182,7 +185,7 @@ export async function readSkillFile(
   name: string,
   filePath: string,
 ): Promise<SkillFileContent> {
-  const res = await authFetch("/api/mcp/skills/read-file", {
+  const res = await authFetch(`${skillsBase()}/read-file`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ name, filePath }),

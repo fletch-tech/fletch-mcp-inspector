@@ -115,10 +115,11 @@ export const ALLOWED_HOSTS = process.env.MCPJAM_ALLOWED_HOSTS
 
 // ── Convex (self-hosted or cloud) ────────────────────────────────────────
 
-/** Effective Convex HTTP URL: CONVEX_SELF_HOSTED_URL if set, else CONVEX_HTTP_URL. Used for server-side fetch to Convex. */
+/** Effective Convex HTTP URL used for server-side fetches to Convex HTTP actions (e.g. /web/authorize). */
 export const CONVEX_HTTP_URL =
-  process.env.CONVEX_SELF_HOSTED_URL?.trim() ||
   process.env.CONVEX_HTTP_URL?.trim() ||
+  process.env.CONVEX_SITE_ORIGIN?.trim() ||
+  process.env.CONVEX_SELF_HOSTED_URL?.trim() ||
   "";
 
 /** When using self-hosted Convex, optional admin key for server-to-server auth (Bearer). */

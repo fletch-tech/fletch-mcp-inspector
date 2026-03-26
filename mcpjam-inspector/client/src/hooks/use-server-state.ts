@@ -205,7 +205,12 @@ export function useServerState({
       serverName: string,
       serverEntry: ServerWithName,
     ): Promise<string | undefined> => {
-      if (useLocalFallback || !isAuthenticated || !effectiveActiveWorkspaceId) {
+      if (
+        !HOSTED_MODE ||
+        useLocalFallback ||
+        !isAuthenticated ||
+        !effectiveActiveWorkspaceId
+      ) {
         return undefined;
       }
 
@@ -219,8 +224,7 @@ export function useServerState({
         config?.url instanceof URL ? config.url.href : config?.url || undefined;
       const headers = config?.requestInit?.headers || undefined;
 
-      const payload = {
-        name: serverName,
+      const connectionConfig = {
         enabled: serverEntry.enabled ?? false,
         transportType,
         command: config?.command,
@@ -239,14 +243,16 @@ export function useServerState({
         if (existingServer) {
           await convexUpdateServer({
             serverId: existingServer._id,
-            ...payload,
+            name: serverName,
+            ...connectionConfig,
           });
           return existingServer._id;
         }
 
         const newId = await convexCreateServer({
           workspaceId: effectiveActiveWorkspaceId,
-          ...payload,
+          name: serverName,
+          config: connectionConfig,
         });
         return newId as string | undefined;
       } catch (primaryError) {
@@ -256,7 +262,8 @@ export function useServerState({
           if (existingServer) {
             const newId = await convexCreateServer({
               workspaceId: effectiveActiveWorkspaceId,
-              ...payload,
+              name: serverName,
+              config: connectionConfig,
             });
             return newId as string | undefined;
           }
@@ -266,7 +273,8 @@ export function useServerState({
           if (retryExisting) {
             await convexUpdateServer({
               serverId: retryExisting._id,
-              ...payload,
+              name: serverName,
+              ...connectionConfig,
             });
             return retryExisting._id;
           }
@@ -308,7 +316,12 @@ export function useServerState({
 
   const removeServerFromConvex = useCallback(
     async (serverName: string) => {
-      if (useLocalFallback || !isAuthenticated || !effectiveActiveWorkspaceId) {
+      if (
+        !HOSTED_MODE ||
+        useLocalFallback ||
+        !isAuthenticated ||
+        !effectiveActiveWorkspaceId
+      ) {
         return;
       }
 
@@ -541,13 +554,6 @@ export function useServerState({
             err,
           });
         }
-      } else {
-        syncServerToConvex(formData.name, serverEntryForSave).catch((err) =>
-          logger.warn("Background sync to Convex failed (pre-connection)", {
-            serverName: formData.name,
-            err,
-          }),
-        );
       }
       if (!isAuthenticated) {
         const workspace = appState.workspaces[appState.activeWorkspaceId];
@@ -804,7 +810,7 @@ export function useServerState({
 
       saveOAuthConfigToLocalStorage(formData);
 
-      if (isAuthenticated && effectiveActiveWorkspaceId) {
+      if (HOSTED_MODE && isAuthenticated && effectiveActiveWorkspaceId) {
         try {
           await syncServerToConvex(serverName, serverEntry);
         } catch (error) {

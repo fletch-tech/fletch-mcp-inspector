@@ -131,7 +131,16 @@ export function ChatTabV2({
   );
 
   const activeWorkspace = appState.workspaces[appState.activeWorkspaceId];
-  const convexWorkspaceId = activeWorkspace?.sharedWorkspaceId ?? null;
+  // Hosted: never treat local bootstrap ids ("default", "none") as Convex workspace ids.
+  // Prefer sharedWorkspaceId, then Convex document id; local-only placeholders stay null for API calls.
+  const rawWorkspaceId =
+    activeWorkspace?.sharedWorkspaceId ?? activeWorkspace?.id ?? null;
+  const convexWorkspaceId =
+    HOSTED_MODE &&
+    rawWorkspaceId != null &&
+    (rawWorkspaceId === "default" || rawWorkspaceId === "none")
+      ? null
+      : rawWorkspaceId;
   const { serversByName } = useWorkspaceServers({
     isAuthenticated: isConvexAuthenticated,
     workspaceId: convexWorkspaceId,

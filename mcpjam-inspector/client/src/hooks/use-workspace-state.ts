@@ -17,6 +17,7 @@ import {
   deserializeServersFromConvex,
   serializeServersForSharing,
 } from "@/lib/workspace-serialization";
+import { HOSTED_MODE } from "@/lib/config";
 
 interface LoggerLike {
   info: (message: string, meta?: Record<string, unknown>) => void;
@@ -39,8 +40,10 @@ export function useWorkspaceState({
   isAuthLoading,
   logger,
 }: UseWorkspaceStateParams) {
+  const isCloudSyncEnabled = HOSTED_MODE && isAuthenticated;
+
   const { workspaces: remoteWorkspaces, isLoading: isLoadingWorkspaces } =
-    useWorkspaceQueries({ isAuthenticated });
+    useWorkspaceQueries({ isAuthenticated: isCloudSyncEnabled });
   const {
     createWorkspace: convexCreateWorkspace,
     updateWorkspace: convexUpdateWorkspace,
@@ -59,7 +62,7 @@ export function useWorkspaceState({
   const { servers: activeWorkspaceServersFlat, isLoading: isLoadingServers } =
     useWorkspaceServers({
       workspaceId: convexActiveWorkspaceId,
-      isAuthenticated,
+      isAuthenticated: isCloudSyncEnabled,
     });
 
   const hasMigratedRef = useRef(false);
@@ -68,7 +71,7 @@ export function useWorkspaceState({
   const CONVEX_TIMEOUT_MS = 10000;
 
   useEffect(() => {
-    if (!isAuthenticated) {
+    if (!isCloudSyncEnabled) {
       setUseLocalFallback(false);
       if (convexTimeoutRef.current) {
         clearTimeout(convexTimeoutRef.current);
@@ -105,13 +108,13 @@ export function useWorkspaceState({
         convexTimeoutRef.current = null;
       }
     };
-  }, [isAuthenticated, remoteWorkspaces, useLocalFallback, logger]);
+  }, [isCloudSyncEnabled, remoteWorkspaces, useLocalFallback, logger]);
 
   const isLoadingRemoteWorkspaces =
-    (isAuthenticated &&
+    (isCloudSyncEnabled &&
       !useLocalFallback &&
       (remoteWorkspaces === undefined || isLoadingServers)) ||
-    (isAuthLoading && !!convexActiveWorkspaceId);
+    (isAuthLoading && isCloudSyncEnabled && !!convexActiveWorkspaceId);
 
   const convexWorkspaces = useMemo((): Record<string, Workspace> => {
     if (!remoteWorkspaces) return {};
@@ -150,20 +153,20 @@ export function useWorkspaceState({
     if (useLocalFallback) {
       return appState.workspaces;
     }
-    if (isAuthenticated && remoteWorkspaces !== undefined) {
+    if (isCloudSyncEnabled && remoteWorkspaces !== undefined) {
       return convexWorkspaces;
     }
-    if (isAuthenticated) {
+    if (isCloudSyncEnabled) {
       return {};
     }
-    if (isAuthLoading && convexActiveWorkspaceId) {
+    if (isAuthLoading && isCloudSyncEnabled && convexActiveWorkspaceId) {
       return {};
     }
     return appState.workspaces;
   }, [
     useLocalFallback,
     appState.workspaces,
-    isAuthenticated,
+    isCloudSyncEnabled,
     remoteWorkspaces,
     convexWorkspaces,
     isAuthLoading,
@@ -174,7 +177,7 @@ export function useWorkspaceState({
     if (useLocalFallback) {
       return appState.activeWorkspaceId;
     }
-    if (isAuthenticated && remoteWorkspaces !== undefined) {
+    if (isCloudSyncEnabled && remoteWorkspaces !== undefined) {
       if (
         convexActiveWorkspaceId &&
         effectiveWorkspaces[convexActiveWorkspaceId]
@@ -188,14 +191,14 @@ export function useWorkspaceState({
   }, [
     useLocalFallback,
     appState.activeWorkspaceId,
-    isAuthenticated,
+    isCloudSyncEnabled,
     remoteWorkspaces,
     convexActiveWorkspaceId,
     effectiveWorkspaces,
   ]);
 
   useEffect(() => {
-    if (isAuthenticated && remoteWorkspaces && remoteWorkspaces.length > 0) {
+    if (isCloudSyncEnabled && remoteWorkspaces && remoteWorkspaces.length > 0) {
       if (
         !convexActiveWorkspaceId ||
         !convexWorkspaces[convexActiveWorkspaceId]
@@ -211,7 +214,7 @@ export function useWorkspaceState({
       }
     }
   }, [
-    isAuthenticated,
+    isCloudSyncEnabled,
     remoteWorkspaces,
     convexActiveWorkspaceId,
     convexWorkspaces,
@@ -227,7 +230,7 @@ export function useWorkspaceState({
   }, [convexActiveWorkspaceId]);
 
   useEffect(() => {
-    if (!isAuthenticated) {
+    if (!isCloudSyncEnabled) {
       hasMigratedRef.current = false;
       return;
     }
@@ -272,7 +275,7 @@ export function useWorkspaceState({
 
     Promise.all(localWorkspaces.map(migrateWorkspace));
   }, [
-    isAuthenticated,
+    isCloudSyncEnabled,
     useLocalFallback,
     remoteWorkspaces,
     appState.workspaces,
@@ -282,7 +285,7 @@ export function useWorkspaceState({
 
   const handleCreateWorkspace = useCallback(
     async (name: string, switchTo: boolean = false) => {
-      if (isAuthenticated) {
+      if (isCloudSyncEnabled) {
         try {
           const workspaceId = await convexCreateWorkspace({
             name,
@@ -316,12 +319,12 @@ export function useWorkspaceState({
       toast.success(`Workspace "${name}" created`);
       return newWorkspace.id;
     },
-    [isAuthenticated, convexCreateWorkspace, dispatch],
+    [isCloudSyncEnabled, convexCreateWorkspace, dispatch],
   );
 
   const handleUpdateWorkspace = useCallback(
     async (workspaceId: string, updates: Partial<Workspace>) => {
-      if (isAuthenticated) {
+      if (isCloudSyncEnabled) {
         try {
           const updateData: any = { workspaceId };
           if (updates.name !== undefined) updateData.name = updates.name;
@@ -343,7 +346,7 @@ export function useWorkspaceState({
         dispatch({ type: "UPDATE_WORKSPACE", workspaceId, updates });
       }
     },
-    [isAuthenticated, convexUpdateWorkspace, logger, dispatch],
+    [isCloudSyncEnabled, convexUpdateWorkspace, logger, dispatch],
   );
 
   const handleDeleteWorkspace = useCallback(
@@ -355,7 +358,7 @@ export function useWorkspaceState({
         return;
       }
 
-      if (isAuthenticated) {
+      if (isCloudSyncEnabled) {
         try {
           await convexDeleteWorkspace({ workspaceId });
         } catch (error) {
@@ -378,7 +381,7 @@ export function useWorkspaceState({
     },
     [
       effectiveActiveWorkspaceId,
-      isAuthenticated,
+      isCloudSyncEnabled,
       convexDeleteWorkspace,
       logger,
       dispatch,
@@ -393,7 +396,7 @@ export function useWorkspaceState({
         return;
       }
 
-      if (isAuthenticated) {
+      if (isCloudSyncEnabled) {
         try {
           const serializedServers = serializeServersForSharing(
             sourceWorkspace.servers,
@@ -412,7 +415,7 @@ export function useWorkspaceState({
         toast.success(`Workspace duplicated as "${newName}"`);
       }
     },
-    [effectiveWorkspaces, isAuthenticated, convexCreateWorkspace, dispatch],
+    [effectiveWorkspaces, isCloudSyncEnabled, convexCreateWorkspace, dispatch],
   );
 
   const handleSetDefaultWorkspace = useCallback(
@@ -425,7 +428,7 @@ export function useWorkspaceState({
 
   const handleWorkspaceShared = useCallback(
     (convexWorkspaceId: string) => {
-      if (isAuthenticated) {
+      if (isCloudSyncEnabled) {
         setConvexActiveWorkspaceId(convexWorkspaceId);
         logger.info("Switched to newly shared workspace", {
           convexWorkspaceId,
@@ -438,7 +441,7 @@ export function useWorkspaceState({
         });
       }
     },
-    [isAuthenticated, logger, dispatch, appState.activeWorkspaceId],
+    [isCloudSyncEnabled, logger, dispatch, appState.activeWorkspaceId],
   );
 
   const handleExportWorkspace = useCallback(
@@ -464,7 +467,7 @@ export function useWorkspaceState({
 
   const handleImportWorkspace = useCallback(
     async (workspaceData: Workspace) => {
-      if (isAuthenticated) {
+      if (isCloudSyncEnabled) {
         try {
           const serializedServers = serializeServersForSharing(
             workspaceData.servers || {},
@@ -490,7 +493,7 @@ export function useWorkspaceState({
         toast.success(`Workspace "${importedWorkspace.name}" imported`);
       }
     },
-    [isAuthenticated, convexCreateWorkspace, dispatch],
+    [isCloudSyncEnabled, convexCreateWorkspace, dispatch],
   );
 
   return {

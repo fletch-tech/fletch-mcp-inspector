@@ -19,6 +19,7 @@ const EMPTY_CONTEXT: HostedApiContext = {
 
 let hostedApiContext: HostedApiContext = EMPTY_CONTEXT;
 let cachedBearerToken: { token: string; expiresAt: number } | null = null;
+let injectedServerIdsByName: Record<string, string> = {};
 
 const TOKEN_CACHE_TTL_MS = 30_000;
 
@@ -33,7 +34,20 @@ function assertHostedMode() {
 }
 
 export function setHostedApiContext(next: HostedApiContext | null): void {
-  hostedApiContext = next ?? EMPTY_CONTEXT;
+  if (!next) {
+    hostedApiContext = EMPTY_CONTEXT;
+    injectedServerIdsByName = {};
+    resetTokenCache();
+    return;
+  }
+
+  hostedApiContext = {
+    ...next,
+    serverIdsByName: {
+      ...injectedServerIdsByName,
+      ...next.serverIdsByName,
+    },
+  };
   resetTokenCache();
 }
 
@@ -50,6 +64,10 @@ export function injectHostedServerMapping(
   serverId: string,
 ): void {
   if (!HOSTED_MODE) return;
+  injectedServerIdsByName = {
+    ...injectedServerIdsByName,
+    [serverName]: serverId,
+  };
   hostedApiContext = {
     ...hostedApiContext,
     serverIdsByName: {

@@ -206,6 +206,12 @@ export function useChatSession({
   const requireToolApprovalRef = useRef(requireToolApproval);
   requireToolApprovalRef.current = requireToolApproval;
 
+  const hostedWorkspaceIdValid =
+    typeof hostedWorkspaceId === "string" &&
+    hostedWorkspaceId.length > 0 &&
+    hostedWorkspaceId !== "none" &&
+    hostedWorkspaceId !== "default";
+
   // Build available models
   const availableModels = useMemo(() => {
     const models = buildAvailableModels({
@@ -345,6 +351,9 @@ export function useChatSession({
         url: string;
       }>;
     }) => {
+      if (HOSTED_MODE && !hostedWorkspaceIdValid) {
+        return;
+      }
       const { text, files } = options;
       if (files && files.length > 0) {
         // AI SDK accepts FileUIPart[] with data URLs
@@ -353,7 +362,7 @@ export function useChatSession({
         baseSendMessage({ text });
       }
     },
-    [baseSendMessage],
+    [baseSendMessage, hostedWorkspaceIdValid],
   );
 
   // Reset chat
@@ -563,7 +572,7 @@ export function useChatSession({
     requiresAuthForChat && isAuthenticated && !authHeaders;
   const hostedContextNotReady =
     HOSTED_MODE &&
-    (!hostedWorkspaceId ||
+    (!hostedWorkspaceIdValid ||
       (selectedServers.length > 0 &&
         hostedSelectedServerIds.length !== selectedServers.length));
   const isStreaming = status === "streaming" || status === "submitted";

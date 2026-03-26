@@ -65,8 +65,8 @@ next-env.d.ts
 # vite
 .vite/
 
-# convex (generated client code)
-convex/
+# convex: ignore only generated output; track schema and functions
+convex/_generated/
 
 # Sentry Config File
 .env.sentry-build-plugin

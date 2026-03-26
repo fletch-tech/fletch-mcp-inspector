@@ -625,13 +625,19 @@ async function processOneStep(
   );
 
   // Call Convex /stream endpoint
+  const convexHeaders: Record<string, string> = {
+    "content-type": "application/json",
+    ...getConvexServerAuthHeaders(),
+  };
+  if (authHeader) {
+    // Use one canonical Authorization key so user JWT reliably overrides
+    // any server-to-server admin header for identity-aware /stream auth.
+    convexHeaders.Authorization = authHeader;
+  }
+
   const res = await fetch(`${CONVEX_HTTP_URL}/stream`, {
     method: "POST",
-    headers: {
-      "content-type": "application/json",
-      ...getConvexServerAuthHeaders(),
-      ...(authHeader ? { authorization: authHeader } : {}),
-    },
+    headers: convexHeaders,
     body: JSON.stringify({
       mode: "stream",
       messages: JSON.stringify(scrubbedMessages),

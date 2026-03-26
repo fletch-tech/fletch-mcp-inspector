@@ -6,6 +6,7 @@ import { isMCPAuthError } from "@mcpjam/sdk";
 import { handleMCPJamFreeChatModel } from "../../utils/mcpjam-stream-handler.js";
 import { isMCPJamProvidedModel } from "@/shared/types";
 import { WEB_STREAM_TIMEOUT_MS, CONVEX_HTTP_URL } from "../../config.js";
+import { logger } from "../../utils/logger.js";
 import { prepareChatV2 } from "../../utils/chat-v2-orchestration.js";
 import {
   hostedChatSchema,
@@ -149,6 +150,12 @@ chatV2.post("/", async (c) => {
       });
     }
     const routeError = mapRuntimeError(error);
+    if (routeError.status === 400) {
+      logger.warn(
+        `[web/chat-v2] 400 Bad Request: ${routeError.message} (${routeError.code})`,
+        { code: routeError.code },
+      );
+    }
     return webError(
       c,
       routeError.status,

@@ -10,6 +10,7 @@
  */
 
 import { create } from "zustand";
+import { HOSTED_MODE } from "@/lib/config";
 import { addTokenToUrl } from "@/lib/session-token";
 
 export type UiProtocol = "mcp-apps" | "openai-apps";
@@ -78,6 +79,12 @@ let sseConnection: EventSource | null = null;
 let sseSubscriberCount = 0;
 
 export function subscribeToRpcStream(): () => void {
+  // In hosted mode, /api/mcp is disabled (or requires a session token we don't have).
+  // Skip the RPC stream to avoid 401 and unnecessary requests.
+  if (HOSTED_MODE) {
+    return () => {};
+  }
+
   sseSubscriberCount++;
 
   if (!sseConnection) {
