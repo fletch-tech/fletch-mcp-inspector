@@ -214,7 +214,7 @@ export function useChatSession({
 
   // Build available models
   const availableModels = useMemo(() => {
-    const models = buildAvailableModels({
+    return buildAvailableModels({
       hasToken,
       getOpenRouterSelectedModels,
       isOllamaRunning,
@@ -222,10 +222,6 @@ export function useChatSession({
       getAzureBaseUrl,
       customProviders,
     });
-    if (HOSTED_MODE) {
-      return models.filter((model) => isMCPJamProvidedModel(String(model.id)));
-    }
-    return models;
   }, [
     hasToken,
     getOpenRouterSelectedModels,
@@ -283,27 +279,48 @@ export function useChatSession({
 
     return new DefaultChatTransport({
       api: chatApi,
-      body: () => ({
-        model: selectedModel,
-        ...(HOSTED_MODE ? {} : { apiKey }),
-        ...(isGpt5 ? {} : { temperature }),
-        systemPrompt,
-        ...(HOSTED_MODE
-          ? {
-              workspaceId: hostedWorkspaceId,
-              selectedServerIds: hostedSelectedServerIds,
-              accessScope: "chat_v2" as const,
-              ...(hostedShareToken ? { shareToken: hostedShareToken } : {}),
-              ...(hostedOAuthTokens && Object.keys(hostedOAuthTokens).length > 0
-                ? { oauthTokens: hostedOAuthTokens }
-                : {}),
-            }
-          : { selectedServers }),
-        requireToolApproval: requireToolApprovalRef.current,
-        ...(!HOSTED_MODE && customProviders.length > 0
-          ? { customProviders }
-          : {}),
-      }),
+      body: () => {
+        const mcpProvided =
+          Boolean(selectedModel?.id) &&
+          isMCPJamProvidedModel(String(selectedModel.id));
+
+        const base = {
+          model: selectedModel,
+          ...(isGpt5 ? {} : { temperature }),
+          systemPrompt,
+          requireToolApproval: requireToolApprovalRef.current,
+        };
+
+        if (HOSTED_MODE) {
+          return {
+            ...base,
+            workspaceId: hostedWorkspaceId,
+            selectedServerIds: hostedSelectedServerIds,
+            accessScope: "chat_v2" as const,
+            ...(hostedShareToken ? { shareToken: hostedShareToken } : {}),
+            ...(hostedOAuthTokens && Object.keys(hostedOAuthTokens).length > 0
+              ? { oauthTokens: hostedOAuthTokens }
+              : {}),
+            ...(!mcpProvided
+              ? {
+                  apiKey,
+                  ollamaBaseUrl: getOllamaBaseUrl(),
+                  azureBaseUrl: getAzureBaseUrl(),
+                  ...(customProviders.length > 0 ? { customProviders } : {}),
+                }
+              : {}),
+          };
+        }
+
+        return {
+          ...base,
+          apiKey,
+          ollamaBaseUrl: getOllamaBaseUrl(),
+          azureBaseUrl: getAzureBaseUrl(),
+          selectedServers,
+          ...(customProviders.length > 0 ? { customProviders } : {}),
+        };
+      },
       headers:
         Object.keys(mergedHeaders).length > 0 ? mergedHeaders : undefined,
     });
@@ -320,6 +337,8 @@ export function useChatSession({
     hostedSelectedServerIds,
     hostedOAuthTokens,
     hostedShareToken,
+    getOllamaBaseUrl,
+    getAzureBaseUrl,
     // requireToolApproval read from ref at request time
   ]);
 

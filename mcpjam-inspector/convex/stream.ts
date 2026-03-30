@@ -2,7 +2,8 @@
  * POST /stream — LLM proxy for hosted MCPJam chat (and eval agents).
  *
  * The Inspector Node server calls CONVEX_HTTP_URL/stream with the user's JWT.
- * Set OPENAI_API_KEY (and optionally ANTHROPIC_API_KEY) on the Convex backend environment.
+ * Set OPENAI_API_KEY, optional ANTHROPIC_API_KEY, and optional GOOGLE_GENERATIVE_AI_API_KEY
+ * on the Convex backend environment for hosted MCPJam models (openai/*, anthropic/*, google/*).
  *
  * Modes:
  * - "stream" — UI message stream (NDJSON) for handleMCPJamFreeChatModel / processStream
@@ -19,8 +20,9 @@ import {
   type ModelMessage,
   type ToolSet,
 } from "ai";
-import { createOpenAI } from "@ai-sdk/openai";
 import { createAnthropic } from "@ai-sdk/anthropic";
+import { createGoogleGenerativeAI } from "@ai-sdk/google";
+import { createOpenAI } from "@ai-sdk/openai";
 
 type ToolDefinition = {
   name: string;
@@ -66,6 +68,7 @@ function toolsFromDefinitions(defs: ToolDefinition[]): ToolSet {
 function resolveModel(modelId: string) {
   const openaiKey = process.env.OPENAI_API_KEY?.trim();
   const anthropicKey = process.env.ANTHROPIC_API_KEY?.trim();
+  const googleKey = process.env.GOOGLE_GENERATIVE_AI_API_KEY?.trim();
 
   if (modelId.startsWith("openai/") || modelId.startsWith("gpt-")) {
     if (!openaiKey) {
@@ -85,6 +88,16 @@ function resolveModel(modelId: string) {
     const anthropic = createAnthropic({ apiKey: anthropicKey });
     const id = modelId.slice("anthropic/".length);
     return anthropic(id);
+  }
+
+  if (modelId.startsWith("google/")) {
+    if (!googleKey) {
+      throw new Error(
+        "GOOGLE_GENERATIVE_AI_API_KEY is not set on the Convex backend",
+      );
+    }
+    const google = createGoogleGenerativeAI({ apiKey: googleKey });
+    return google(modelId);
   }
 
   throw new Error(`Unsupported model for Convex /stream: ${modelId}`);

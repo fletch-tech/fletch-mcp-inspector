@@ -115,12 +115,18 @@ export const ALLOWED_HOSTS = process.env.MCPJAM_ALLOWED_HOSTS
 
 // ── Convex (self-hosted or cloud) ────────────────────────────────────────
 
+/** Read Convex HTTP base from env (call when the value may change after startup, e.g. in tests). */
+export function getConvexHttpUrl(): string {
+  return (
+    process.env.CONVEX_HTTP_URL?.trim() ||
+    process.env.CONVEX_SITE_ORIGIN?.trim() ||
+    process.env.CONVEX_SELF_HOSTED_URL?.trim() ||
+    ""
+  );
+}
+
 /** Effective Convex HTTP URL used for server-side fetches to Convex HTTP actions (e.g. /web/authorize). */
-export const CONVEX_HTTP_URL =
-  process.env.CONVEX_HTTP_URL?.trim() ||
-  process.env.CONVEX_SITE_ORIGIN?.trim() ||
-  process.env.CONVEX_SELF_HOSTED_URL?.trim() ||
-  "";
+export const CONVEX_HTTP_URL = getConvexHttpUrl();
 
 /** When using self-hosted Convex, optional admin key for server-to-server auth (Bearer). */
 export const CONVEX_SELF_HOSTED_ADMIN_KEY =

@@ -1,4 +1,12 @@
-import { useState, useEffect, useCallback } from "react";
+import {
+  useState,
+  useEffect,
+  useCallback,
+  useMemo,
+  useRef,
+} from "react";
+import { useAuth } from "@/lib/auth/jwt-auth-context";
+import { scopedLocalStorageKey } from "@/lib/hosted-user-storage";
 
 export interface ProviderTokens {
   anthropic: string;
@@ -30,7 +38,7 @@ export interface useAiProviderKeysReturn {
   setAzureBaseUrl: (url: string) => void;
 }
 
-const STORAGE_KEY = "mcp-inspector-provider-tokens";
+const STORAGE_KEY_BASE = "mcp-inspector-provider-tokens";
 
 const defaultTokens: ProviderTokens = {
   anthropic: "",
@@ -47,39 +55,51 @@ const defaultTokens: ProviderTokens = {
   openRouterSelectedModels: [],
 };
 
+function mergeStoredTokens(raw: Partial<ProviderTokens>): ProviderTokens {
+  return { ...defaultTokens, ...raw };
+}
+
 export function useAiProviderKeys(): useAiProviderKeysReturn {
+  const { user } = useAuth();
+  const storageKey = useMemo(
+    () => scopedLocalStorageKey(STORAGE_KEY_BASE, user?.id ?? null),
+    [user?.id],
+  );
+
   const [tokens, setTokens] = useState<ProviderTokens>(defaultTokens);
-  const [isInitialized, setIsInitialized] = useState(false);
+  const isRestoringRef = useRef(false);
 
-  // Load tokens from localStorage on mount
   useEffect(() => {
-    if (typeof window !== "undefined") {
-      try {
-        const stored = localStorage.getItem(STORAGE_KEY);
-        if (stored) {
-          const parsedTokens = JSON.parse(stored) as ProviderTokens;
-          setTokens(parsedTokens);
-        }
-      } catch (error) {
-        console.warn(
-          "Failed to load provider tokens from localStorage:",
-          error,
-        );
+    if (typeof window === "undefined") return;
+    isRestoringRef.current = true;
+    try {
+      const stored = localStorage.getItem(storageKey);
+      if (stored) {
+        const parsed = JSON.parse(stored) as Partial<ProviderTokens>;
+        setTokens(mergeStoredTokens(parsed));
+      } else {
+        setTokens({ ...defaultTokens });
       }
-      setIsInitialized(true);
+    } catch (error) {
+      console.warn(
+        "Failed to load provider tokens from localStorage:",
+        error,
+      );
+      setTokens({ ...defaultTokens });
     }
-  }, []);
+    queueMicrotask(() => {
+      isRestoringRef.current = false;
+    });
+  }, [storageKey]);
 
-  // Save tokens to localStorage whenever they change
   useEffect(() => {
-    if (isInitialized && typeof window !== "undefined") {
-      try {
-        localStorage.setItem(STORAGE_KEY, JSON.stringify(tokens));
-      } catch (error) {
-        console.warn("Failed to save provider tokens to localStorage:", error);
-      }
+    if (typeof window === "undefined" || isRestoringRef.current) return;
+    try {
+      localStorage.setItem(storageKey, JSON.stringify(tokens));
+    } catch (error) {
+      console.warn("Failed to save provider tokens to localStorage:", error);
     }
-  }, [tokens, isInitialized]);
+  }, [tokens, storageKey]);
 
   const setToken = useCallback(
     (provider: keyof ProviderTokens, token: string) => {

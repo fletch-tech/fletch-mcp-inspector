@@ -37,7 +37,7 @@ import {
 } from "./mcpjam-tool-helpers";
 import { logger } from "./logger";
 import {
-  CONVEX_HTTP_URL,
+  getConvexHttpUrl,
   getConvexServerAuthHeaders,
 } from "../config.js";
 
@@ -635,7 +635,8 @@ async function processOneStep(
     convexHeaders.Authorization = authHeader;
   }
 
-  const res = await fetch(`${CONVEX_HTTP_URL}/stream`, {
+  const convexHttpUrl = getConvexHttpUrl();
+  const res = await fetch(`${convexHttpUrl}/stream`, {
     method: "POST",
     headers: convexHeaders,
     body: JSON.stringify({

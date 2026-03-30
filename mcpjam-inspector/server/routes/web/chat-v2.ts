@@ -1,13 +1,24 @@
 import { Hono } from "hono";
-import { convertToModelMessages, type ToolSet } from "ai";
+import {
+  convertToModelMessages,
+  streamText,
+  stepCountIs,
+  type ToolSet,
+} from "ai";
 import type { ModelMessage } from "@ai-sdk/provider-utils";
 import type { ChatV2Request } from "@/shared/chat-v2";
+import type { ModelDefinition } from "@/shared/types";
 import { isMCPAuthError } from "@mcpjam/sdk";
+import { createLlmModel } from "../../utils/chat-helpers.js";
 import { handleMCPJamFreeChatModel } from "../../utils/mcpjam-stream-handler.js";
 import { isMCPJamProvidedModel } from "@/shared/types";
-import { WEB_STREAM_TIMEOUT_MS, CONVEX_HTTP_URL } from "../../config.js";
+import {
+  WEB_STREAM_TIMEOUT_MS,
+  getConvexHttpUrl,
+} from "../../config.js";
 import { logger } from "../../utils/logger.js";
 import { prepareChatV2 } from "../../utils/chat-v2-orchestration.js";
+import { formatChatV2StreamError } from "../../utils/format-stream-error.js";
 import {
   hostedChatSchema,
   createAuthorizedManager,
@@ -19,6 +30,42 @@ import {
   webError,
   mapRuntimeError,
 } from "./auth.js";
+
+function assertHostedUserModelCredentials(
+  modelDefinition: ModelDefinition,
+  body: ChatV2Request,
+) {
+  if (modelDefinition.provider === "ollama") {
+    return;
+  }
+  if (modelDefinition.provider === "custom") {
+    const name = modelDefinition.customProviderName;
+    if (!name) {
+      throw new WebRouteError(
+        400,
+        ErrorCode.VALIDATION_ERROR,
+        "Custom model is missing customProviderName",
+      );
+    }
+    const cp = body.customProviders?.find((p) => p.name === name);
+    const resolved = cp?.apiKey?.trim() || body.apiKey?.trim();
+    if (!resolved) {
+      throw new WebRouteError(
+        400,
+        ErrorCode.VALIDATION_ERROR,
+        "apiKey is required for this model — add it under LLM Providers or Custom Providers in Settings",
+      );
+    }
+    return;
+  }
+  if (!body.apiKey?.trim()) {
+    throw new WebRouteError(
+      400,
+      ErrorCode.VALIDATION_ERROR,
+      "apiKey is required for this model — add it under LLM Providers in Settings",
+    );
+  }
+}
 
 const chatV2 = new Hono();
 
@@ -106,34 +153,68 @@ chatV2.post("/", async (c) => {
         scrubMessages,
       } = prepared;
 
+      const modelMessages = await convertToModelMessages(messages);
+      const scrubbed = scrubMessages(modelMessages as ModelMessage[]);
+
       if (modelDefinition.id && isMCPJamProvidedModel(modelDefinition.id)) {
-        if (!CONVEX_HTTP_URL) {
+        if (!getConvexHttpUrl()) {
           throw new WebRouteError(
             500,
             ErrorCode.INTERNAL_ERROR,
             "Server missing Convex configuration (CONVEX_SELF_HOSTED_URL or CONVEX_HTTP_URL)",
           );
         }
-      } else {
-        throw new WebRouteError(
-          400,
-          ErrorCode.FEATURE_NOT_SUPPORTED,
-          "Only MCPJam hosted models are supported in hosted mode",
-        );
+        return handleMCPJamFreeChatModel({
+          messages: scrubbed,
+          modelId: String(modelDefinition.id),
+          systemPrompt: enhancedSystemPrompt,
+          temperature: resolvedTemperature,
+          tools: allTools as ToolSet,
+          authHeader: c.req.header("authorization"),
+          mcpClientManager: manager,
+          selectedServers: selectedServerIds,
+          requireToolApproval,
+          onStreamComplete: () => manager.disconnectAllServers(),
+        });
       }
 
-      const modelMessages = await convertToModelMessages(messages);
-      return handleMCPJamFreeChatModel({
-        messages: scrubMessages(modelMessages as ModelMessage[]),
-        modelId: String(modelDefinition.id),
-        systemPrompt: enhancedSystemPrompt,
-        temperature: resolvedTemperature,
+      assertHostedUserModelCredentials(modelDefinition, body);
+
+      const llmModel = createLlmModel(
+        modelDefinition,
+        body.apiKey ?? "",
+        {
+          ollama: body.ollamaBaseUrl,
+          azure: body.azureBaseUrl,
+        },
+        body.customProviders,
+      );
+
+      const result = streamText({
+        model: llmModel,
+        messages: scrubbed,
+        ...(resolvedTemperature !== undefined
+          ? { temperature: resolvedTemperature }
+          : {}),
+        system: enhancedSystemPrompt,
         tools: allTools as ToolSet,
-        authHeader: c.req.header("authorization"),
-        mcpClientManager: manager,
-        selectedServers: selectedServerIds,
-        requireToolApproval,
-        onStreamComplete: () => manager.disconnectAllServers(),
+        stopWhen: stepCountIs(20),
+      });
+
+      return result.toUIMessageStreamResponse({
+        messageMetadata: ({ part }) => {
+          if (part.type === "finish-step") {
+            return {
+              inputTokens: part.usage.inputTokens,
+              outputTokens: part.usage.outputTokens,
+              totalTokens: part.usage.totalTokens,
+            };
+          }
+        },
+        onError: (error) => {
+          logger.error("[web/chat-v2] stream error", error);
+          return formatChatV2StreamError(error, modelDefinition.provider);
+        },
       });
     } catch (error) {
       await manager.disconnectAllServers();
