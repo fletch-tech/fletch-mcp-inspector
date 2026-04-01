@@ -23,6 +23,7 @@ import {
 import { createAnthropic } from "@ai-sdk/anthropic";
 import { createGoogleGenerativeAI } from "@ai-sdk/google";
 import { createOpenAI } from "@ai-sdk/openai";
+import { wrapUiMessageSseBody } from "./lib/safeUiMessageSseStream";
 
 type ToolDefinition = {
   name: string;
@@ -112,89 +113,91 @@ function omitTemperatureForGpt5(modelId: string, temperature: number | undefined
 }
 
 export const streamHttp = httpAction(async (ctx, request) => {
-  if (request.method !== "POST") {
-    return new Response(JSON.stringify({ error: "Use POST" }), {
-      status: 405,
-      headers: { "Content-Type": "application/json" },
-    });
-  }
-
-  let identity: Awaited<ReturnType<typeof ctx.auth.getUserIdentity>> | null = null;
   try {
-    identity = await ctx.auth.getUserIdentity();
-  } catch {
-    identity = null;
-  }
-  if (!identity) {
-    return new Response(
-      JSON.stringify({
-        code: "UNAUTHORIZED",
-        message: "Valid JWT required (Authorization: Bearer <token>)",
-      }),
-      { status: 401, headers: { "Content-Type": "application/json" } },
-    );
-  }
-
-  let raw: Record<string, unknown>;
-  try {
-    raw = (await request.json()) as Record<string, unknown>;
-  } catch {
-    return new Response(JSON.stringify({ error: "Invalid JSON body" }), {
-      status: 400,
-      headers: { "Content-Type": "application/json" },
-    });
-  }
-
-  const mode = typeof raw.mode === "string" ? raw.mode : "stream";
-  const modelId = typeof raw.model === "string" ? raw.model : "";
-  if (!modelId) {
-    return new Response(JSON.stringify({ error: "model is required" }), {
-      status: 400,
-      headers: { "Content-Type": "application/json" },
-    });
-  }
-
-  let messages: ModelMessage[];
-  try {
-    const encoded = raw.messages;
-    if (typeof encoded !== "string") {
-      throw new Error("messages must be a JSON string");
+    if (request.method !== "POST") {
+      return new Response(JSON.stringify({ error: "Use POST" }), {
+        status: 405,
+        headers: { "Content-Type": "application/json" },
+      });
     }
-    messages = JSON.parse(encoded) as ModelMessage[];
-    if (!Array.isArray(messages)) {
-      throw new Error("messages must decode to an array");
+
+    let identity: Awaited<ReturnType<typeof ctx.auth.getUserIdentity>> | null =
+      null;
+    try {
+      identity = await ctx.auth.getUserIdentity();
+    } catch {
+      identity = null;
     }
-  } catch (e) {
-    const msg = e instanceof Error ? e.message : "Invalid messages";
-    return new Response(JSON.stringify({ error: msg }), {
-      status: 400,
-      headers: { "Content-Type": "application/json" },
-    });
-  }
+    if (!identity) {
+      return new Response(
+        JSON.stringify({
+          code: "UNAUTHORIZED",
+          message: "Valid JWT required (Authorization: Bearer <token>)",
+        }),
+        { status: 401, headers: { "Content-Type": "application/json" } },
+      );
+    }
 
-  const systemPrompt = typeof raw.systemPrompt === "string" ? raw.systemPrompt : undefined;
-  const temperature =
-    typeof raw.temperature === "number" && !Number.isNaN(raw.temperature)
-      ? raw.temperature
-      : undefined;
-  const toolDefs = parseToolDefinitions(raw.tools);
-  const tools = toolsFromDefinitions(toolDefs);
-  const hasTools = Object.keys(tools).length > 0;
+    let raw: Record<string, unknown>;
+    try {
+      raw = (await request.json()) as Record<string, unknown>;
+    } catch {
+      return new Response(JSON.stringify({ error: "Invalid JSON body" }), {
+        status: 400,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
 
-  let model;
-  try {
-    model = resolveModel(modelId);
-  } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e);
-    return new Response(JSON.stringify({ error: msg }), {
-      status: 500,
-      headers: { "Content-Type": "application/json" },
-    });
-  }
+    const mode = typeof raw.mode === "string" ? raw.mode : "stream";
+    const modelId = typeof raw.model === "string" ? raw.model : "";
+    if (!modelId) {
+      return new Response(JSON.stringify({ error: "model is required" }), {
+        status: 400,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
 
-  const tempOpts = omitTemperatureForGpt5(modelId, temperature);
+    let messages: ModelMessage[];
+    try {
+      const encoded = raw.messages;
+      if (typeof encoded !== "string") {
+        throw new Error("messages must be a JSON string");
+      }
+      messages = JSON.parse(encoded) as ModelMessage[];
+      if (!Array.isArray(messages)) {
+        throw new Error("messages must decode to an array");
+      }
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : "Invalid messages";
+      return new Response(JSON.stringify({ error: msg }), {
+        status: 400,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
 
-  try {
+    const systemPrompt =
+      typeof raw.systemPrompt === "string" ? raw.systemPrompt : undefined;
+    const temperature =
+      typeof raw.temperature === "number" && !Number.isNaN(raw.temperature)
+        ? raw.temperature
+        : undefined;
+    const toolDefs = parseToolDefinitions(raw.tools);
+    const tools = toolsFromDefinitions(toolDefs);
+    const hasTools = Object.keys(tools).length > 0;
+
+    let model;
+    try {
+      model = resolveModel(modelId);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      return new Response(JSON.stringify({ error: msg }), {
+        status: 500,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+
+    const tempOpts = omitTemperatureForGpt5(modelId, temperature);
+
     if (mode === "step") {
       const result = await generateText({
         model,
@@ -230,9 +233,20 @@ export const streamHttp = httpAction(async (ctx, request) => {
       stopWhen: stepCountIs(1),
     });
 
-    return result.toUIMessageStreamResponse({
+    const inner = result.toUIMessageStreamResponse({
       onError: (error) =>
         error instanceof Error ? error.message : "Stream error",
+    });
+    const body = inner.body;
+    if (!body) {
+      return inner;
+    }
+    // Avoid surfacing provider stream failures as a broken body stream, which
+    // can wedge self-hosted Convex workers until restart.
+    return new Response(wrapUiMessageSseBody(body), {
+      status: inner.status,
+      statusText: inner.statusText,
+      headers: inner.headers,
     });
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
