@@ -145,26 +145,49 @@ export async function authorizeServer(
   }
 
   if (!response.ok) {
+    const bodyMessage =
+      typeof body?.message === "string" && body.message.trim().length > 0
+        ? body.message
+        : undefined;
+
+    const defaultMessageForStatus = (status: number): string => {
+      if (status === 404) {
+        return "Authorization endpoint not found (404). Deploy convex/http.ts (POST /web/authorize) and set CONVEX_HTTP_URL to the HTTP-actions base. If your backend uses path routing (e.g. CONVEX_SITE_ORIGIN=https://host/http), include that path: CONVEX_HTTP_URL=https://host/http — not the sync URL alone.";
+      }
+      if (status === 503) {
+        return "Convex HTTP site returned 503 (service unavailable). Hosted routes call CONVEX_HTTP_URL + /web/authorize before tools/list. Check Convex site/backend health, ingress/proxy upstreams, and that CONVEX_HTTP_URL on the Inspector points at the HTTP-actions entrypoint (not only the sync API URL).";
+      }
+      if (status === 502) {
+        return "Convex HTTP site returned 502 (bad gateway). The authorize request reached a proxy but the Convex HTTP backend was unreachable or returned an invalid response.";
+      }
+      return `Authorization failed (${status})`;
+    };
+
     const code =
       typeof body?.code === "string"
         ? body.code
         : response.status === 404
           ? ErrorCode.NOT_FOUND
-          : response.status >= 500
-            ? ErrorCode.INTERNAL_ERROR
-            : ErrorCode.INTERNAL_ERROR;
-    const message =
-      typeof body?.message === "string"
-        ? body.message
-        : response.status === 404
-          ? "Authorization endpoint not found (404). Deploy convex/http.ts (POST /web/authorize) and set CONVEX_HTTP_URL to the HTTP-actions base. If your backend uses path routing (e.g. CONVEX_SITE_ORIGIN=https://host/http), include that path: CONVEX_HTTP_URL=https://host/http — not the sync URL alone."
-          : `Authorization failed (${response.status})`;
+          : response.status === 502 || response.status === 503
+            ? ErrorCode.SERVER_UNREACHABLE
+            : response.status >= 500
+              ? ErrorCode.INTERNAL_ERROR
+              : ErrorCode.INTERNAL_ERROR;
+
+    const message = bodyMessage ?? defaultMessageForStatus(response.status);
+
     if (response.status === 404) {
       logger.warn(
         `[web/auth] Convex POST ${authorizeUrl} returned 404 — wrong base or route not deployed`,
         { workspaceId, serverId, convexBase: CONVEX_HTTP_URL },
       );
+    } else if (response.status === 502 || response.status === 503) {
+      logger.warn(
+        `[web/auth] Convex POST ${authorizeUrl} returned ${response.status} — Convex HTTP site or proxy unavailable`,
+        { workspaceId, serverId, convexBase: CONVEX_HTTP_URL },
+      );
     }
+
     throw new WebRouteError(response.status, code as ErrorCode, message);
   }
 

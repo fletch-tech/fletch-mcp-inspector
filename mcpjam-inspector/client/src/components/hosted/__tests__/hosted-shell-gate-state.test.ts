@@ -28,7 +28,20 @@ describe("resolveHostedShellGateState", () => {
     ).toBe("auth-loading");
   });
 
-  it("returns auth-loading when auth user exists but Convex auth has not settled", () => {
+  it("returns auth-loading when JWT user exists but Convex auth is still loading", () => {
+    expect(
+      resolveHostedShellGateState({
+        hostedMode: true,
+        isConvexAuthLoading: true,
+        isConvexAuthenticated: false,
+        isAuthProviderLoading: false,
+        hasAuthUser: true,
+        isLoadingRemoteWorkspaces: false,
+      }),
+    ).toBe("auth-loading");
+  });
+
+  it("returns logged-out when JWT user exists but Convex has finished without auth", () => {
     expect(
       resolveHostedShellGateState({
         hostedMode: true,
@@ -38,7 +51,7 @@ describe("resolveHostedShellGateState", () => {
         hasAuthUser: true,
         isLoadingRemoteWorkspaces: false,
       }),
-    ).toBe("auth-loading");
+    ).toBe("logged-out");
   });
 
   it("returns logged-out only when neither auth source is authenticated", () => {

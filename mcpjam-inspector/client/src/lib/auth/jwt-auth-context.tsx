@@ -318,19 +318,23 @@ export function useAuth(): JwtAuthContextValue {
  */
 export function useConvexJwtAuth() {
   const { isLoading, user, getAccessToken } = useAuth();
+  const fetchAccessToken = useCallback(
+    async ({
+      forceRefreshToken: _,
+    }: {
+      forceRefreshToken: boolean;
+    }) => {
+      const token = await getAccessToken();
+      return token ?? null;
+    },
+    [getAccessToken],
+  );
   return useMemo(
     () => ({
       isLoading,
       isAuthenticated: !!user,
-      fetchAccessToken: async ({
-        forceRefreshToken: _,
-      }: {
-        forceRefreshToken: boolean;
-      }) => {
-        const token = await getAccessToken();
-        return token ?? null;
-      },
+      fetchAccessToken,
     }),
-    [isLoading, user, getAccessToken],
+    [isLoading, user, fetchAccessToken],
   );
 }
