@@ -1,5 +1,17 @@
 import { mutation, query } from "./_generated/server";
 import { v } from "convex/values";
+import type { Id } from "./_generated/dataModel";
+
+async function currentUser(ctx: { auth: any; db: any }) {
+  const identity = await ctx.auth.getUserIdentity();
+  if (!identity) return null;
+  return ctx.db
+    .query("users")
+    .withIndex("by_token", (q: any) =>
+      q.eq("tokenIdentifier", identity.tokenIdentifier),
+    )
+    .unique();
+}
 
 const serverConfigValidator = v.object({
   enabled: v.optional(v.boolean()),
@@ -85,6 +97,20 @@ export const deleteServer = mutation({
 export const getWorkspaceServers = query({
   args: { workspaceId: v.string() },
   handler: async (ctx, args) => {
+    const user = await currentUser(ctx);
+    if (!user) return [];
+
+    // Verify caller is a member of this workspace
+    const wsId = args.workspaceId as Id<"workspaces">;
+    const membership = await ctx.db
+      .query("workspaceMembers")
+      .withIndex("by_workspace_user", (q: any) =>
+        q.eq("workspaceId", wsId).eq("userId", user._id),
+      )
+      .unique();
+
+    if (!membership) return [];
+
     return await ctx.db
       .query("servers")
       .withIndex("by_workspace", (q) => q.eq("workspaceId", args.workspaceId))

@@ -4,6 +4,7 @@ import {
   getOrCreateDefaultOrg,
   ensureOrgMembership,
 } from "./organizations";
+import { ensureDefaultWorkspaceForUser } from "./workspaceHelpers";
 
 // ── Helpers ──────────────────────────────────────────────────────────
 
@@ -107,6 +108,9 @@ export const ensureUser = mutation({
       isOwner: false,
       addedBy: userId,
     });
+
+    // Ensure user has at least one workspace
+    await ensureDefaultWorkspaceForUser(ctx, userId, email);
 
     return userId;
   },

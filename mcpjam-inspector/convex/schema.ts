@@ -42,6 +42,19 @@ export default defineSchema({
     updatedAt: v.number(),
   }).index("by_created", ["createdAt"]),
 
+  workspaceMembers: defineTable({
+    workspaceId: v.id("workspaces"),
+    userId: v.id("users"),
+    email: v.string(),
+    role: v.string(),
+    isOwner: v.boolean(),
+    addedBy: v.id("users"),
+    addedAt: v.number(),
+  })
+    .index("by_workspace", ["workspaceId"])
+    .index("by_user", ["userId"])
+    .index("by_workspace_user", ["workspaceId", "userId"]),
+
   servers: defineTable({
     workspaceId: v.string(),
     name: v.string(),

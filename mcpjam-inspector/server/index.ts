@@ -99,7 +99,6 @@ import {
   HOSTED_MODE,
   ALLOWED_HOSTS,
   HAS_CONVEX,
-  CONVEX_HTTP_URL,
 } from "./config";
 import "./types/hono"; // Type extensions
 
@@ -314,6 +313,9 @@ if (HOSTED_MODE) {
   app.use("/api/mcp/*", (c) => strictModeResponse(c, "/api/mcp/*"));
   app.use("/api/apps", (c) => strictModeResponse(c, "/api/apps/*"));
   app.use("/api/apps/*", (c) => strictModeResponse(c, "/api/apps/*"));
+  app.use("/api/mcp-cli-config", (c) =>
+    strictModeResponse(c, "/api/mcp-cli-config"),
+  );
 }
 
 // 4. Session authentication (blocks unauthorized API requests)
@@ -386,14 +388,6 @@ app.options("/sse/message", (c) => {
 // Health check
 app.get("/health", (c) => {
   return c.json({ status: "ok", timestamp: new Date().toISOString() });
-});
-
-// Convex config (for verifying server uses self-hosted backend)
-app.get("/api/convex-config", (c) => {
-  return c.json({
-    serverConvexUrl: CONVEX_HTTP_URL || null,
-    hint: "Client Convex URL is set at build time (VITE_CONVEX_URL). Add ?convex_debug=1 to the app URL and check the browser console to see which URL the client uses.",
-  });
 });
 
 // Session token endpoint (for dev mode where HTML isn't served by this server)

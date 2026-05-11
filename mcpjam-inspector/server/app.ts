@@ -196,6 +196,9 @@ export function createHonoApp() {
     app.use("/api/mcp/*", (c) => strictModeResponse(c, "/api/mcp/*"));
     app.use("/api/apps", (c) => strictModeResponse(c, "/api/apps/*"));
     app.use("/api/apps/*", (c) => strictModeResponse(c, "/api/apps/*"));
+    app.use("/api/mcp-cli-config", (c) =>
+      strictModeResponse(c, "/api/mcp-cli-config"),
+    );
   }
 
   // 4. Session authentication (blocks unauthorized API requests)
