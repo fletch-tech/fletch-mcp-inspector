@@ -33,6 +33,7 @@ function createTestApp(): Hono {
   app.get("/health", (c) => c.json({ status: "ok" }));
   app.get("/api/mcp/health", (c) => c.json({ status: "ok" }));
   app.get("/api/session-token", (c) => c.json({ token: "test" }));
+  app.get("/api/mcp-cli-config", (c) => c.json({ config: null }));
 
   // Unprotected prefixes
   app.get("/assets/main.js", (c) => c.text("console.log('hello')"));
@@ -187,6 +188,18 @@ describe("sessionAuthMiddleware", () => {
     it("allows /api/session-token without token", async () => {
       const res = await app.request("/api/session-token");
 
+      expect(res.status).toBe(200);
+    });
+
+    it("requires token for /api/mcp-cli-config", async () => {
+      const res = await app.request("/api/mcp-cli-config");
+      expect(res.status).toBe(401);
+    });
+
+    it("allows /api/mcp-cli-config with valid token", async () => {
+      const res = await app.request("/api/mcp-cli-config", {
+        headers: { "X-MCP-Session-Auth": `Bearer ${validToken}` },
+      });
       expect(res.status).toBe(200);
     });
   });

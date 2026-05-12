@@ -104,6 +104,7 @@ export const webAuthorize = httpAction(async (ctx, request) => {
     lookup = await ctx.runQuery(internal.webAuthorizeInternal.lookupAuthorizeContext, {
       serverId,
       workspaceId,
+      tokenIdentifier: identity.tokenIdentifier,
     });
   } catch (error) {
     return new Response(
@@ -119,15 +120,36 @@ export const webAuthorize = httpAction(async (ctx, request) => {
   }
 
   if (!lookup.ok) {
-    const isWorkspace = lookup.reason === "WORKSPACE_NOT_FOUND";
-    return new Response(
-      JSON.stringify({
+    const reasonMap: Record<string, { code: string; message: string; status: number }> = {
+      USER_NOT_FOUND: {
+        code: "UNAUTHORIZED",
+        message: "User not found",
+        status: 401,
+      },
+      WORKSPACE_NOT_FOUND: {
         code: "NOT_FOUND",
-        message: isWorkspace
-          ? "Workspace not found"
-          : "Server not found or does not belong to this workspace",
-      }),
-      { status: 403, headers: { "Content-Type": "application/json" } },
+        message: "Workspace not found",
+        status: 404,
+      },
+      NOT_A_MEMBER: {
+        code: "FORBIDDEN",
+        message: "You are not a member of this workspace",
+        status: 403,
+      },
+      SERVER_NOT_FOUND_OR_MISMATCH: {
+        code: "NOT_FOUND",
+        message: "Server not found or does not belong to this workspace",
+        status: 404,
+      },
+    };
+    const info = reasonMap[lookup.reason] ?? {
+      code: "FORBIDDEN",
+      message: "Authorization failed",
+      status: 403,
+    };
+    return new Response(
+      JSON.stringify({ code: info.code, message: info.message }),
+      { status: info.status, headers: { "Content-Type": "application/json" } },
     );
   }
 

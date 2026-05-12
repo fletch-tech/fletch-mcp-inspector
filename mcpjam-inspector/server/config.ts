@@ -18,6 +18,13 @@ export const LOCAL_SERVER_ADDR = `http://localhost:${SERVER_PORT}`;
 // Uses VITE_ prefix so the same variable works for both server and client build
 export const HOSTED_MODE = process.env.VITE_MCPJAM_HOSTED_MODE === "true";
 
+// External auth mode for deployments that rely on JWT handoff via /auth/landing
+// (token provided by another application). In this mode, legacy local-session
+// endpoints should be disabled on public hosts.
+export const EXTERNAL_AUTH_MODE =
+  process.env.MCPJAM_EXTERNAL_AUTH_MODE === "true" ||
+  (process.env.MAIN_URL?.trim().length ?? 0) > 0;
+
 // Exact origins allowed for hosted web routes and CORS
 export const WEB_ALLOWED_ORIGINS = (process.env.WEB_ALLOWED_ORIGINS ?? "")
   .split(",")
