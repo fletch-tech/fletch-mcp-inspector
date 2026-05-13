@@ -1,8 +1,17 @@
 import { Hono } from "hono";
-import { assertBearerToken } from "./errors.js";
-import { webError, ErrorCode } from "./errors.js";
+import {
+  assertBearerToken,
+  webError,
+  ErrorCode,
+  mapRuntimeError,
+} from "./errors.js";
 
 const skills = new Hono();
+
+skills.onError((error, c) => {
+  const routeError = mapRuntimeError(error);
+  return webError(c, routeError.status, routeError.code, routeError.message);
+});
 
 /**
  * Hosted-mode skills API. Uses Bearer auth (Convex JWT).

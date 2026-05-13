@@ -68,6 +68,12 @@ export function mapRuntimeError(error: unknown): WebRouteError {
   return new WebRouteError(500, ErrorCode.INTERNAL_ERROR, message);
 }
 
+/** Serialized null/undefined from clients (e.g. template bugs) must not count as a credential. */
+function isPlaceholderBearerToken(token: string): boolean {
+  const t = token.trim().toLowerCase();
+  return t.length === 0 || t === "null" || t === "undefined" || t === "none";
+}
+
 export function assertBearerToken(c: any): string {
   const authHeader = c.req.header("authorization");
   if (!authHeader || !authHeader.startsWith("Bearer ")) {
@@ -77,7 +83,15 @@ export function assertBearerToken(c: any): string {
       "Missing or invalid bearer token",
     );
   }
-  return authHeader.slice("Bearer ".length);
+  const token = authHeader.slice("Bearer ".length).trim();
+  if (isPlaceholderBearerToken(token)) {
+    throw new WebRouteError(
+      401,
+      ErrorCode.UNAUTHORIZED,
+      "Missing or invalid bearer token",
+    );
+  }
+  return token;
 }
 
 export async function readJsonBody<T>(c: any): Promise<T> {

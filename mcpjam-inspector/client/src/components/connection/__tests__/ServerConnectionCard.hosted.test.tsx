@@ -1,8 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { toast } from "sonner";
 import { ServerConnectionCard } from "../ServerConnectionCard";
 import type { ServerWithName } from "@/hooks/use-app-state";
+import { listTools } from "@/lib/apis/mcp-tools-api";
 
 vi.mock("@/lib/config", () => ({
   HOSTED_MODE: true,
@@ -69,6 +70,31 @@ const createServer = (
   }) as ServerWithName;
 
 describe("ServerConnectionCard hosted reconnect guard", () => {
+  it("does not list tools when connected but server is missing from workspace catalogue", async () => {
+    vi.mocked(listTools).mockClear();
+    const server = createServer({
+      name: "orphan-local",
+      connectionStatus: "connected",
+      config: {
+        transportType: "streamableHttp",
+        url: "https://example.com/mcp",
+      },
+    });
+
+    render(
+      <ServerConnectionCard
+        server={server}
+        onDisconnect={vi.fn()}
+        onReconnect={vi.fn()}
+        onEdit={vi.fn()}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(vi.mocked(listTools)).not.toHaveBeenCalled();
+    });
+  });
+
   it("blocks reconnect switch for non-HTTPS servers in hosted mode", () => {
     const onReconnect = vi.fn().mockResolvedValue(undefined);
     const server = createServer();

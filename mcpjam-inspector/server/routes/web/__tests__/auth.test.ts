@@ -14,6 +14,25 @@ describe("web routes — auth enforcement", () => {
     expect(data.code).toBe("UNAUTHORIZED");
   });
 
+  it("returns 401 for tools/list with Authorization Bearer null", async () => {
+    const res = await postJson(
+      app,
+      "/api/web/tools/list",
+      { workspaceId: "ws-1", serverId: "srv-1" },
+      "null",
+    );
+    const { status, data } = await expectJson<{ code: string }>(res);
+    expect(status).toBe(401);
+    expect(data.code).toBe("UNAUTHORIZED");
+  });
+
+  it("returns 401 for skills/list with Authorization Bearer null", async () => {
+    const res = await postJson(app, "/api/web/skills/list", {}, "null");
+    const { status, data } = await expectJson<{ code: string }>(res);
+    expect(status).toBe(401);
+    expect(data.code).toBe("UNAUTHORIZED");
+  });
+
   it("returns 401 for tools/execute without bearer token", async () => {
     const res = await postJson(app, "/api/web/tools/execute", {
       workspaceId: "ws-1",
