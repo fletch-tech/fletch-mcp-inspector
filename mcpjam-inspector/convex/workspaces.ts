@@ -1,7 +1,61 @@
 import { mutation, query } from "./_generated/server";
-import { v } from "convex/values";
+import { ConvexError, v } from "convex/values";
 import type { Id } from "./_generated/dataModel";
 import { ensureDefaultWorkspaceForUser } from "./workspaceHelpers";
+
+/** Payload for share-dialog mutations: plain `message` for UI; `details` for logs/support. */
+type WorkspaceShareErrorDetails = {
+  code: string;
+  workspaceId?: string;
+  inviteEmail?: string;
+  targetUserId?: string;
+  memberId?: string;
+  callerRole?: string;
+};
+
+type WorkspaceShareErrorData = {
+  message: string;
+  details?: WorkspaceShareErrorDetails;
+};
+
+function workspaceShareError(
+  message: string,
+  details?: WorkspaceShareErrorDetails,
+): never {
+  const data: WorkspaceShareErrorData = { message };
+  if (details !== undefined) {
+    data.details = details;
+  }
+  throw new ConvexError(data);
+}
+
+async function requireMembershipForShare(
+  ctx: { auth: any; db: any },
+  workspaceId: Id<"workspaces">,
+) {
+  const user = await currentUser(ctx);
+  if (!user) {
+    workspaceShareError("Please sign in to continue.", {
+      code: "not_authenticated",
+    });
+  }
+
+  const membership = await ctx.db
+    .query("workspaceMembers")
+    .withIndex("by_workspace_user", (q: any) =>
+      q.eq("workspaceId", workspaceId).eq("userId", user._id),
+    )
+    .unique();
+
+  if (!membership) {
+    workspaceShareError("You don’t have access to this workspace.", {
+      code: "not_a_member",
+      workspaceId: String(workspaceId),
+    });
+  }
+
+  return { user, membership };
+}
 
 async function currentUser(ctx: { auth: any; db: any }) {
   const identity = await ctx.auth.getUserIdentity();
@@ -117,7 +171,11 @@ export const createWorkspace = mutation({
   args: { name: v.string() },
   handler: async (ctx, args) => {
     const user = await currentUser(ctx);
-    if (!user) throw new Error("Not authenticated");
+    if (!user) {
+      workspaceShareError("Please sign in to continue.", {
+        code: "not_authenticated",
+      });
+    }
 
     const now = Date.now();
     const workspaceId = await ctx.db.insert("workspaces", {
@@ -197,14 +255,29 @@ export const addMember = mutation({
   args: { workspaceId: v.string(), email: v.string() },
   handler: async (ctx, args) => {
     const wsId = args.workspaceId as Id<"workspaces">;
-    const { user: caller, membership } = await requireMembership(ctx, wsId);
+    const { user: caller, membership } = await requireMembershipForShare(
+      ctx,
+      wsId,
+    );
 
     if (membership.role !== "owner" && membership.role !== "admin") {
-      throw new Error("Only owners and admins can add members");
+      workspaceShareError(
+        "You don’t have permission to invite people to this workspace.",
+        {
+          code: "forbidden_invite",
+          workspaceId: String(wsId),
+          callerRole: membership.role ?? "member",
+        },
+      );
     }
 
     const email = args.email.trim().toLowerCase();
-    if (!email) throw new Error("Email is required");
+    if (!email) {
+      workspaceShareError("Enter an email address.", {
+        code: "email_required",
+        workspaceId: String(wsId),
+      });
+    }
 
     // Find the user by email
     const users = await ctx.db.query("users").collect();
@@ -213,8 +286,13 @@ export const addMember = mutation({
     );
 
     if (!targetUser) {
-      throw new Error(
-        "No user found with that email. They need to sign in first.",
+      workspaceShareError(
+        "We couldn’t find an account with that email. They need to sign in once before you can invite them.",
+        {
+          code: "user_not_found",
+          workspaceId: String(wsId),
+          inviteEmail: email,
+        },
       );
     }
 
@@ -227,7 +305,15 @@ export const addMember = mutation({
       .unique();
 
     if (existing) {
-      throw new Error("User is already a member of this workspace");
+      workspaceShareError(
+        "That email already has access to this workspace.",
+        {
+          code: "already_member",
+          workspaceId: String(wsId),
+          inviteEmail: email,
+          targetUserId: String(targetUser._id),
+        },
+      );
     }
 
     await ctx.db.insert("workspaceMembers", {
@@ -318,7 +404,7 @@ export const removeMember = mutation({
   handler: async (ctx, args) => {
     const wsId = args.workspaceId as Id<"workspaces">;
     const { user: caller, membership: callerMembership } =
-      await requireMembership(ctx, wsId);
+      await requireMembershipForShare(ctx, wsId);
 
     let targetMembership: any = null;
 
@@ -337,14 +423,32 @@ export const removeMember = mutation({
     }
 
     if (!targetMembership || targetMembership.workspaceId !== wsId) {
-      throw new Error("Member not found in this workspace");
+      const details: WorkspaceShareErrorDetails = {
+        code: "member_not_found",
+        workspaceId: String(wsId),
+      };
+      if (args.email) {
+        details.inviteEmail = args.email.toLowerCase();
+      }
+      if (args.memberId) {
+        details.memberId = args.memberId;
+      }
+      workspaceShareError(
+        "We couldn’t find that person in this workspace.",
+        details,
+      );
     }
 
     const isSelf = targetMembership.userId === caller._id;
 
     if (targetMembership.isOwner) {
-      throw new Error(
-        "Cannot remove the workspace owner. Transfer ownership first.",
+      workspaceShareError(
+        "You can’t remove the workspace owner until ownership is transferred.",
+        {
+          code: "cannot_remove_owner",
+          workspaceId: String(wsId),
+          memberId: String(targetMembership._id),
+        },
       );
     }
 
@@ -353,7 +457,12 @@ export const removeMember = mutation({
         callerMembership.role !== "owner" &&
         callerMembership.role !== "admin"
       ) {
-        throw new Error("Only owners and admins can remove other members");
+        workspaceShareError("You don’t have permission to remove that member.", {
+          code: "forbidden_remove",
+          workspaceId: String(wsId),
+          callerRole: callerMembership.role ?? "member",
+          memberId: String(targetMembership._id),
+        });
       }
     }
 
