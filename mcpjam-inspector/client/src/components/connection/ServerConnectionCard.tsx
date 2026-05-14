@@ -173,8 +173,17 @@ export function ServerConnectionCard({
         setToolsData(null);
         return;
       }
+      // Hosted routes resolve the server via workspace catalogue (name → Convex id).
+      // We can show "connected" locally while the server row is not in this workspace
+      // (stale UI / ordering); skip tools fetch to avoid resolveHostedServerId errors.
+      if (HOSTED_MODE && !hostedServerId) {
+        setToolsData(null);
+        return;
+      }
       try {
-        const result = await listTools({ serverId: server.name });
+        const result = await listTools({
+          serverId: HOSTED_MODE && hostedServerId ? hostedServerId : server.name,
+        });
         setToolsData(result);
       } catch (err) {
         // Silently fail - tools metadata is optional
@@ -184,7 +193,7 @@ export function ServerConnectionCard({
     };
 
     loadTools();
-  }, [server.name, server.connectionStatus]);
+  }, [server.name, server.connectionStatus, hostedServerId]);
 
   useEffect(() => {
     if (serverTunnelUrl !== undefined) {

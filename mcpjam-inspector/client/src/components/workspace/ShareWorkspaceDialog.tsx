@@ -22,6 +22,8 @@ import {
 import { useConvexAuth } from "convex/react";
 import { useProfilePicture } from "@/hooks/useProfilePicture";
 import { type User } from "@/lib/auth/jwt-auth-context";
+import { getWorkspaceShareConvexErrorMessage } from "@/lib/workspace-share-convex-error";
+
 interface ShareWorkspaceDialogProps {
   isOpen: boolean;
   onClose: () => void;
@@ -130,7 +132,9 @@ export function ShareWorkspaceDialog({
         email: email.trim(),
       });
 
-      if (result.isPending) {
+      const invitedPendingSignup = result?.isPending === true;
+
+      if (invitedPendingSignup) {
         toast.success(
           `Invitation sent to ${email}. They'll get access once they sign up.`,
         );
@@ -141,12 +145,12 @@ export function ShareWorkspaceDialog({
       posthog.capture("workspace_invite_sent", {
         workspace_name: workspaceName,
         is_new_share: !sharedWorkspaceId,
-        is_pending: result.isPending,
+        is_pending: invitedPendingSignup,
         platform: detectPlatform(),
         environment: detectEnvironment(),
       });
     } catch (error) {
-      toast.error((error as Error).message || "Failed to add member");
+      toast.error(getWorkspaceShareConvexErrorMessage(error));
     } finally {
       setIsInviting(false);
     }
@@ -166,7 +170,7 @@ export function ShareWorkspaceDialog({
         environment: detectEnvironment(),
       });
     } catch (error) {
-      toast.error((error as Error).message || "Failed to remove member");
+      toast.error(getWorkspaceShareConvexErrorMessage(error));
     }
   };
 
@@ -187,7 +191,7 @@ export function ShareWorkspaceDialog({
       onClose();
       onLeaveWorkspace?.();
     } catch (error) {
-      toast.error((error as Error).message || "Failed to leave workspace");
+      toast.error(getWorkspaceShareConvexErrorMessage(error));
     } finally {
       setIsLeaving(false);
     }

@@ -18,6 +18,7 @@ import {
   serializeServersForSharing,
 } from "@/lib/workspace-serialization";
 import { HOSTED_MODE } from "@/lib/config";
+import { getWorkspaceShareConvexErrorMessage } from "@/lib/workspace-share-convex-error";
 
 interface LoggerLike {
   info: (message: string, meta?: Record<string, unknown>) => void;
@@ -296,8 +297,10 @@ export function useWorkspaceState({
           toast.success(`Workspace "${name}" created`);
           return workspaceId as string;
         } catch (error) {
+          const friendly = getWorkspaceShareConvexErrorMessage(error, "");
           const errorMessage =
-            error instanceof Error ? error.message : "Unknown error";
+            friendly ||
+            (error instanceof Error ? error.message : "Unknown error");
           toast.error(`Failed to create workspace: ${errorMessage}`);
           return "";
         }
