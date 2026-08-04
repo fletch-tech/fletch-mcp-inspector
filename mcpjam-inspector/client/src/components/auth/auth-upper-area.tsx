@@ -1,84 +1,71 @@
-import { useAuth } from "@/lib/auth/jwt-auth-context";
+import { useAuth } from "@workos-inc/authkit-react";
 import { useConvexAuth } from "convex/react";
-import { usePostHog } from "posthog-js/react";
-import { Button } from "@/components/ui/button";
-import { DiscordIcon } from "@/components/ui/discord-icon";
-import { GitHubIcon } from "@/components/ui/github-icon";
+import { Button } from "@mcpjam/design-system/button";
+import { GitHubStarButton } from "@/components/ui/github-star-button";
 import {
   ActiveServerSelector,
   ActiveServerSelectorProps,
 } from "@/components/ActiveServerSelector";
-import { NotificationBell } from "@/components/notifications/NotificationBell";
-import { detectEnvironment, detectPlatform } from "@/lib/PosthogUtils";
+import { AgentSidePanelTrigger } from "@/components/mcpjam-agent/AgentSidePanelTrigger";
+import { GlobalHostBar } from "@/components/hosts/GlobalHostBar";
+import { track } from "@/lib/analytics";
+import type { GlobalHostBarProps } from "@/components/Header";
 
 interface AuthUpperAreaProps {
   activeServerSelectorProps?: ActiveServerSelectorProps;
+  globalHostBarProps?: GlobalHostBarProps;
 }
 
 export function AuthUpperArea({
   activeServerSelectorProps,
+  globalHostBarProps,
 }: AuthUpperAreaProps) {
-  const { user, signIn } = useAuth();
+  const { user, signIn, signUp } = useAuth();
   const { isLoading } = useConvexAuth();
-  const posthog = usePostHog();
-
-  const communityLinks = (
-    <div className="flex items-center gap-1">
-      <Button asChild size="icon" variant="ghost">
-        <a
-          href="https://discord.gg/JEnDtz8X6z"
-          target="_blank"
-          rel="noreferrer"
-          aria-label="Join the Discord community"
-          title="Join the Discord community"
-        >
-          <DiscordIcon className="h-10 w-10" />
-          <span className="sr-only">Discord</span>
-        </a>
-      </Button>
-      <Button asChild size="icon" variant="ghost">
-        <a
-          href="https://github.com/MCPJam/inspector"
-          target="_blank"
-          rel="noreferrer"
-          aria-label="Visit the GitHub repository"
-          title="Visit the GitHub repository"
-        >
-          <GitHubIcon className="h-10 w-10" />
-          <span className="sr-only">GitHub</span>
-        </a>
-      </Button>
-    </div>
-  );
 
   return (
     <div className="ml-auto flex h-full flex-1 items-center gap-2 no-drag min-w-0">
-      {activeServerSelectorProps && (
+      {globalHostBarProps ? (
+        <div className="flex shrink-0 items-center pr-1">
+          <GlobalHostBar {...globalHostBarProps} />
+        </div>
+      ) : null}
+      {activeServerSelectorProps ? (
         <div className="flex-1 min-w-0 h-full pr-2">
           <ActiveServerSelector
             {...activeServerSelectorProps}
             className="h-full"
           />
         </div>
+      ) : (
+        <div className="flex-1 min-w-0 h-full pr-2" />
       )}
       <div className="ml-auto flex items-center gap-2 shrink-0">
-        {communityLinks}
-        <NotificationBell />
+        <AgentSidePanelTrigger />
         {!user && !isLoading && (
-          <Button
-            size="sm"
-            onClick={() => {
-              posthog.capture("login_button_clicked", {
-                location: "header",
-                platform: detectPlatform(),
-                environment: detectEnvironment(),
-              });
-              signIn();
-            }}
-          >
-            Sign in
-          </Button>
+          <>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => {
+                track("login_button_clicked", { location: "header" });
+                signIn();
+              }}
+            >
+              Sign in
+            </Button>
+            <Button
+              size="sm"
+              onClick={() => {
+                track("sign_up_button_clicked", { location: "header" });
+                signUp();
+              }}
+            >
+              Create account
+            </Button>
+          </>
         )}
+        <GitHubStarButton />
       </div>
     </div>
   );

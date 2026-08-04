@@ -1,0 +1,16 @@
+{
+  "name": "fletch-mcp-workspace",
+  "private": true,
+  "workspaces": [
+    "sdk",
+    "design-system",
+    "chat-ui",
+    "widget-react",
+    "mcpjam-inspector"
+  ],
+  "scripts": {
+    "build:packages": "npm run build -w @mcpjam/sdk && npm run build -w @mcpjam/design-system && npm run build -w @mcpjam/chat-ui && npm run build -w @mcpjam/widget-react",
+    "build:inspector": "npm run build -w @mcpjam/inspector",
+    "dev": "npm run dev -w @mcpjam/inspector"
+  }
+}

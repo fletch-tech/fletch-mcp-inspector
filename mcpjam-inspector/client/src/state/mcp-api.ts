@@ -1,12 +1,26 @@
-import { MCPServerConfig } from "@mcpjam/sdk";
-import type { HttpServerConfig } from "@mcpjam/sdk";
-import type { LoggingLevel } from "@modelcontextprotocol/sdk/types.js";
+import type {
+  HttpServerConfig,
+  MCPServerConfig,
+  NormalizedError,
+} from "@mcpjam/sdk/browser";
+import type { LoggingLevel } from "@modelcontextprotocol/client";
 import { authFetch } from "@/lib/session-token";
 import { HOSTED_MODE } from "@/lib/config";
+import { WebApiError } from "@/lib/apis/web/base";
 import {
   validateHostedServer,
+  type HostedServerValidateContext,
   type HostedServerValidateResponse,
 } from "@/lib/apis/web/servers-api";
+import {
+  getHostedChatboxAccessVersion,
+  getHostedChatboxId,
+  getHostedOAuthToken,
+} from "@/lib/apis/web/context";
+import { BootstrapNotReadyError } from "@/lib/app-ready";
+import type { ConnectionDefaults } from "@/shared/connection-defaults";
+
+const HOSTED_VALIDATE_TIMEOUT_MS = 20_000;
 
 /**
  * Extracts an OAuth access token from an HttpServerConfig's Authorization header.
@@ -24,16 +38,13 @@ function extractOAuthToken(serverConfig: MCPServerConfig): string | undefined {
 }
 
 function normalizeHostedValidationError(error: unknown): string {
-  if (
-    error instanceof Error &&
-    error.message === "Hosted workspace is not available yet"
-  ) {
-    return "Hosted workspace is still loading. Please try again in a moment.";
+  if (error instanceof BootstrapNotReadyError) {
+    return "Hosted project is still loading. Please try again in a moment.";
   }
 
   if (
     error instanceof Error &&
-    error.message.startsWith("Hosted server not found for ")
+    error.message.startsWith("Hosted server not found")
   ) {
     return "Hosted server metadata is still syncing. Please retry.";
   }
@@ -45,19 +56,105 @@ function normalizeHostedValidationError(error: unknown): string {
   return "Hosted validation failed";
 }
 
+function buildHostedValidationContext(
+  serverId: string,
+  options?: {
+    projectId?: string;
+    serverName?: string;
+    connectionDefaults?: ConnectionDefaults;
+  },
+): HostedServerValidateContext | undefined {
+  if (!options?.projectId) return undefined;
+
+  const chatboxId = getHostedChatboxId();
+  return {
+    projectId: options.projectId,
+    serverId,
+    ...(options.serverName ? { serverName: options.serverName } : {}),
+    ...(chatboxId ? { accessScope: "chat_v2" } : {}),
+    ...(chatboxId ? { chatboxId } : {}),
+    ...(chatboxId ? { accessVersion: getHostedChatboxAccessVersion() } : {}),
+    // Surface the resolver-path `mcpProfile.initialize.*` pins to the
+    // hosted validate request. Without this the hosted branch dropped
+    // them silently: `connectionDefaults` was computed by
+    // `buildResolverConnectionDefaults` in `use-server-state.ts` and
+    // passed through `testConnection`/`reconnectServer`, but only the
+    // local-resolver path forwarded it (`buildResolverBody`). Hosted
+    // connects therefore always initialized with SDK defaults even
+    // when the active host profile pinned an explicit clientInfo /
+    // supportedProtocolVersions.
+    ...(options.connectionDefaults?.clientInfo
+      ? { clientInfo: options.connectionDefaults.clientInfo }
+      : {}),
+    ...(options.connectionDefaults?.supportedProtocolVersions &&
+    options.connectionDefaults.supportedProtocolVersions.length > 0
+      ? {
+          supportedProtocolVersions:
+            options.connectionDefaults.supportedProtocolVersions,
+        }
+      : {}),
+    // mcpProtocolVersion — same drop-on-the-floor bug as clientInfo /
+    // supportedProtocolVersions had before being plumbed here. Without
+    // this, hosted connects ignored the client-level Stateless toggle
+    // and always initialized via the legacy upstream Client.
+    ...(options.connectionDefaults?.mcpProtocolVersion
+      ? { mcpProtocolVersion: options.connectionDefaults.mcpProtocolVersion }
+      : {}),
+    // SEP-2243 mirroring knob — same plumb-or-drop-silently hazard as the
+    // three above. Only `false` is ever set (see `ConnectionDefaults`).
+    ...(options.connectionDefaults?.mirrorToolParamHeaders === false
+      ? { mirrorToolParamHeaders: false }
+      : {}),
+    // Sibling conformance knobs — same plumb-or-drop-silently hazard.
+    ...(options.connectionDefaults?.firstPageOnly === true
+      ? { firstPageOnly: true }
+      : {}),
+    ...(options.connectionDefaults?.supportsMrtr === false
+      ? { supportsMrtr: false }
+      : {}),
+  };
+}
+
 async function safeValidateHostedServer(
   serverId: string,
   serverConfig: MCPServerConfig,
-): Promise<HostedServerValidateResponse & { error?: string }> {
+  hostedContext?: HostedServerValidateContext,
+): Promise<
+  HostedServerValidateResponse & {
+    error?: string;
+    normalized?: NormalizedError;
+  }
+> {
   try {
-    return await validateHostedServer(
-      serverId,
-      extractOAuthToken(serverConfig),
+    const oauthToken =
+      extractOAuthToken(serverConfig) ?? getHostedOAuthToken(serverId);
+    return await withTimeout(
+      validateHostedServer(
+        serverId,
+        oauthToken,
+        serverConfig.capabilities as Record<string, unknown> | undefined,
+        hostedContext,
+      ),
+      HOSTED_VALIDATE_TIMEOUT_MS,
     );
   } catch (error) {
+    // Preserve the server-attached `normalized` block when the wrapped
+    // error is a WebApiError. The string form (kept for back-compat) is
+    // populated from the existing normalizer; the rich block flows to
+    // the ErrorCard via `lastNormalizedError` on the server reducer.
+    const normalized =
+      error instanceof WebApiError ? error.normalized : undefined;
+    // Thread the tagged-401 escalation flag through so the hosted connect
+    // path can detect "needs interactive OAuth" structurally, matching the
+    // local envelope's top-level `oauthRequired`.
+    const oauthRequired =
+      error instanceof WebApiError &&
+      error.details?.oauthRequired === true;
     return {
       success: false,
       error: normalizeHostedValidationError(error),
+      ...(normalized ? { normalized } : {}),
+      ...(oauthRequired ? { oauthRequired: true } : {}),
     };
   }
 }
@@ -82,27 +179,96 @@ async function authFetchWithTimeout(
     clearTimeout(timeoutId);
     if (error instanceof Error && error.name === "AbortError") {
       throw new Error(
-        `Connection attempt timed out after ${timeoutMs / 1000} seconds. The server may not exist or is not responding.`,
+        `Connection attempt timed out after ${
+          timeoutMs / 1000
+        } seconds. The server may not exist or is not responding.`,
       );
     }
     throw error;
   }
 }
 
+async function withTimeout<T>(
+  promise: Promise<T>,
+  timeoutMs: number,
+): Promise<T> {
+  return await new Promise<T>((resolve, reject) => {
+    const timeoutId = window.setTimeout(() => {
+      reject(
+        new Error(
+          `Connection attempt timed out after ${
+            timeoutMs / 1000
+          } seconds. The server may not exist or is not responding.`,
+        ),
+      );
+    }, timeoutMs);
+
+    promise.then(
+      (value) => {
+        window.clearTimeout(timeoutId);
+        resolve(value);
+      },
+      (error) => {
+        window.clearTimeout(timeoutId);
+        reject(error);
+      },
+    );
+  });
+}
+
+function buildResolverBody(
+  serverId: string,
+  options: {
+    projectId: string;
+    serverName?: string;
+    connectionDefaults?: ConnectionDefaults;
+  },
+): Record<string, unknown> {
+  return {
+    projectId: options.projectId,
+    serverId,
+    ...(options.serverName ? { serverName: options.serverName } : {}),
+    ...(options.connectionDefaults
+      ? { connectionDefaults: options.connectionDefaults }
+      : {}),
+  };
+}
+
 export async function testConnection(
   serverConfig: MCPServerConfig,
   serverId: string,
+  options?: {
+    projectId?: string;
+    serverName?: string;
+    connectionDefaults?: ConnectionDefaults;
+  },
 ) {
   if (HOSTED_MODE) {
-    return safeValidateHostedServer(serverId, serverConfig);
+    return safeValidateHostedServer(
+      serverId,
+      serverConfig,
+      buildHostedValidationContext(serverId, options),
+    );
   }
+
+  if (!options?.projectId) {
+    throw new Error(
+      "projectId is required for testConnection in local mode (server must be synced to Convex first)",
+    );
+  }
+
+  const body = buildResolverBody(serverId, {
+    projectId: options.projectId,
+    serverName: options.serverName,
+    connectionDefaults: options.connectionDefaults,
+  });
 
   const res = await authFetchWithTimeout(
     "/api/mcp/connect",
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ serverConfig, serverId }),
+      body: JSON.stringify(body),
     },
     20000, // 20 second timeout
   );
@@ -124,6 +290,51 @@ export async function deleteServer(serverId: string) {
   return res.json();
 }
 
+export async function disconnectAllRuntimeServers() {
+  if (HOSTED_MODE) {
+    return { success: true, servers: [] };
+  }
+
+  const result = await listServers();
+  if (!result?.success || !Array.isArray(result.servers)) {
+    return result;
+  }
+
+  const listedServers = result.servers as Array<{
+    id?: unknown;
+    name?: unknown;
+  }>;
+  const serverIds: string[] = listedServers.reduce(
+    (ids: string[], server) => {
+      if (typeof server.id === "string" && server.id) {
+        ids.push(server.id);
+      } else if (typeof server.name === "string" && server.name) {
+        ids.push(server.name);
+      }
+      return ids;
+    },
+    [] as string[],
+  );
+
+  const disconnectResults = await Promise.allSettled(
+    serverIds.map((serverId) => deleteServer(serverId)),
+  );
+  const failures = disconnectResults.filter((disconnectResult) => {
+    if (disconnectResult.status === "rejected") {
+      return true;
+    }
+    return disconnectResult.value?.success === false;
+  });
+
+  return {
+    success: failures.length === 0,
+    servers: result.servers,
+    ...(failures.length > 0
+      ? { error: `Failed to disconnect ${failures.length} server(s)` }
+      : {}),
+  };
+}
+
 export async function listServers() {
   if (HOSTED_MODE) {
     return { success: true, servers: [] };
@@ -136,17 +347,38 @@ export async function listServers() {
 export async function reconnectServer(
   serverId: string,
   serverConfig: MCPServerConfig,
+  options?: {
+    projectId?: string;
+    serverName?: string;
+    connectionDefaults?: ConnectionDefaults;
+  },
 ) {
   if (HOSTED_MODE) {
-    return safeValidateHostedServer(serverId, serverConfig);
+    return safeValidateHostedServer(
+      serverId,
+      serverConfig,
+      buildHostedValidationContext(serverId, options),
+    );
   }
+
+  if (!options?.projectId) {
+    throw new Error(
+      "projectId is required for reconnectServer in local mode (server must be synced to Convex first)",
+    );
+  }
+
+  const body = buildResolverBody(serverId, {
+    projectId: options.projectId,
+    serverName: options.serverName,
+    connectionDefaults: options.connectionDefaults,
+  });
 
   const res = await authFetchWithTimeout(
     "/api/mcp/servers/reconnect",
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ serverId, serverConfig }),
+      body: JSON.stringify(body),
     },
     20000, // 20 second timeout
   );
@@ -155,7 +387,8 @@ export async function reconnectServer(
 
 export async function getInitializationInfo(serverId: string) {
   if (HOSTED_MODE) {
-    void serverId;
+    // In hosted mode, init info is returned inline from /validate.
+    // This fallback only runs if the validate response lacked initInfo.
     return { success: true, initInfo: null };
   }
 
@@ -167,7 +400,10 @@ export async function getInitializationInfo(serverId: string) {
 
 export async function setServerLoggingLevel(
   serverId: string,
-  level: LoggingLevel,
+  // `null` opts out of the modern per-request mechanism (absent `_meta` key
+  // on the wire). Not meaningful for the legacy `logging/setLevel`
+  // mechanism — the server route rejects it there.
+  level: LoggingLevel | null,
 ) {
   if (HOSTED_MODE) {
     void serverId;

@@ -1,9 +1,13 @@
 import { describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { errorToastMessage } from "@/test/utils";
+import { fireEvent, render, screen } from "@testing-library/react";
 import { toast } from "sonner";
-import { ServerConnectionCard } from "../ServerConnectionCard";
 import type { ServerWithName } from "@/hooks/use-app-state";
-import { listTools } from "@/lib/apis/mcp-tools-api";
+
+// Mock the agent brief generator to avoid @mcpjam/sdk dependency
+vi.mock("@/lib/generate-agent-brief", () => ({
+  generateAgentBrief: vi.fn().mockReturnValue("mocked brief"),
+}));
 
 vi.mock("@/lib/config", () => ({
   HOSTED_MODE: true,
@@ -13,6 +17,11 @@ vi.mock("posthog-js/react", () => ({
   usePostHog: () => ({
     capture: vi.fn(),
   }),
+  useFeatureFlagEnabled: () => false,
+}));
+
+vi.mock("@/lib/analytics", () => ({
+  track: vi.fn(),
 }));
 
 vi.mock("@/lib/apis/mcp-tools-api", () => ({
@@ -30,10 +39,14 @@ vi.mock("@/lib/apis/mcp-tunnels-api", () => ({
     serverId: "test-server",
   }),
   closeServerTunnel: vi.fn().mockResolvedValue(undefined),
-  cleanupOrphanedTunnels: vi.fn().mockResolvedValue(undefined),
+  rotateServerTunnel: vi.fn().mockResolvedValue({
+    url: "https://rotated.ngrok.app/api/mcp/adapter-http/test-server?k=newsecret",
+    serverId: "test-server",
+  }),
+  getTunnelRequests: vi.fn().mockResolvedValue([]),
 }));
 
-vi.mock("@/lib/auth/jwt-auth-context", () => ({
+vi.mock("@workos-inc/authkit-react", () => ({
   useAuth: () => ({
     getAccessToken: vi.fn().mockResolvedValue("test-token"),
   }),
@@ -45,6 +58,10 @@ vi.mock("convex/react", () => ({
   }),
 }));
 
+vi.mock("@/hooks/use-explore-cases-prefetch-on-connect", () => ({
+  useExploreCasesPrefetchOnConnect: vi.fn(),
+}));
+
 vi.mock("sonner", () => ({
   toast: {
     error: vi.fn(),
@@ -53,8 +70,11 @@ vi.mock("sonner", () => ({
   },
 }));
 
+// Must import after mocks are set up
+import { ServerConnectionCard } from "../ServerConnectionCard";
+
 const createServer = (
-  overrides: Partial<ServerWithName> = {},
+  overrides: Partial<ServerWithName> = {}
 ): ServerWithName =>
   ({
     name: "insecure-http",
@@ -67,14 +87,36 @@ const createServer = (
       url: "http://example.com/mcp",
     },
     ...overrides,
-  }) as ServerWithName;
+  } as ServerWithName);
 
 describe("ServerConnectionCard hosted reconnect guard", () => {
-  it("does not list tools when connected but server is missing from workspace catalogue", async () => {
-    vi.mocked(listTools).mockClear();
+  it("blocks reconnect switch for non-HTTPS servers in hosted mode", () => {
+    const onReconnect = vi.fn().mockResolvedValue(undefined);
+    const server = createServer();
+
+    render(
+      <ServerConnectionCard
+        server={server}
+        onDisconnect={vi.fn()}
+        onReconnect={onReconnect}
+      />
+    );
+
+    const toggle = screen.getByRole("switch");
+    fireEvent.click(toggle);
+
+    expect(toast.error).toHaveBeenCalledWith(
+      errorToastMessage("HTTP servers are not supported in hosted mode"),
+      { duration: Infinity }
+    );
+    expect(onReconnect).not.toHaveBeenCalled();
+  });
+
+  it("allows interactive OAuth reconnect for OAuth servers without tokens", () => {
+    const onReconnect = vi.fn().mockResolvedValue(undefined);
     const server = createServer({
-      name: "orphan-local",
-      connectionStatus: "connected",
+      name: "oauth-server",
+      useOAuth: true,
       config: {
         transportType: "streamableHttp",
         url: "https://example.com/mcp",
@@ -85,35 +127,38 @@ describe("ServerConnectionCard hosted reconnect guard", () => {
       <ServerConnectionCard
         server={server}
         onDisconnect={vi.fn()}
-        onReconnect={vi.fn()}
-        onEdit={vi.fn()}
-      />,
+        onReconnect={onReconnect}
+      />
     );
 
-    await waitFor(() => {
-      expect(vi.mocked(listTools)).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("switch"));
+
+    expect(onReconnect).toHaveBeenCalledWith("oauth-server", {
+      allowInteractiveOAuthFlow: true,
     });
   });
 
-  it("blocks reconnect switch for non-HTTPS servers in hosted mode", () => {
-    const onReconnect = vi.fn().mockResolvedValue(undefined);
-    const server = createServer();
+  it("hides the share CTA even for share-eligible hosted servers", () => {
+    const server = createServer({
+      name: "shareable-server",
+      connectionStatus: "connected",
+      config: {
+        transportType: "streamableHttp",
+        url: "https://example.com/mcp",
+      },
+    });
 
     render(
       <ServerConnectionCard
         server={server}
+        hostedServerId="hosted-server-1"
         onDisconnect={vi.fn()}
-        onReconnect={onReconnect}
-        onEdit={vi.fn()}
-      />,
+        onReconnect={vi.fn().mockResolvedValue(undefined)}
+      />
     );
 
-    const toggle = screen.getByRole("switch");
-    fireEvent.click(toggle);
-
-    expect(toast.error).toHaveBeenCalledWith(
-      "HTTP servers are not supported in hosted mode",
-    );
-    expect(onReconnect).not.toHaveBeenCalled();
+    expect(
+      screen.queryByRole("button", { name: "Share" })
+    ).not.toBeInTheDocument();
   });
 });

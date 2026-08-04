@@ -1,10 +1,42 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import {
+  render,
+  screen,
+  fireEvent,
+  waitFor,
+  act,
+  within,
+} from "@testing-library/react";
 import { PlaygroundMain } from "../PlaygroundMain";
+import { track } from "@/lib/analytics";
+import { DEFAULT_CHAT_COMPOSER_PLACEHOLDER } from "@/components/chat-v2/shared/chat-helpers";
+import { useHostContextStore } from "@/stores/client-context-store";
+import { usePlaygroundChatHistoryBridgeStore } from "@/components/playground/playground-chat-history-bridge";
+import { invalidateChatHistoryPrefetch } from "@/components/chat-v2/history/chat-history-prefetch";
+
+vi.mock("framer-motion", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("framer-motion")>();
+  return {
+    ...actual,
+    useReducedMotion: () => false,
+  };
+});
+
+const mockThread = vi.fn();
+const mockFullscreenChatOverlay = vi.fn();
+const mockMultiModelPlaygroundCard = vi.fn();
+const mockTraceViewer = vi.fn();
+const mockGetChatHistoryDetail = vi.hoisted(() => vi.fn());
+const mockChatHistoryAction = vi.hoisted(() => vi.fn());
 
 // Mock lucide-react icons
-vi.mock("lucide-react", () => ({
+vi.mock("lucide-react", async (importOriginal) => ({
+  // Spread the real icon set so a newly-rendered icon (e.g. Columns2) never
+  // breaks the whole suite; the explicit stubs below keep the data-testids the
+  // assertions rely on.
+  ...(await importOriginal<typeof import("lucide-react")>()),
   ArrowDown: () => <span data-testid="icon-arrow-down" />,
+  ArrowUp: () => <span data-testid="icon-arrow-up" />,
   Braces: () => <span data-testid="icon-braces" />,
   Loader2: () => <span data-testid="icon-loader" />,
   Smartphone: () => <span data-testid="icon-smartphone" />,
@@ -30,10 +62,18 @@ vi.mock("lucide-react", () => ({
   Maximize2: () => <span data-testid="icon-maximize" />,
   Minimize2: () => <span data-testid="icon-minimize" />,
   ChevronRight: () => <span data-testid="icon-chevron-right" />,
+  // Icons used by PlaygroundCenterHeaderBar
+  ArrowLeft: () => <span data-testid="icon-arrow-left" />,
+  Code2: () => <span data-testid="icon-code2" />,
+  MessageSquare: () => <span data-testid="icon-message-square" />,
+  // Icons used by MultiHostPicker (rendered via PlaygroundHostPicker in the
+  // header `leading` slot)
+  Server: () => <span data-testid="icon-server" />,
+  X: () => <span data-testid="icon-x" />,
 }));
 
 // Mock UI components
-vi.mock("@/components/ui/button", () => ({
+vi.mock("@mcpjam/design-system/button", () => ({
   Button: ({ children, onClick, className, ...props }: any) => (
     <button onClick={onClick} className={className} {...props}>
       {children}
@@ -41,24 +81,24 @@ vi.mock("@/components/ui/button", () => ({
   ),
 }));
 
-vi.mock("@/components/ui/tooltip", () => ({
+vi.mock("@mcpjam/design-system/tooltip", () => ({
   Tooltip: ({ children }: { children: React.ReactNode }) => <>{children}</>,
   TooltipContent: ({ children }: { children: React.ReactNode }) => (
     <div className="tooltip-content">{children}</div>
   ),
   TooltipTrigger: ({
     children,
-    asChild,
+    asChild: _asChild,
   }: {
     children: React.ReactNode;
     asChild?: boolean;
   }) => <>{children}</>,
 }));
 
-vi.mock("@/components/ui/popover", () => ({
+vi.mock("@mcpjam/design-system/popover", () => ({
   Popover: ({
     children,
-    open,
+    open: _open,
   }: {
     children: React.ReactNode;
     open?: boolean;
@@ -68,18 +108,18 @@ vi.mock("@/components/ui/popover", () => ({
   ),
   PopoverTrigger: ({
     children,
-    asChild,
+    asChild: _asChild,
   }: {
     children: React.ReactNode;
     asChild?: boolean;
   }) => <>{children}</>,
 }));
 
-vi.mock("@/components/ui/input", () => ({
+vi.mock("@mcpjam/design-system/input", () => ({
   Input: (props: any) => <input {...props} />,
 }));
 
-vi.mock("@/components/ui/label", () => ({
+vi.mock("@mcpjam/design-system/label", () => ({
   Label: ({ children, ...props }: any) => <label {...props}>{children}</label>,
 }));
 
@@ -97,16 +137,19 @@ vi.mock("posthog-js/react", () => ({
   usePostHog: () => ({
     capture: vi.fn(),
   }),
+  useFeatureFlagEnabled: () => false,
 }));
+vi.mock("@/lib/analytics", () => ({ track: vi.fn() }));
 
 // Mock PosthogUtils
 vi.mock("@/lib/PosthogUtils", () => ({
   detectEnvironment: vi.fn().mockReturnValue("test"),
   detectPlatform: vi.fn().mockReturnValue("web"),
+  standardEventProps: vi.fn().mockReturnValue({}),
 }));
 
-// Mock auth
-vi.mock("@/lib/auth/jwt-auth-context", () => ({
+// Mock authkit
+vi.mock("@workos-inc/authkit-react", () => ({
   useAuth: () => ({
     signUp: vi.fn(),
     user: { id: "test-user" },
@@ -116,21 +159,47 @@ vi.mock("@/lib/auth/jwt-auth-context", () => ({
 
 // Mock convex/react
 vi.mock("convex/react", () => ({
+  // useChatSession resolves the Convex client to submit elicitation answers
+  // straight to the rendezvous table (the blocked replica isn't addressable).
+  useConvex: () => ({ mutation: vi.fn().mockResolvedValue({ ok: true }) }),
   useConvexAuth: () => ({
     isAuthenticated: false,
     isLoading: false,
   }),
+  // `useHost` (and any other Convex-backed hook PlaygroundMain pulls in)
+  // calls useQuery. The test doesn't exercise auth flows, so a static
+  // null is enough — the consumer treats it as "no host resolved yet".
+  useQuery: (_name: string, args: unknown) =>
+    args === "skip" ? undefined : null,
+  useMutation: () => () => Promise.resolve(),
+  // COMP-14: useComputerAttachmentUpload pulls in useMintTerminalToken (a
+  // Convex action). The flag mock keeps the flow inert; this keeps it mountable.
+  useAction: () => () => Promise.resolve({ token: "test-token" }),
 }));
 
-// Mock useViews (useWorkspaceServers)
+// Mock useViews (useProjectServers)
 vi.mock("@/hooks/useViews", () => ({
-  useWorkspaceServers: () => ({
+  useProjectServers: () => ({
     serversByName: new Map(),
+    serversById: new Map(),
   }),
+}));
+
+vi.mock("@/lib/apis/web/chat-history-api", () => ({
+  getChatHistoryDetail: (...args: unknown[]) =>
+    mockGetChatHistoryDetail(...args),
+  chatHistoryAction: (...args: unknown[]) => mockChatHistoryAction(...args),
 }));
 
 // Mock useChatSession hook
 const mockUseChatSession = {
+  // Elicitation surface (hosted). These suites never elicit, but the shape
+  // must match the hook's contract or the dialog crashes on undefined.
+  pendingElicitations: [],
+  respondToElicitation: vi.fn(),
+  elicitationResponding: false,
+  urlElicitationRequired: [],
+  dismissUrlElicitationRequired: vi.fn(),
   messages: [],
   setMessages: vi.fn(),
   sendMessage: vi.fn(),
@@ -148,6 +217,10 @@ const mockUseChatSession = {
     supportsStreaming: true,
   },
   setSelectedModel: vi.fn(),
+  selectedModelIds: [],
+  setSelectedModelIds: vi.fn(),
+  multiModelEnabled: false,
+  setMultiModelEnabled: vi.fn(),
   availableModels: [],
   isAuthLoading: false,
   systemPrompt: "",
@@ -158,13 +231,31 @@ const mockUseChatSession = {
   toolServerMap: {},
   tokenUsage: null,
   resetChat: vi.fn(),
+  loadChatSession: vi.fn(async () => undefined),
+  syncResumedVersion: vi.fn(),
+  resumedVersion: null,
+  restoredToolRenderOverrides: {},
+  chatSessionId: "chat-session-1",
+  liveTraceEnvelope: null,
+  requestPayloadHistory: [],
+  hasTraceSnapshot: false,
+  hasLiveTimelineContent: false,
+  traceViewsSupported: false,
+  requireToolApproval: false,
+  setRequireToolApproval: vi.fn(),
+  addToolApprovalResponse: vi.fn(),
+  isSessionBootstrapComplete: true,
   isStreaming: false,
   disableForAuthentication: false,
   submitBlocked: false,
-};
+} as any;
+let capturedChatSessionOptions: any = null;
 
 vi.mock("@/hooks/use-chat-session", () => ({
-  useChatSession: () => mockUseChatSession,
+  useChatSession: (options: any) => {
+    capturedChatSessionOptions = options;
+    return mockUseChatSession;
+  },
 }));
 
 // Mock use-stick-to-bottom
@@ -194,15 +285,21 @@ vi.mock("@/components/chat-v2/thread", () => ({
   Thread: ({
     messages,
     isLoading,
+    loadingIndicatorVariant,
   }: {
     messages: any[];
     isLoading: boolean;
-  }) => (
-    <div data-testid="thread">
-      <span data-testid="message-count">{messages.length}</span>
-      {isLoading && <span data-testid="thread-loading">Loading...</span>}
-    </div>
-  ),
+    loadingIndicatorVariant?: string;
+  }) =>
+    (() => {
+      mockThread({ messages, isLoading, loadingIndicatorVariant });
+      return (
+        <div data-testid="thread">
+          <span data-testid="message-count">{messages.length}</span>
+          {isLoading && <span data-testid="thread-loading">Loading...</span>}
+        </div>
+      );
+    })(),
 }));
 
 // Mock ChatInput component
@@ -212,16 +309,31 @@ vi.mock("@/components/chat-v2/chat-input", () => ({
     onChange,
     onSubmit,
     disabled,
+    submitDisabled,
+    isLoading,
     placeholder,
+    pulseSubmit,
+    clientSelector,
+    onChangeSkillResults,
+    skillResults,
   }: {
     value: string;
     onChange: (v: string) => void;
     onSubmit: (e: any) => void;
     disabled: boolean;
+    submitDisabled?: boolean;
+    isLoading?: boolean;
     placeholder: string;
+    pulseSubmit?: boolean;
+    clientSelector?: unknown;
+    onChangeSkillResults?: (results: unknown[]) => void;
+    skillResults?: unknown[];
   }) => (
     <form
       data-testid="chat-input"
+      data-loading={isLoading ? "true" : "false"}
+      data-skill-count={skillResults?.length ?? 0}
+      data-client-selector={clientSelector ? "true" : "false"}
       onSubmit={(e) => {
         e.preventDefault();
         onSubmit(e);
@@ -234,7 +346,31 @@ vi.mock("@/components/chat-v2/chat-input", () => ({
         disabled={disabled}
         placeholder={placeholder}
       />
-      <button type="submit" disabled={disabled}>
+      {/* Stands in for the composer's skill picker: attaching a skill is what
+          populates `skillResults`, and the injection rule only exists on that
+          path. */}
+      <button
+        type="button"
+        data-testid="chat-input-attach-skill"
+        onClick={() =>
+          onChangeSkillResults?.([
+            {
+              id: "skill-1",
+              skillId: "sk_1",
+              name: "release-notes",
+              content: "skill body",
+            },
+          ])
+        }
+      >
+        Attach skill
+      </button>
+      <button
+        type="submit"
+        disabled={disabled || !!submitDisabled}
+        data-testid="chat-submit-button"
+        data-pulsing={pulseSubmit ? "true" : "false"}
+      >
         Send
       </button>
     </form>
@@ -246,6 +382,66 @@ vi.mock("@/components/chat-v2/error", () => ({
   ErrorBox: ({ message }: { message: string }) => (
     <div data-testid="error-box">{message}</div>
   ),
+}));
+
+vi.mock("@/components/evals/trace-viewer", () => ({
+  TraceViewer: (props: {
+    forcedViewMode?: "chat" | "timeline" | "raw";
+    trace?: unknown;
+    displayMode?: "inline" | "pip" | "fullscreen";
+    onDisplayModeChange?: (mode: "inline" | "pip" | "fullscreen") => void;
+    traceStartedAtMs?: number | null;
+    traceEndedAtMs?: number | null;
+  }) => {
+    mockTraceViewer(props);
+    return (
+      <div
+        data-testid="trace-viewer"
+        data-mode={props.forcedViewMode ?? "timeline"}
+        data-trace={JSON.stringify(props.trace ?? null)}
+      />
+    );
+  },
+}));
+
+vi.mock("@/components/evals/trace-view-mode-tabs", () => {
+  const tabs = ({
+    mode,
+    onModeChange,
+  }: {
+    mode: "chat" | "timeline" | "raw";
+    onModeChange: (mode: "chat" | "timeline" | "raw" | "tools") => void;
+  }) => (
+    <div data-testid="trace-view-tabs" data-mode={mode}>
+      <button onClick={() => onModeChange("chat")}>Chat</button>
+      <button onClick={() => onModeChange("timeline")}>Trace</button>
+      <button onClick={() => onModeChange("raw")}>Raw</button>
+    </div>
+  );
+
+  return {
+    TraceViewModeTabs: tabs,
+    ChatTraceViewModeHeaderBar: ({
+      mode,
+      onModeChange,
+    }: {
+      mode: "chat" | "timeline" | "raw";
+      onModeChange: (mode: "chat" | "timeline" | "raw" | "tools") => void;
+    }) => (
+      <div data-testid="chat-trace-view-mode-header-bar">
+        {tabs({ mode, onModeChange })}
+      </div>
+    ),
+  };
+});
+
+vi.mock("@/components/ui-playground/multi-model-playground-card", () => ({
+  MultiModelPlaygroundCard: (props: { model: { name: string } }) => {
+    mockMultiModelPlaygroundCard(props);
+    return (
+      <div data-testid="multi-model-playground-card">{props.model.name}</div>
+    );
+  },
 }));
 
 // Mock ConfirmChatResetDialog
@@ -272,9 +468,10 @@ vi.mock(
 
 // Mock FullscreenChatOverlay
 vi.mock("@/components/chat-v2/fullscreen-chat-overlay", () => ({
-  FullscreenChatOverlay: () => (
-    <div data-testid="fullscreen-overlay">Fullscreen Overlay</div>
-  ),
+  FullscreenChatOverlay: (props: { loadingIndicatorVariant?: string }) => {
+    mockFullscreenChatOverlay(props);
+    return <div data-testid="fullscreen-overlay">Fullscreen Overlay</div>;
+  },
 }));
 
 // Mock MCPJamFreeModelsPrompt
@@ -297,19 +494,17 @@ vi.mock("../playground-helpers", () => ({
 }));
 
 // Mock preferences store
-vi.mock("@/stores/preferences/preferences-provider", () => ({
-  usePreferencesStore: (selector: any) => {
-    const state = {
-      themeMode: "light",
-      setThemeMode: vi.fn(),
-    };
-    return selector ? selector(state) : state;
-  },
-}));
+const mockPreferencesState = {
+  themeMode: "light",
+  themePreset: "soft-pop",
+  hostStyle: "claude",
+  setThemeMode: vi.fn(),
+  setHostStyle: vi.fn(),
+};
 
-// Mock theme-utils
-vi.mock("@/lib/theme-utils", () => ({
-  updateThemeMode: vi.fn(),
+vi.mock("@/stores/preferences/preferences-provider", () => ({
+  usePreferencesStore: (selector: any) =>
+    selector ? selector(mockPreferencesState) : mockPreferencesState,
 }));
 
 // Mock UI Playground store
@@ -322,7 +517,6 @@ const mockUIPlaygroundStore = {
   setCspMode: vi.fn(),
   mcpAppsCspMode: "widget-declared",
   setMcpAppsCspMode: vi.fn(),
-  selectedProtocol: null,
   capabilities: { hover: true, touch: true },
   setCapabilities: vi.fn(),
 };
@@ -337,9 +531,19 @@ vi.mock("@/stores/ui-playground-store", () => ({
   },
 }));
 
-// Mock DisplayContextHeader which exports PRESET_DEVICE_CONFIGS
-vi.mock("@/components/shared/DisplayContextHeader", () => ({
-  DisplayContextHeader: () => <div data-testid="display-context-header" />,
+// Mock ClientContextHeader which exports PRESET_DEVICE_CONFIGS
+vi.mock("@/components/shared/ClientContextHeader", () => ({
+  ClientContextHeader: ({
+    showThemeToggle,
+  }: {
+    showThemeToggle?: boolean;
+  }) => (
+    <div data-testid="host-context-header">
+      {showThemeToggle ? (
+        <button data-testid="host-context-theme-toggle">Toggle theme</button>
+      ) : null}
+    </div>
+  ),
   PRESET_DEVICE_CONFIGS: {
     mobile: { width: 375, height: 667, label: "Phone", icon: () => null },
     tablet: { width: 768, height: 1024, label: "Tablet", icon: () => null },
@@ -355,27 +559,60 @@ vi.mock("@/stores/traffic-log-store", () => ({
   },
 }));
 
-// Mock shared app state
+// Mock shared app state (mutate `connectionStatus` in tests when needed)
+const mockSharedAppState = {
+  servers: {
+    "test-server": { connectionStatus: "connected" },
+  } as Record<string, { connectionStatus: string }>,
+  projects: {},
+  activeProjectId: "default",
+};
+
 vi.mock("@/state/app-state-context", () => ({
-  useSharedAppState: () => ({
-    servers: {
-      "test-server": { connectionStatus: "connected" },
-    },
-    workspaces: {},
-    activeWorkspaceId: "default",
-  }),
+  useSharedAppState: () => mockSharedAppState,
 }));
 
-// Mock chat-helpers
-vi.mock("@/components/chat-v2/shared/chat-helpers", () => ({
-  formatErrorMessage: (error: any) =>
-    error ? { message: error.message || "Error", details: null } : null,
-}));
+// Mock chat-helpers (keep real placeholders; stub formatError + a fixed
+// starter so tests don't churn when the real starter copy changes)
+vi.mock("@/components/chat-v2/shared/chat-helpers", async (importOriginal) => {
+  const actual =
+    await importOriginal<
+      typeof import("@/components/chat-v2/shared/chat-helpers")
+    >();
+  return {
+    ...actual,
+    formatErrorMessage: (error: any) =>
+      error ? { message: error.message || "Error", details: null } : null,
+    STARTER_PROMPTS: [{ label: "Starter chip", text: "Starter chip prompt" }],
+  };
+});
 
 // Mock utils
 vi.mock("@/lib/utils", () => ({
   cn: (...args: any[]) => args.filter(Boolean).join(" "),
 }));
+
+const sampleLiveTraceEnvelope = {
+  traceVersion: 1 as const,
+  traceStartedAtMs: 1_700_000_000_000,
+  traceEndedAtMs: 1_700_000_000_120,
+  messages: [
+    { role: "user", content: "Draw the diagram" },
+    { role: "assistant", content: "Here is the diagram." },
+  ],
+  spans: [
+    {
+      id: "turn-1-step-0",
+      name: "Step 1",
+      category: "step" as const,
+      startMs: 0,
+      endMs: 120,
+      promptIndex: 0,
+      stepIndex: 0,
+      status: "ok" as const,
+    },
+  ],
+};
 
 describe("PlaygroundMain", () => {
   const defaultProps = {
@@ -386,6 +623,31 @@ describe("PlaygroundMain", () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    localStorage.clear();
+    capturedChatSessionOptions = null;
+    usePlaygroundChatHistoryBridgeStore.getState().setBridge(null);
+    mockGetChatHistoryDetail.mockReset();
+    mockChatHistoryAction.mockReset();
+    mockChatHistoryAction.mockResolvedValue({ ok: true });
+    mockPreferencesState.themeMode = "light";
+    mockPreferencesState.themePreset = "soft-pop";
+    mockPreferencesState.hostStyle = "claude";
+    useHostContextStore.setState({
+      activeProjectId: null,
+      defaultHostContext: {},
+      savedHostContext: undefined,
+      draftHostContext: {},
+      hostContextText: "{}",
+      hostContextError: null,
+      isSaving: false,
+      isDirty: false,
+      pendingProjectId: null,
+      pendingSavedHostContext: undefined,
+      isAwaitingRemoteEcho: false,
+    });
+    mockSharedAppState.servers["test-server"] = {
+      connectionStatus: "connected",
+    };
     Object.assign(mockUseChatSession, {
       messages: [],
       status: "ready",
@@ -394,7 +656,19 @@ describe("PlaygroundMain", () => {
       disableForAuthentication: false,
       submitBlocked: false,
       isStreaming: false,
+      chatSessionId: "chat-session-1",
+      availableModels: [],
+      selectedModelIds: [],
+      multiModelEnabled: false,
+      liveTraceEnvelope: null,
+      requestPayloadHistory: [],
+      hasTraceSnapshot: false,
+      hasLiveTimelineContent: false,
+      traceViewsSupported: false,
     });
+    mockThread.mockClear();
+    mockFullscreenChatOverlay.mockClear();
+    mockMultiModelPlaygroundCard.mockClear();
   });
 
   describe("rendering", () => {
@@ -404,19 +678,242 @@ describe("PlaygroundMain", () => {
       expect(screen.getByTestId("chat-input")).toBeInTheDocument();
     });
 
+    it("renders the empty-state composer in mobile fullscreen takeover mode", () => {
+      render(<PlaygroundMain {...defaultProps} displayMode="fullscreen" />);
+
+      expect(screen.getByTestId("chat-input")).toBeInTheDocument();
+      expect(
+        screen.queryByTestId("fullscreen-overlay"),
+      ).not.toBeInTheDocument();
+    });
+
     it("renders device controls", () => {
       render(<PlaygroundMain {...defaultProps} />);
 
-      // Device controls are rendered by DisplayContextHeader (mocked)
-      expect(screen.getByTestId("display-context-header")).toBeInTheDocument();
+      // Device controls are rendered by ClientContextHeader (mocked)
+      expect(screen.getByTestId("host-context-header")).toBeInTheDocument();
     });
 
     it("renders theme toggle button", () => {
       render(<PlaygroundMain {...defaultProps} />);
 
-      // Theme toggle should exist (sun/moon icon)
-      const buttons = screen.getAllByRole("button");
-      expect(buttons.length).toBeGreaterThan(0);
+      expect(screen.getByTestId("host-context-theme-toggle")).toBeInTheDocument();
+    });
+
+    it("starts shared-session rail chats with project visibility", async () => {
+      render(<PlaygroundMain {...defaultProps} />);
+
+      await waitFor(() => {
+        expect(usePlaygroundChatHistoryBridgeStore.getState().bridge).not.toBe(
+          null,
+        );
+      });
+      expect(capturedChatSessionOptions.directVisibility).toBe("private");
+
+      await act(async () => {
+        const bridge = usePlaygroundChatHistoryBridgeStore.getState().bridge;
+        await Promise.resolve(bridge?.onNewChat({ shared: true }));
+      });
+
+      await waitFor(() => {
+        expect(capturedChatSessionOptions.directVisibility).toBe("project");
+      });
+      expect(mockUseChatSession.resetChat).toHaveBeenCalled();
+    });
+
+    it("drops the chat-input client chip after the active session is shared", async () => {
+      const privateSessionLocal = {
+        _id: "history-share-gate-1",
+        chatSessionId: "chat-session-share-gate-1",
+        firstMessagePreview: "Hello",
+        status: "active" as const,
+        directVisibility: "private" as const,
+        messageCount: 2,
+        version: 4,
+        startedAt: 1,
+        lastActivityAt: 1,
+        isPinned: false,
+        manualUnread: false,
+        isUnread: false,
+        messagesBlobUrl: "https://storage.test/blob",
+        resumeConfig: { selectedServers: ["test-server"] },
+      };
+      const sharedSessionLocal = {
+        ...privateSessionLocal,
+        directVisibility: "project" as const,
+        version: 5,
+      };
+      mockGetChatHistoryDetail
+        .mockResolvedValueOnce({
+          ok: true,
+          session: privateSessionLocal,
+          widgetSnapshots: [],
+        })
+        .mockResolvedValueOnce({
+          ok: true,
+          session: sharedSessionLocal,
+          widgetSnapshots: [],
+        });
+
+      render(<PlaygroundMain {...defaultProps} />);
+
+      await waitFor(() => {
+        expect(usePlaygroundChatHistoryBridgeStore.getState().bridge).not.toBe(
+          null,
+        );
+      });
+
+      // Private sessions get the chat-input client chip wired up.
+      expect(screen.getByTestId("chat-input")).toHaveAttribute(
+        "data-client-selector",
+        "true",
+      );
+
+      await act(async () => {
+        const bridge = usePlaygroundChatHistoryBridgeStore.getState().bridge;
+        await Promise.resolve(bridge?.onSelectThread(privateSessionLocal));
+      });
+      await waitFor(() => {
+        expect(capturedChatSessionOptions.directVisibility).toBe("private");
+      });
+
+      await act(async () => {
+        const bridge = usePlaygroundChatHistoryBridgeStore.getState().bridge;
+        await Promise.resolve(
+          bridge?.onSessionAction?.({
+            action: "share",
+            session: privateSessionLocal,
+          }),
+        );
+      });
+
+      await waitFor(() => {
+        expect(capturedChatSessionOptions.directVisibility).toBe("project");
+      });
+      // Shared sessions can't switch hosts — `clientSelector` is left undefined.
+      expect(screen.getByTestId("chat-input")).toHaveAttribute(
+        "data-client-selector",
+        "false",
+      );
+    });
+
+    it("keeps active playground thread visibility in sync after sharing", async () => {
+      const privateSession = {
+        _id: "history-1",
+        chatSessionId: "chat-session-1",
+        firstMessagePreview: "Hello",
+        status: "active" as const,
+        directVisibility: "private" as const,
+        messageCount: 2,
+        version: 4,
+        startedAt: 1,
+        lastActivityAt: 1,
+        isPinned: false,
+        manualUnread: false,
+        isUnread: false,
+        messagesBlobUrl: "https://storage.test/blob",
+        resumeConfig: {
+          selectedServers: ["test-server"],
+        },
+      };
+      const sharedSession = {
+        ...privateSession,
+        directVisibility: "project" as const,
+        version: 5,
+      };
+      mockGetChatHistoryDetail
+        .mockResolvedValueOnce({
+          ok: true,
+          session: privateSession,
+          widgetSnapshots: [],
+        })
+        .mockResolvedValueOnce({
+          ok: true,
+          session: sharedSession,
+          widgetSnapshots: [],
+        });
+
+      render(<PlaygroundMain {...defaultProps} />);
+
+      await waitFor(() => {
+        expect(usePlaygroundChatHistoryBridgeStore.getState().bridge).not.toBe(
+          null,
+        );
+      });
+
+      await act(async () => {
+        const bridge = usePlaygroundChatHistoryBridgeStore.getState().bridge;
+        await Promise.resolve(bridge?.onSelectThread(privateSession));
+      });
+      await waitFor(() => {
+        expect(capturedChatSessionOptions.directVisibility).toBe("private");
+      });
+
+      await act(async () => {
+        const bridge = usePlaygroundChatHistoryBridgeStore.getState().bridge;
+        await Promise.resolve(
+          bridge?.onSessionAction?.({
+            action: "share",
+            session: privateSession,
+          }),
+        );
+      });
+
+      await waitFor(() => {
+        expect(capturedChatSessionOptions.directVisibility).toBe("project");
+      });
+    });
+
+    // Removed: "passes the requested loading indicator variant to Thread".
+    // PlaygroundMain no longer accepts a `loadingIndicatorVariant` prop —
+    // the inner Thread reads the host id from `ChatboxHostStyleProvider`
+    // context. Brand-indicator behavior is covered in
+    // `LoadingIndicatorContent.test.tsx` and `Thread.test.tsx`.
+  });
+
+  describe("thread theme from host context", () => {
+    it("scopes hostContext theme changes to the thread shell and composer surface", () => {
+      render(<PlaygroundMain {...defaultProps} />);
+
+      const header = screen.getByTestId("playground-main-header");
+      const threadShell = screen.getByTestId("playground-thread-shell");
+
+      expect(threadShell).toHaveAttribute("data-host-style", "claude");
+      expect(threadShell).toHaveAttribute("data-theme-preset", "soft-pop");
+      expect(threadShell).toHaveAttribute("data-thread-theme", "light");
+      expect(threadShell).not.toHaveClass("dark");
+      expect(header).not.toHaveClass("dark");
+
+      act(() => {
+        useHostContextStore.getState().patchHostContext({ theme: "dark" });
+      });
+
+      expect(threadShell).toHaveAttribute("data-thread-theme", "dark");
+      expect(threadShell).toHaveClass("dark");
+      expect(header).not.toHaveClass("dark");
+      expect(mockPreferencesState.setThemeMode).not.toHaveBeenCalled();
+    });
+
+    it("falls back to the global theme when hostContext.theme is removed", () => {
+      render(<PlaygroundMain {...defaultProps} />);
+
+      act(() => {
+        useHostContextStore.getState().patchHostContext({ theme: "dark" });
+      });
+      expect(screen.getByTestId("playground-thread-shell")).toHaveAttribute(
+        "data-thread-theme",
+        "dark",
+      );
+
+      act(() => {
+        useHostContextStore.getState().setHostContextText("{}");
+      });
+
+      expect(screen.getByTestId("playground-thread-shell")).toHaveAttribute(
+        "data-thread-theme",
+        "light",
+      );
+      expect(screen.getByTestId("playground-thread-shell")).not.toHaveClass("dark");
     });
   });
 
@@ -424,8 +921,11 @@ describe("PlaygroundMain", () => {
     it("shows welcome message when thread is empty", () => {
       render(<PlaygroundMain {...defaultProps} />);
 
+      expect(screen.getByRole("img", { name: /MCPJam/i })).toBeInTheDocument();
       expect(
-        screen.getByText("Test ChatGPT Apps and MCP Apps"),
+        screen.getByRole("heading", {
+          name: /This is your playground for MCP./i,
+        }),
       ).toBeInTheDocument();
     });
 
@@ -444,6 +944,22 @@ describe("PlaygroundMain", () => {
       render(<PlaygroundMain {...defaultProps} />);
 
       expect(screen.getByText("Loading...")).toBeInTheDocument();
+    });
+
+    it("does not render a skip action in the post-connect guide", () => {
+      render(<PlaygroundMain {...defaultProps} showPostConnectGuide={true} />);
+
+      expect(
+        screen.queryByRole("button", { name: /Skip onboarding/i }),
+      ).not.toBeInTheDocument();
+    });
+
+    it("shows the ticket hint copy in the post-connect guide", () => {
+      render(<PlaygroundMain {...defaultProps} showPostConnectGuide={true} />);
+
+      expect(
+        screen.getByText("Try asking Excalidraw to draw something."),
+      ).toBeInTheDocument();
     });
   });
 
@@ -469,10 +985,618 @@ describe("PlaygroundMain", () => {
         { id: "1", role: "user", parts: [{ type: "text", text: "Hello" }] },
       ];
       mockUseChatSession.status = "submitted";
+      mockUseChatSession.isStreaming = true;
 
       render(<PlaygroundMain {...defaultProps} />);
 
       expect(screen.getByTestId("thread-loading")).toBeInTheDocument();
+    });
+  });
+
+  describe("Escape shortcut", () => {
+    it("stops an active single-model chat when Escape is pressed", () => {
+      mockUseChatSession.isStreaming = true;
+
+      render(<PlaygroundMain {...defaultProps} />);
+
+      window.dispatchEvent(
+        new KeyboardEvent("keydown", {
+          key: "Escape",
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+
+      expect(mockUseChatSession.stop).toHaveBeenCalledTimes(1);
+    });
+
+    it("does not stop an idle single-model chat when Escape is pressed", () => {
+      render(<PlaygroundMain {...defaultProps} />);
+
+      window.dispatchEvent(
+        new KeyboardEvent("keydown", {
+          key: "Escape",
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+
+      expect(mockUseChatSession.stop).not.toHaveBeenCalled();
+    });
+
+    it("increments stopRequestId for an active multi-model chat when Escape is pressed", async () => {
+      mockUseChatSession.availableModels = [
+        {
+          id: "openai/gpt-5-mini",
+          name: "GPT-5 Mini",
+          provider: "openai",
+        },
+        {
+          id: "anthropic/claude-sonnet-4-5",
+          name: "Claude Sonnet 4.5",
+          provider: "anthropic",
+        },
+      ];
+      mockUseChatSession.selectedModelIds = [
+        "openai/gpt-5-mini",
+        "anthropic/claude-sonnet-4-5",
+      ];
+      mockUseChatSession.multiModelEnabled = true;
+
+      render(<PlaygroundMain {...defaultProps} enableMultiModelChat={true} />);
+
+      const firstCardProps = mockMultiModelPlaygroundCard.mock.calls[0]?.[0];
+      expect(firstCardProps).toBeTruthy();
+
+      act(() => {
+        firstCardProps.onSummaryChange({
+          modelId: "openai/gpt-5-mini",
+          durationMs: null,
+          tokens: 0,
+          toolCount: 0,
+          status: "running",
+          hasMessages: true,
+        });
+      });
+
+      window.dispatchEvent(
+        new KeyboardEvent("keydown", {
+          key: "Escape",
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+
+      await waitFor(() => {
+        expect(
+          mockMultiModelPlaygroundCard.mock.calls.some(
+            ([props]) => props.stopRequestId === 1,
+          ),
+        ).toBe(true);
+      });
+    });
+
+    it("passes the previewed host id into multi-model card runtime context", () => {
+      localStorage.setItem(
+        "mcp-previewed-host-id",
+        JSON.stringify({ "project-1": "host-claude-code" }),
+      );
+      mockUseChatSession.availableModels = [
+        {
+          id: "openai/gpt-5-mini",
+          name: "GPT-5 Mini",
+          provider: "openai",
+        },
+        {
+          id: "anthropic/claude-haiku-4.5",
+          name: "Claude Haiku 4.5",
+          provider: "anthropic",
+        },
+      ];
+      mockUseChatSession.selectedModelIds = [
+        "openai/gpt-5-mini",
+        "anthropic/claude-haiku-4.5",
+      ];
+      mockUseChatSession.multiModelEnabled = true;
+
+      render(
+        <PlaygroundMain
+          {...defaultProps}
+          activeProjectId="project-1"
+          enableMultiModelChat={true}
+        />,
+      );
+
+      expect(mockMultiModelPlaygroundCard.mock.calls.length).toBeGreaterThan(0);
+      for (const [props] of mockMultiModelPlaygroundCard.mock.calls) {
+        expect(props.hostedContext?.hostId).toBe("host-claude-code");
+      }
+    });
+
+    it("does not stop when Escape was already handled elsewhere", () => {
+      mockUseChatSession.isStreaming = true;
+      const preventEscape = (event: KeyboardEvent) => {
+        event.preventDefault();
+      };
+
+      window.addEventListener("keydown", preventEscape, true);
+      render(<PlaygroundMain {...defaultProps} />);
+
+      window.dispatchEvent(
+        new KeyboardEvent("keydown", {
+          key: "Escape",
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+
+      window.removeEventListener("keydown", preventEscape, true);
+
+      expect(mockUseChatSession.stop).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("live trace views", () => {
+    it("shows trace mode tabs only when enabled for a supported live chat", () => {
+      mockUseChatSession.messages = [
+        { id: "1", role: "user", parts: [{ type: "text", text: "Hello" }] },
+      ];
+      mockUseChatSession.traceViewsSupported = true;
+
+      const { rerender } = render(
+        <PlaygroundMain {...defaultProps} enableTraceViews={true} />,
+      );
+
+      // Trace / Chat / Raw row in PlaygroundCenterHeaderBar (second strip).
+      expect(
+        screen.getByTestId("playground-trace-view-tabs"),
+      ).toBeInTheDocument();
+
+      mockUseChatSession.traceViewsSupported = false;
+      rerender(<PlaygroundMain {...defaultProps} enableTraceViews={true} />);
+
+      expect(
+        screen.queryByTestId("playground-trace-view-tabs"),
+      ).not.toBeInTheDocument();
+    });
+
+    it("shows trace mode tabs on an empty thread when trace views are supported", () => {
+      mockUseChatSession.messages = [];
+      mockUseChatSession.traceViewsSupported = true;
+
+      render(<PlaygroundMain {...defaultProps} enableTraceViews={true} />);
+
+      expect(
+        screen.getByTestId("playground-trace-view-tabs"),
+      ).toBeInTheDocument();
+    });
+
+    it("renders the shared trace header tabs", () => {
+      mockUseChatSession.messages = [];
+      mockUseChatSession.traceViewsSupported = true;
+
+      render(<PlaygroundMain {...defaultProps} enableTraceViews={true} />);
+
+      expect(
+        screen.getByTestId("playground-main-header"),
+      ).toBeInTheDocument();
+      expect(
+        screen.getByTestId("playground-trace-view-tabs"),
+      ).toBeInTheDocument();
+    });
+
+    it("shows the sample raw JSON empty state on an empty thread when Raw is selected", () => {
+      mockUseChatSession.messages = [];
+      mockUseChatSession.traceViewsSupported = true;
+
+      render(<PlaygroundMain {...defaultProps} enableTraceViews={true} />);
+
+      fireEvent.click(screen.getByRole("button", { name: "Raw" }));
+
+      const pending = screen.getByTestId("playground-live-raw-pending");
+      expect(pending).toBeInTheDocument();
+      expect(
+        within(pending).getByTestId(
+          "playground-live-raw-pending-sample-preview",
+        ),
+      ).toBeInTheDocument();
+      expect(within(pending).getByTestId("trace-raw-view")).toBeInTheDocument();
+      expect(screen.getByText(/Sample raw request/i)).toBeInTheDocument();
+    });
+
+    it("shows a Runs-style timeline empty state before the first streamed snapshot and keeps the thread mounted", () => {
+      mockUseChatSession.messages = [
+        { id: "1", role: "user", parts: [{ type: "text", text: "Hello" }] },
+      ];
+      mockUseChatSession.traceViewsSupported = true;
+      mockUseChatSession.hasTraceSnapshot = false;
+      mockUseChatSession.hasLiveTimelineContent = false;
+      mockUseChatSession.liveTraceEnvelope = null;
+
+      render(<PlaygroundMain {...defaultProps} enableTraceViews={true} />);
+
+      fireEvent.click(screen.getByRole("button", { name: "Trace" }));
+
+      const pending = screen.getByTestId("playground-live-trace-pending");
+      expect(pending).toBeInTheDocument();
+      expect(
+        within(pending).getByTestId(
+          "playground-live-trace-pending-sample-preview",
+        ),
+      ).toBeInTheDocument();
+      expect(within(pending).getByTestId("trace-viewer")).toBeInTheDocument();
+      expect(
+        screen.getByTestId("playground-trace-diagnostics"),
+      ).toBeInTheDocument();
+      expect(screen.getByTestId("thread")).toBeInTheDocument();
+    });
+
+    it("passes controlled display mode props into live trace viewers", () => {
+      mockUseChatSession.messages = [
+        { id: "1", role: "user", parts: [{ type: "text", text: "Hello" }] },
+      ];
+      mockUseChatSession.traceViewsSupported = true;
+      mockUseChatSession.hasTraceSnapshot = true;
+      mockUseChatSession.hasLiveTimelineContent = true;
+      mockUseChatSession.liveTraceEnvelope = sampleLiveTraceEnvelope;
+
+      render(<PlaygroundMain {...defaultProps} enableTraceViews={true} />);
+
+      fireEvent.click(screen.getByRole("button", { name: "Trace" }));
+
+      expect(mockTraceViewer).toHaveBeenCalled();
+      const props = mockTraceViewer.mock.calls.at(-1)?.[0];
+      expect(props.displayMode).toBe("inline");
+      expect(props.onDisplayModeChange).toEqual(expect.any(Function));
+    });
+
+    it("forwards live trace start/end timestamps into the trace viewer for timeline and raw modes", () => {
+      mockUseChatSession.messages = [
+        { id: "1", role: "user", parts: [{ type: "text", text: "Hello" }] },
+      ];
+      mockUseChatSession.traceViewsSupported = true;
+      mockUseChatSession.hasTraceSnapshot = true;
+      mockUseChatSession.hasLiveTimelineContent = true;
+      mockUseChatSession.liveTraceEnvelope = sampleLiveTraceEnvelope;
+
+      render(<PlaygroundMain {...defaultProps} enableTraceViews={true} />);
+
+      fireEvent.click(screen.getByRole("button", { name: "Trace" }));
+
+      const timelineProps = mockTraceViewer.mock.calls.at(-1)?.[0];
+      expect(timelineProps.traceStartedAtMs).toBe(
+        sampleLiveTraceEnvelope.traceStartedAtMs,
+      );
+      expect(timelineProps.traceEndedAtMs).toBe(
+        sampleLiveTraceEnvelope.traceEndedAtMs,
+      );
+
+      fireEvent.click(screen.getByRole("button", { name: "Raw" }));
+
+      const rawProps = mockTraceViewer.mock.calls.at(-1)?.[0];
+      expect(rawProps.forcedViewMode).toBe("raw");
+      expect(rawProps.traceStartedAtMs).toBe(
+        sampleLiveTraceEnvelope.traceStartedAtMs,
+      );
+      expect(rawProps.traceEndedAtMs).toBe(
+        sampleLiveTraceEnvelope.traceEndedAtMs,
+      );
+    });
+
+    it("prefers the streamed live trace over the prelude trace once a snapshot exists", async () => {
+      const pendingExecution = {
+        toolName: "create_view",
+        params: { prompt: "Draw a flow" },
+        result: { ok: true },
+        toolMeta: undefined,
+        state: "output-available" as const,
+        toolCallId: "tool-call-1",
+      };
+
+      mockUseChatSession.messages = [
+        { id: "1", role: "user", parts: [{ type: "text", text: "Hello" }] },
+      ];
+      mockUseChatSession.traceViewsSupported = true;
+      mockUseChatSession.hasTraceSnapshot = false;
+      mockUseChatSession.hasLiveTimelineContent = false;
+      mockUseChatSession.liveTraceEnvelope = null;
+
+      const { rerender } = render(
+        <PlaygroundMain
+          {...defaultProps}
+          enableTraceViews={true}
+          pendingExecution={pendingExecution}
+        />,
+      );
+
+      fireEvent.click(screen.getByRole("button", { name: "Raw" }));
+
+      expect(screen.getByTestId("trace-viewer")).toHaveAttribute(
+        "data-mode",
+        "raw",
+      );
+      expect(screen.getByTestId("trace-viewer")).toHaveAttribute(
+        "data-trace",
+        expect.stringContaining("Execute `create_view`"),
+      );
+
+      mockUseChatSession.hasTraceSnapshot = true;
+      mockUseChatSession.hasLiveTimelineContent = true;
+      mockUseChatSession.liveTraceEnvelope = sampleLiveTraceEnvelope;
+
+      rerender(
+        <PlaygroundMain
+          {...defaultProps}
+          enableTraceViews={true}
+          pendingExecution={null}
+        />,
+      );
+
+      await waitFor(() => {
+        expect(screen.getByTestId("trace-viewer")).toHaveAttribute(
+          "data-mode",
+          "raw",
+        );
+        expect(screen.getByTestId("trace-viewer")).toHaveAttribute(
+          "data-trace",
+          expect.stringContaining("Draw the diagram"),
+        );
+      });
+      expect(
+        screen.queryByTestId("playground-live-trace-pending"),
+      ).not.toBeInTheDocument();
+    });
+  });
+
+  describe("multi-model chat", () => {
+    it("shows centered starter layout, hidden compare grid, and composer like Chat tab when multi-model Chat is empty", () => {
+      mockUseChatSession.availableModels = [
+        {
+          id: "gpt-4",
+          name: "GPT-4",
+          provider: "openai",
+        },
+        {
+          id: "claude-sonnet-4-5",
+          name: "Claude Sonnet 4.5",
+          provider: "anthropic",
+        },
+        {
+          id: "gemini-2.5-pro",
+          name: "Gemini 2.5 Pro",
+          provider: "google",
+        },
+      ];
+      mockUseChatSession.selectedModelIds = [
+        "gpt-4",
+        "claude-sonnet-4-5",
+        "gemini-2.5-pro",
+      ];
+      mockUseChatSession.multiModelEnabled = true;
+      mockUseChatSession.traceViewsSupported = true;
+
+      render(
+        <PlaygroundMain
+          {...defaultProps}
+          enableMultiModelChat={true}
+          enableTraceViews={true}
+        />,
+      );
+
+      const compareShell = screen.getByTestId("playground-compare-shell");
+      expect(compareShell).toHaveAttribute("data-thread-theme", "light");
+      expect(compareShell).not.toHaveClass("dark");
+      expect(
+        screen.getByText("Try one of these to get started"),
+      ).toBeInTheDocument();
+      expect(screen.getAllByTestId("multi-model-playground-card")).toHaveLength(
+        3,
+      );
+      expect(
+        screen.getByTestId("playground-multi-model-compare-section"),
+      ).toHaveClass("hidden");
+      const grid = screen.getByTestId("playground-multi-model-grid");
+      expect(grid.className.includes("hidden")).toBe(false);
+      expect(grid).toHaveClass("xl:grid-cols-3");
+      expect(grid).not.toHaveClass("2xl:grid-cols-3");
+      expect(
+        screen.getByTestId("playground-trace-view-tabs"),
+      ).toBeInTheDocument();
+      expect(screen.getAllByTestId("chat-input")).not.toHaveLength(0);
+      expect(
+        screen.queryByText(
+          "Send a shared message to start this model’s thread.",
+        ),
+      ).not.toBeInTheDocument();
+      expect(
+        screen.getAllByPlaceholderText(DEFAULT_CHAT_COMPOSER_PLACEHOLDER),
+      ).not.toHaveLength(0);
+    });
+
+    it("tracks the chip click with the compare location when multi-model is active", () => {
+      mockUseChatSession.availableModels = [
+        { id: "gpt-4", name: "GPT-4", provider: "openai" },
+        {
+          id: "claude-sonnet-4-5",
+          name: "Claude Sonnet 4.5",
+          provider: "anthropic",
+        },
+      ];
+      mockUseChatSession.selectedModelIds = ["gpt-4", "claude-sonnet-4-5"];
+      mockUseChatSession.multiModelEnabled = true;
+
+      render(<PlaygroundMain {...defaultProps} enableMultiModelChat={true} />);
+
+      fireEvent.click(screen.getByRole("button", { name: "Starter chip" }));
+
+      const starterCalls = vi
+        .mocked(track)
+        .mock.calls.filter(
+          ([event]) => event === "chat_starter_prompt_clicked",
+        );
+      expect(starterCalls).toEqual([
+        [
+          "chat_starter_prompt_clicked",
+          { prompt: "Starter chip prompt", location: "playground_compare" },
+        ],
+      ]);
+    });
+
+    it("shows trace empty diagnostics and hides compare grid when Trace is selected before first message", () => {
+      mockUseChatSession.availableModels = [
+        {
+          id: "gpt-4",
+          name: "GPT-4",
+          provider: "openai",
+        },
+        {
+          id: "claude-sonnet-4-5",
+          name: "Claude Sonnet 4.5",
+          provider: "anthropic",
+        },
+      ];
+      mockUseChatSession.selectedModelIds = ["gpt-4", "claude-sonnet-4-5"];
+      mockUseChatSession.multiModelEnabled = true;
+      mockUseChatSession.traceViewsSupported = true;
+
+      render(
+        <PlaygroundMain
+          {...defaultProps}
+          enableMultiModelChat={true}
+          enableTraceViews={true}
+        />,
+      );
+
+      fireEvent.click(screen.getByText("Trace"));
+
+      expect(
+        screen.getByTestId("playground-multi-empty-trace-pending"),
+      ).toBeInTheDocument();
+      expect(
+        screen.getByTestId("playground-multi-model-compare-section"),
+      ).toHaveClass("hidden");
+      expect(
+        screen.queryByText("Try one of these to get started"),
+      ).not.toBeInTheDocument();
+    });
+  });
+
+  describe("single-model starter prompts", () => {
+    it("shows starter prompt chips in the single-model empty state", () => {
+      render(<PlaygroundMain {...defaultProps} />);
+
+      expect(
+        screen.getByText("Try one of these to get started"),
+      ).toBeInTheDocument();
+      expect(
+        screen.getByRole("button", { name: "Starter chip" }),
+      ).toBeInTheDocument();
+    });
+
+    it("sends the starter prompt through the single-model chat on click", async () => {
+      render(<PlaygroundMain {...defaultProps} />);
+
+      fireEvent.click(screen.getByRole("button", { name: "Starter chip" }));
+
+      await waitFor(() => {
+        expect(mockUseChatSession.sendMessage).toHaveBeenCalledWith(
+          expect.objectContaining({ text: "Starter chip prompt" }),
+        );
+      });
+    });
+
+    it("tracks the chip click with the prompt and single-model location", () => {
+      render(<PlaygroundMain {...defaultProps} />);
+
+      fireEvent.click(screen.getByRole("button", { name: "Starter chip" }));
+
+      // Filter by event name: the single-model click also fires
+      // app_builder_send_message, so a bare call count would be racy.
+      const starterCalls = vi
+        .mocked(track)
+        .mock.calls.filter(
+          ([event]) => event === "chat_starter_prompt_clicked",
+        );
+      expect(starterCalls).toEqual([
+        [
+          "chat_starter_prompt_clicked",
+          { prompt: "Starter chip prompt", location: "playground_single" },
+        ],
+      ]);
+    });
+
+    it("hides starter chips when the welcome hero is suppressed", () => {
+      render(<PlaygroundMain {...defaultProps} hideWelcomeHero />);
+
+      expect(
+        screen.queryByText("Try one of these to get started"),
+      ).not.toBeInTheDocument();
+    });
+
+    it("hides starter chips when the auth upsell is active", () => {
+      mockUseChatSession.disableForAuthentication = true;
+
+      render(<PlaygroundMain {...defaultProps} />);
+
+      expect(
+        screen.queryByText("Try one of these to get started"),
+      ).not.toBeInTheDocument();
+    });
+
+    it("clears staged skill results after a starter chip send", async () => {
+      render(<PlaygroundMain {...defaultProps} />);
+
+      fireEvent.click(screen.getByTestId("chat-input-attach-skill"));
+      expect(screen.getByTestId("chat-input")).toHaveAttribute(
+        "data-skill-count",
+        "1",
+      );
+
+      fireEvent.click(screen.getByRole("button", { name: "Starter chip" }));
+
+      await waitFor(() => {
+        expect(mockUseChatSession.sendMessage).toHaveBeenCalled();
+      });
+      await waitFor(() => {
+        expect(screen.getByTestId("chat-input")).toHaveAttribute(
+          "data-skill-count",
+          "0",
+        );
+      });
+    });
+
+    it("does not replay a single-model send into compare cards mounted later", async () => {
+      const { rerender } = render(
+        <PlaygroundMain {...defaultProps} enableMultiModelChat={true} />,
+      );
+
+      fireEvent.click(screen.getByRole("button", { name: "Starter chip" }));
+      await waitFor(() => {
+        expect(mockUseChatSession.sendMessage).toHaveBeenCalled();
+      });
+
+      mockUseChatSession.availableModels = [
+        { id: "gpt-4", name: "GPT-4", provider: "openai" },
+        {
+          id: "claude-sonnet-4-5",
+          name: "Claude Sonnet 4.5",
+          provider: "anthropic",
+        },
+      ];
+      mockUseChatSession.selectedModelIds = ["gpt-4", "claude-sonnet-4-5"];
+      mockUseChatSession.multiModelEnabled = true;
+      rerender(<PlaygroundMain {...defaultProps} enableMultiModelChat={true} />);
+
+      await waitFor(() => {
+        expect(
+          screen.getAllByTestId("multi-model-playground-card"),
+        ).toHaveLength(2);
+      });
+
+      const staleRequests = mockMultiModelPlaygroundCard.mock.calls
+        .map(([props]) => props.broadcastRequest)
+        .filter(Boolean);
+      expect(staleRequests).toEqual([]);
     });
   });
 
@@ -483,12 +1607,17 @@ describe("PlaygroundMain", () => {
       expect(screen.getByTestId("chat-input-field")).toBeInTheDocument();
     });
 
-    it("disables input when not ready", () => {
+    it("keeps input editable while streaming", () => {
       mockUseChatSession.status = "submitted";
+      mockUseChatSession.isStreaming = true;
 
       render(<PlaygroundMain {...defaultProps} />);
 
-      expect(screen.getByTestId("chat-input-field")).toBeDisabled();
+      expect(screen.getByTestId("chat-input-field")).not.toBeDisabled();
+      expect(screen.getByTestId("chat-input")).toHaveAttribute(
+        "data-loading",
+        "true",
+      );
     });
 
     it("disables input when submit is blocked", () => {
@@ -503,8 +1632,310 @@ describe("PlaygroundMain", () => {
       render(<PlaygroundMain {...defaultProps} />);
 
       expect(
-        screen.getByPlaceholderText("Ask something to render UI..."),
+        screen.getByPlaceholderText(
+          "Try a prompt that could call your tools...",
+        ),
       ).toBeInTheDocument();
+    });
+
+    it("auto-connects the selected server before sending a message", async () => {
+      const ensureServersReady = vi.fn().mockResolvedValue({
+        readyServerNames: ["test-server"],
+        missingServerNames: [],
+        failedServerNames: [],
+        reauthServerNames: [],
+      });
+      mockSharedAppState.servers["test-server"] = {
+        connectionStatus: "disconnected",
+      };
+
+      render(
+        <PlaygroundMain
+          {...defaultProps}
+          ensureServersReady={ensureServersReady}
+        />,
+      );
+
+      fireEvent.change(screen.getByTestId("chat-input-field"), {
+        target: { value: "Hello from playground" },
+      });
+      fireEvent.click(screen.getByTestId("chat-submit-button"));
+
+      await waitFor(() => {
+        expect(ensureServersReady).toHaveBeenCalledWith(["test-server"]);
+      });
+      await waitFor(() => {
+        expect(mockUseChatSession.sendMessage).toHaveBeenCalledWith(
+          expect.objectContaining({ text: "Hello from playground" }),
+        );
+      });
+    });
+
+    it("injects an explicitly attached skill into the turn (INS-4)", async () => {
+      // An attached skill is turn CONTENT. Playground built no skill messages,
+      // so the skill silently evaporated on send — and a skill-only send did
+      // not count as content at all.
+      render(<PlaygroundMain {...defaultProps} />);
+
+      fireEvent.click(screen.getByTestId("chat-input-attach-skill"));
+      fireEvent.click(screen.getByTestId("chat-submit-button"));
+
+      await waitFor(() => {
+        expect(mockUseChatSession.setMessages).toHaveBeenCalled();
+      });
+      // The prepend lands in the thread BEFORE the user turn, so the request
+      // carries it as history instead of trailing the model's answer.
+      const updater = mockUseChatSession.setMessages.mock.calls.at(-1)![0];
+      const next = typeof updater === "function" ? updater([]) : updater;
+      expect(JSON.stringify(next)).toContain("release-notes");
+      expect(mockUseChatSession.sendMessage).toHaveBeenCalled();
+    });
+
+    it("shows the guided prompt in the input when post-connect onboarding is active", () => {
+      render(
+        <PlaygroundMain
+          {...defaultProps}
+          showPostConnectGuide={true}
+          initialInput="Draw me an MCP architecture diagram"
+        />,
+      );
+
+      expect(screen.getByTestId("chat-input-field")).toHaveValue(
+        "Draw me an MCP architecture diagram",
+      );
+    });
+
+    it("types initialInput with a typewriter when initialInputTypewriter is true", () => {
+      vi.useFakeTimers();
+      const full = "Draw me an MCP architecture diagram";
+
+      render(
+        <PlaygroundMain
+          {...defaultProps}
+          showPostConnectGuide={false}
+          initialInput={full}
+          initialInputTypewriter={true}
+        />,
+      );
+
+      const field = screen.getByTestId("chat-input-field");
+      expect(field).toHaveValue("");
+
+      act(() => {
+        vi.advanceTimersByTime(20);
+      });
+      expect(field).toHaveValue("D");
+
+      act(() => {
+        vi.advanceTimersByTime(20 * full.length);
+      });
+      expect(field).toHaveValue(full);
+
+      vi.useRealTimers();
+    });
+
+    it("pulses submit during first-run typewriter NUX when pulseSubmit is true", () => {
+      const full = "Hello world";
+      render(
+        <PlaygroundMain
+          {...defaultProps}
+          showPostConnectGuide={false}
+          initialInput={full}
+          initialInputTypewriter={true}
+          pulseSubmit={true}
+        />,
+      );
+
+      expect(screen.getByTestId("chat-submit-button")).toHaveAttribute(
+        "data-pulsing",
+        "true",
+      );
+
+      fireEvent.change(screen.getByTestId("chat-input-field"), {
+        target: { value: "User edit" },
+      });
+
+      expect(screen.getByTestId("chat-submit-button")).toHaveAttribute(
+        "data-pulsing",
+        "false",
+      );
+    });
+
+    it("disables submit when blockSubmitUntilServerConnected and server is not connected", () => {
+      mockSharedAppState.servers["test-server"] = {
+        connectionStatus: "connecting",
+      };
+
+      render(
+        <PlaygroundMain
+          {...defaultProps}
+          initialInput="Draw me an MCP architecture diagram"
+          initialInputTypewriter={false}
+          blockSubmitUntilServerConnected={true}
+        />,
+      );
+
+      expect(screen.getByTestId("chat-submit-button")).toBeDisabled();
+    });
+
+    it("enables submit after server connects when blockSubmitUntilServerConnected is true", () => {
+      mockSharedAppState.servers["test-server"] = {
+        connectionStatus: "connecting",
+      };
+
+      const { rerender } = render(
+        <PlaygroundMain
+          {...defaultProps}
+          initialInput="Hello"
+          initialInputTypewriter={false}
+          blockSubmitUntilServerConnected={true}
+        />,
+      );
+
+      expect(screen.getByTestId("chat-submit-button")).toBeDisabled();
+
+      mockSharedAppState.servers["test-server"] = {
+        connectionStatus: "connected",
+      };
+      rerender(
+        <PlaygroundMain
+          {...defaultProps}
+          initialInput="Hello"
+          initialInputTypewriter={false}
+          blockSubmitUntilServerConnected={true}
+        />,
+      );
+
+      expect(screen.getByTestId("chat-submit-button")).not.toBeDisabled();
+    });
+
+    it("shows App Builder send NUX hint outside ChatInput while typewriter NUX is active", () => {
+      mockSharedAppState.servers["test-server"] = {
+        connectionStatus: "connecting",
+      };
+
+      render(
+        <PlaygroundMain
+          {...defaultProps}
+          initialInput="Draw me an MCP architecture diagram"
+          initialInputTypewriter={true}
+          blockSubmitUntilServerConnected={true}
+        />,
+      );
+
+      const hint = screen.getByTestId("playground-send-nux-hint");
+      const chatInput = screen.getByTestId("chat-input");
+      expect(hint).toHaveTextContent("Try this prompt with a demo MCP server");
+      expect(hint.closest('[data-testid="chat-input"]')).toBeNull();
+      expect(
+        chatInput.compareDocumentPosition(hint) &
+          Node.DOCUMENT_POSITION_FOLLOWING,
+      ).toBeTruthy();
+      expect(hint.querySelector("svg")).toBeTruthy();
+    });
+
+    it("keeps Playground send NUX hint visible after server connects", () => {
+      mockSharedAppState.servers["test-server"] = {
+        connectionStatus: "connected",
+      };
+
+      render(
+        <PlaygroundMain
+          {...defaultProps}
+          initialInput="Draw me an MCP architecture diagram"
+          initialInputTypewriter={true}
+          blockSubmitUntilServerConnected={true}
+        />,
+      );
+
+      expect(screen.getByTestId("playground-send-nux-hint")).toHaveTextContent(
+        "Try this prompt with a demo MCP server",
+      );
+    });
+
+    it("restores the footer composer after the first guided message even without an onboarding callback", () => {
+      mockUseChatSession.messages = [
+        { id: "1", role: "user", parts: [{ type: "text", text: "Hello" }] },
+        {
+          id: "2",
+          role: "assistant",
+          parts: [{ type: "text", text: "Hi there!" }],
+        },
+      ];
+
+      render(
+        <PlaygroundMain
+          {...defaultProps}
+          showPostConnectGuide={true}
+          initialInput="Draw me an MCP architecture diagram"
+        />,
+      );
+
+      expect(screen.getByTestId("thread")).toBeInTheDocument();
+      expect(screen.getByTestId("chat-input-field")).toBeInTheDocument();
+    });
+
+    it("preserves the guided prompt if chat reset fires before the first message", () => {
+      render(
+        <PlaygroundMain
+          {...defaultProps}
+          showPostConnectGuide={true}
+          initialInput="Draw me an MCP architecture diagram"
+        />,
+      );
+
+      act(() => {
+        capturedChatSessionOptions.onReset();
+      });
+
+      expect(screen.getByTestId("chat-input-field")).toHaveValue(
+        "Draw me an MCP architecture diagram",
+      );
+    });
+
+    it("stops the onboarding pulse after the user edits the prefilled prompt", () => {
+      render(
+        <PlaygroundMain
+          {...defaultProps}
+          showPostConnectGuide={true}
+          initialInput="Draw me an MCP architecture diagram"
+          pulseSubmit={true}
+        />,
+      );
+
+      expect(screen.getByTestId("chat-submit-button")).toHaveAttribute(
+        "data-pulsing",
+        "true",
+      );
+
+      fireEvent.change(screen.getByTestId("chat-input-field"), {
+        target: { value: "Draw me a sequence diagram instead" },
+      });
+
+      expect(screen.getByTestId("chat-submit-button")).toHaveAttribute(
+        "data-pulsing",
+        "false",
+      );
+    });
+
+    it("stops preserving the guided prompt once the user edits it", () => {
+      render(
+        <PlaygroundMain
+          {...defaultProps}
+          showPostConnectGuide={true}
+          initialInput="Draw me an MCP architecture diagram"
+        />,
+      );
+
+      fireEvent.change(screen.getByTestId("chat-input-field"), {
+        target: { value: "Draw me a sequence diagram instead" },
+      });
+
+      act(() => {
+        capturedChatSessionOptions.onReset();
+      });
+
+      expect(screen.getByTestId("chat-input-field")).toHaveValue("");
     });
 
     it("shows sign in placeholder when auth required", () => {
@@ -515,6 +1946,26 @@ describe("PlaygroundMain", () => {
       expect(
         screen.getByPlaceholderText("Sign in to use chat"),
       ).toBeInTheDocument();
+    });
+
+    it("shows free-chat sign-in placeholder in multi-model mode when auth required", () => {
+      mockUseChatSession.disableForAuthentication = true;
+      mockUseChatSession.availableModels = [
+        { id: "gpt-4", name: "GPT-4", provider: "openai" },
+        {
+          id: "claude-sonnet-4-5",
+          name: "Claude Sonnet 4.5",
+          provider: "anthropic",
+        },
+      ];
+      mockUseChatSession.selectedModelIds = ["gpt-4", "claude-sonnet-4-5"];
+      mockUseChatSession.multiModelEnabled = true;
+
+      render(<PlaygroundMain {...defaultProps} enableMultiModelChat={true} />);
+
+      expect(
+        screen.getAllByPlaceholderText("Sign in to use free chat").length,
+      ).toBeGreaterThan(0);
     });
   });
 
@@ -604,8 +2055,8 @@ describe("PlaygroundMain", () => {
     it("renders with default mobile device type", () => {
       render(<PlaygroundMain {...defaultProps} />);
 
-      // Device controls are rendered by DisplayContextHeader (mocked)
-      expect(screen.getByTestId("display-context-header")).toBeInTheDocument();
+      // Device controls are rendered by ClientContextHeader (mocked)
+      expect(screen.getByTestId("host-context-header")).toBeInTheDocument();
     });
 
     it("renders with device frame using mobile dimensions", () => {
@@ -621,8 +2072,8 @@ describe("PlaygroundMain", () => {
     it("shows display context header for locale controls", () => {
       render(<PlaygroundMain {...defaultProps} locale="en-US" />);
 
-      // Locale controls are rendered by DisplayContextHeader (mocked)
-      expect(screen.getByTestId("display-context-header")).toBeInTheDocument();
+      // Locale controls are rendered by ClientContextHeader (mocked)
+      expect(screen.getByTestId("host-context-header")).toBeInTheDocument();
     });
   });
 
@@ -647,6 +2098,126 @@ describe("PlaygroundMain", () => {
       await waitFor(() => {
         expect(onExecutionInjected).toHaveBeenCalled();
       });
+    });
+  });
+
+  /**
+   * A conversation restored from `?conversation=` carries a model id, but the
+   * model catalog loads independently and can arrive afterwards. The deferred
+   * apply therefore has to remember WHICH conversation asked for that model.
+   */
+  describe("restored model applied late", () => {
+    const RESTORED_SESSION_ID = "restored-chat-session";
+    const LATE_MODEL = {
+      id: "late-model",
+      name: "Late Model",
+      provider: "openai",
+      contextWindow: 8192,
+      maxOutputTokens: 4096,
+      supportsTools: true,
+      supportsVision: false,
+      supportsStreaming: true,
+    };
+
+    const arriveAtRestoredConversation = () => {
+      window.history.replaceState(
+        {},
+        "",
+        `/playground?conversation=${RESTORED_SESSION_ID}`,
+      );
+      mockGetChatHistoryDetail.mockResolvedValue({
+        ok: true,
+        session: {
+          _id: "history-restored",
+          chatSessionId: RESTORED_SESSION_ID,
+          firstMessagePreview: "Hello",
+          status: "active" as const,
+          directVisibility: "private" as const,
+          version: 3,
+          createdAt: 1,
+          updatedAt: 1,
+          lastActivityAt: 1,
+          isPinned: false,
+          manualUnread: false,
+          isUnread: false,
+          messagesBlobUrl: "https://storage.test/blob",
+          // The catalog is empty at restore time, so `loadChatSession` cannot
+          // apply this and it becomes the deferred model.
+          modelId: LATE_MODEL.id,
+          resumeConfig: {},
+        },
+        widgetSnapshots: [],
+      });
+    };
+
+    beforeEach(() => {
+      // The detail cache is module-level and outlives a test, so without this
+      // the second restore of the same id is served from the first test's
+      // entry and never reaches the mock.
+      invalidateChatHistoryPrefetch();
+    });
+
+    afterEach(() => {
+      window.history.replaceState({}, "", "/");
+      invalidateChatHistoryPrefetch();
+    });
+
+    it("applies the restored model when the catalog arrives", async () => {
+      arriveAtRestoredConversation();
+
+      const { rerender } = render(
+        <PlaygroundMain {...defaultProps} syncConversationToUrl />,
+      );
+
+      await waitFor(() => {
+        expect(mockGetChatHistoryDetail).toHaveBeenCalledWith(
+          expect.objectContaining({ chatSessionId: RESTORED_SESSION_ID }),
+        );
+      });
+      expect(mockUseChatSession.setSelectedModel).not.toHaveBeenCalled();
+
+      // Hydration lands, then the catalog does.
+      mockUseChatSession.chatSessionId = RESTORED_SESSION_ID;
+      mockUseChatSession.availableModels = [LATE_MODEL];
+      await act(async () => {
+        rerender(<PlaygroundMain {...defaultProps} syncConversationToUrl />);
+      });
+
+      expect(mockUseChatSession.setSelectedModel).toHaveBeenCalledWith(
+        LATE_MODEL,
+      );
+    });
+
+    it("does not retag a different thread opened before the catalog arrives", async () => {
+      arriveAtRestoredConversation();
+
+      const { rerender } = render(
+        <PlaygroundMain {...defaultProps} syncConversationToUrl />,
+      );
+
+      await waitFor(() => {
+        expect(mockGetChatHistoryDetail).toHaveBeenCalledWith(
+          expect.objectContaining({ chatSessionId: RESTORED_SESSION_ID }),
+        );
+      });
+
+      // The user moves to another thread while the catalog is still loading.
+      mockUseChatSession.chatSessionId = "some-other-session";
+      mockUseChatSession.availableModels = [LATE_MODEL];
+      await act(async () => {
+        rerender(<PlaygroundMain {...defaultProps} syncConversationToUrl />);
+      });
+
+      // Applying it now would silently switch THEIR thread to the restored
+      // conversation's model.
+      expect(mockUseChatSession.setSelectedModel).not.toHaveBeenCalled();
+
+      // And the stale pending model must not linger to fire later either.
+      mockUseChatSession.chatSessionId = "yet-another-session";
+      await act(async () => {
+        rerender(<PlaygroundMain {...defaultProps} syncConversationToUrl />);
+      });
+      expect(mockUseChatSession.setSelectedModel).not.toHaveBeenCalled();
     });
   });
 });

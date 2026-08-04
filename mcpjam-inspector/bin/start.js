@@ -3,7 +3,7 @@
 import { resolve, dirname } from "path";
 import { spawn } from "child_process";
 import { fileURLToPath } from "url";
-import { createServer } from "net";
+import { createServer, createConnection } from "net";
 import { execSync } from "child_process";
 import { existsSync, readFileSync } from "fs";
 import open from "open";
@@ -137,6 +137,91 @@ function isPortAvailable(port) {
   });
 }
 
+function waitForServerReady(port, host, timeoutMs = 30000, signal = null) {
+  const intervalMs = 200;
+  const startTime = Date.now();
+
+  return new Promise((resolve) => {
+    let done = false;
+    let activeSocket = null;
+    let retryTimer = null;
+
+    function finish(ready) {
+      if (done) return;
+      done = true;
+      if (retryTimer) {
+        clearTimeout(retryTimer);
+      }
+      if (activeSocket) {
+        activeSocket.destroy();
+      }
+      signal?.removeEventListener("abort", onAbort);
+      resolve(ready);
+    }
+
+    function onAbort() {
+      finish(false);
+    }
+
+    function retry() {
+      if (done) return;
+      retryTimer = setTimeout(() => {
+        retryTimer = null;
+        attempt();
+      }, intervalMs);
+    }
+
+    function attempt() {
+      if (done) {
+        return;
+      }
+
+      if (Date.now() - startTime >= timeoutMs) {
+        finish(false);
+        return;
+      }
+
+      const socket = createConnection({ port, host });
+      activeSocket = socket;
+      let settled = false;
+
+      function cleanup() {
+        if (settled) return;
+        settled = true;
+        if (activeSocket === socket) {
+          activeSocket = null;
+        }
+        socket.removeAllListeners();
+        socket.destroy();
+      }
+
+      socket.once("connect", () => {
+        cleanup();
+        finish(true);
+      });
+
+      socket.once("error", () => {
+        cleanup();
+        retry();
+      });
+
+      socket.setTimeout(1000);
+      socket.once("timeout", () => {
+        cleanup();
+        retry();
+      });
+    }
+
+    if (signal?.aborted) {
+      finish(false);
+      return;
+    }
+
+    signal?.addEventListener("abort", onAbort, { once: true });
+    attempt();
+  });
+}
+
 function spawnPromise(command, args, options) {
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, {
@@ -170,6 +255,45 @@ async function checkOllamaInstalled() {
   } catch (error) {
     return false;
   }
+}
+
+function normalizeBrowserBaseUrl(value) {
+  if (!value || typeof value !== "string" || !value.trim()) {
+    return null;
+  }
+
+  try {
+    const parsed = new URL(value.trim());
+    parsed.hash = "";
+    parsed.search = "";
+    return parsed.href.replace(/\/$/, "");
+  } catch {
+    return null;
+  }
+}
+
+async function resolveBrowserBaseUrl(apiBaseUrl) {
+  const explicitFrontendUrl =
+    normalizeBrowserBaseUrl(process.env.MCPJAM_INSPECTOR_FRONTEND_URL) ||
+    normalizeBrowserBaseUrl(process.env.FRONTEND_URL);
+  if (explicitFrontendUrl) {
+    return explicitFrontendUrl;
+  }
+
+  try {
+    const response = await fetch(`${apiBaseUrl}/health`, {
+      signal: AbortSignal.timeout(2000),
+    });
+    if (response.ok) {
+      const body = await response.json();
+      const healthFrontendUrl = normalizeBrowserBaseUrl(body?.frontend);
+      if (healthFrontendUrl) {
+        return healthFrontendUrl;
+      }
+    }
+  } catch {}
+
+  return apiBaseUrl;
 }
 
 function getTerminalCommand() {
@@ -325,6 +449,7 @@ async function main() {
   let initialTab = null;
   let bearerToken = null;
   let useOAuth = false;
+  let openBrowser = process.env.MCPJAM_INSPECTOR_SUPPRESS_AUTO_OPEN !== "1";
   const customHeaders = [];
   let verboseLogs = false;
 
@@ -418,6 +543,11 @@ async function main() {
       continue;
     }
 
+    if (parsingFlags && (arg === "--no-open" || arg === "--no-browser")) {
+      openBrowser = false;
+      continue;
+    }
+
     // New: --verbose flag to enable HTTP request logs in production
     if (parsingFlags && (arg === "--verbose" || arg === "-v")) {
       verboseLogs = true;
@@ -499,7 +629,9 @@ async function main() {
         if (mcpServerName) {
           if (!configData.mcpServers[mcpServerName]) {
             logError(
-              `Server '${mcpServerName}' not found in config file. Available servers: ${Object.keys(configData.mcpServers).join(", ")}`,
+              `Server '${mcpServerName}' not found in config file. Available servers: ${Object.keys(
+                configData.mcpServers,
+              ).join(", ")}`,
             );
             process.exit(1);
           }
@@ -572,7 +704,9 @@ async function main() {
     // Handle single MCP server command if provided (legacy mode)
     logStep(
       "MCP Server",
-      `Configuring auto-connection to: ${mcpServerCommand} ${mcpServerArgs.join(" ")}`,
+      `Configuring auto-connection to: ${mcpServerCommand} ${mcpServerArgs.join(
+        " ",
+      )}`,
     );
 
     // Pass MCP server config via environment variables
@@ -624,10 +758,21 @@ async function main() {
   Object.assign(process.env, envVars);
 
   // Port configuration (fixed default to 6274)
-  const requestedPort = 6274;
+  const requestedPortValue = envVars.PORT || "6274";
+  const requestedPort = Number(requestedPortValue);
   let PORT;
 
   try {
+    if (
+      !/^\d+$/.test(requestedPortValue) ||
+      !Number.isInteger(requestedPort) ||
+      requestedPort < 1 ||
+      requestedPort > 65535
+    ) {
+      logError(`Invalid port: ${requestedPortValue}`);
+      throw new Error(`Invalid port: ${requestedPortValue}`);
+    }
+
     // Check if user explicitly set a port via --port flag
     const hasExplicitPort = envVars.PORT !== undefined;
 
@@ -655,6 +800,7 @@ async function main() {
 
     // Update environment variables with the final port
     envVars.PORT = PORT;
+    envVars.SERVER_PORT = PORT;
     // Default: localhost in development, 127.0.0.1 in production
     const defaultHost =
       process.env.ENVIRONMENT === "dev" ? "localhost" : "127.0.0.1";
@@ -667,18 +813,45 @@ async function main() {
   }
 
   const abort = new AbortController();
+  const initialParentPid = process.ppid;
+  let parentWatcher = null;
+  const orphanCheckDisabled =
+    process.env.MCPJAM_INSPECTOR_DISABLE_ORPHAN_CHECK === "1";
 
   let cancelled = false;
-  process.on("SIGINT", () => {
+  function stopParentWatcher() {
+    if (parentWatcher) {
+      clearInterval(parentWatcher);
+      parentWatcher = null;
+    }
+  }
+
+  function requestShutdown() {
+    if (cancelled) {
+      return;
+    }
+
     cancelled = true;
+    stopParentWatcher();
     abort.abort();
     logDivider();
     logWarning("Shutdown signal received...");
     logProgress("Stopping MCP Inspector server");
     logInfo("Cleaning up resources...");
-    logSuccess("Server stopped gracefully");
-    logDivider();
-  });
+  }
+
+  for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"]) {
+    process.on(signal, requestShutdown);
+  }
+
+  if (!orphanCheckDisabled && initialParentPid > 1) {
+    parentWatcher = setInterval(() => {
+      if (process.ppid !== initialParentPid) {
+        requestShutdown();
+      }
+    }, 1000);
+    parentWatcher.unref?.();
+  }
 
   try {
     const distServerPath = resolve(projectRoot, "dist", "server", "index.js");
@@ -712,10 +885,15 @@ async function main() {
       await delay(500);
     }
 
+    if (cancelled) {
+      return 0;
+    }
+
     // Spawn the server process but don't wait for it to exit
     const serverProcess = spawn("node", [distServerPath], {
       env: {
         ...process.env,
+        MCPJAM_INSPECTOR_PARENT_PID: process.pid.toString(),
         NODE_ENV: "production",
         PORT: PORT,
         ...(verboseLogs && { VERBOSE_LOGS: "true" }),
@@ -723,6 +901,55 @@ async function main() {
       cwd: projectRoot,
       stdio: "inherit",
     });
+
+    let serverProcessClosed = false;
+    let forceKillTimer = null;
+
+    function clearForceKillTimer() {
+      if (forceKillTimer) {
+        clearTimeout(forceKillTimer);
+        forceKillTimer = null;
+      }
+    }
+
+    const serverExit = new Promise((resolve, reject) => {
+      serverProcess.on("close", (code, signal) => {
+        serverProcessClosed = true;
+        clearForceKillTimer();
+        if (code === 0 || cancelled) {
+          resolve({ code, signal });
+        } else {
+          reject(
+            new Error(
+              signal
+                ? `Server process exited from signal ${signal}`
+                : `Server process exited with code ${code}`,
+            ),
+          );
+        }
+      });
+    });
+
+    function killServerProcess() {
+      if (serverProcessClosed) {
+        return;
+      }
+
+      serverProcess.kill("SIGTERM");
+      if (!forceKillTimer) {
+        forceKillTimer = setTimeout(() => {
+          if (!serverProcessClosed) {
+            logWarning(
+              "Server did not exit after SIGTERM; forcing shutdown...",
+            );
+            serverProcess.kill("SIGKILL");
+          }
+        }, 5000);
+        forceKillTimer.unref?.();
+      }
+    }
+
+    process.once("exit", killServerProcess);
 
     // Handle server process errors
     serverProcess.on("error", (error) => {
@@ -733,47 +960,56 @@ async function main() {
     });
 
     // Handle abort signal
-    abort.signal.addEventListener("abort", () => {
-      serverProcess.kill("SIGTERM");
-    });
-
-    // Wait a bit for the server to start up
-    await delay(2000);
+    abort.signal.addEventListener("abort", killServerProcess, { once: true });
 
     if (!cancelled) {
-      // Open the browser automatically
-      // Use BASE_URL if set, otherwise construct from HOST and PORT
       // Default: localhost in development, 127.0.0.1 in production
       const defaultHost =
         process.env.ENVIRONMENT === "dev" ? "localhost" : "127.0.0.1";
       const host = process.env.HOST || defaultHost;
-      let url = process.env.BASE_URL || `http://${host}:${PORT}`;
+      const apiBaseUrl = process.env.BASE_URL || `http://${host}:${PORT}`;
 
-      // Append initial tab hash if specified
-      if (initialTab) {
-        url = `${url}#${initialTab}`;
-      }
+      // Wait until the server is actually accepting connections
+      const ready = await waitForServerReady(
+        parseInt(PORT, 10),
+        host,
+        30000,
+        abort.signal,
+      );
 
-      try {
-        await open(url);
-        logSuccess(`🌐 Browser opened at ${url}`);
-      } catch (error) {
+      if (!ready && !cancelled) {
         logWarning(
-          `Could not open browser automatically. Please visit ${url} manually.`,
+          `Server did not become ready within 30s. Please visit ${apiBaseUrl} manually.`,
         );
+      } else if (!cancelled && openBrowser) {
+        let url = await resolveBrowserBaseUrl(apiBaseUrl);
+
+        // Append initial tab hash if specified
+        if (initialTab) {
+          url = `${url}#${initialTab}`;
+        }
+
+        try {
+          await open(url);
+          logSuccess(`🌐 Browser opened at ${url}`);
+        } catch (error) {
+          logWarning(
+            `Could not open browser automatically. Please visit ${url} manually.`,
+          );
+        }
       }
     }
 
     // Wait for the server process to exit
-    await new Promise((resolve, reject) => {
-      serverProcess.on("close", (code) => {
-        if (code === 0 || cancelled) {
-          resolve(code);
-        } else {
-          reject(new Error(`Server process exited with code ${code}`));
-        }
-      });
-    });
+    const result = await serverExit;
+    if (cancelled) {
+      if (result.signal === "SIGKILL") {
+        logWarning("Server process was force-killed after shutdown timeout");
+      } else {
+        logSuccess("Server stopped gracefully");
+      }
+      logDivider();
+    }
   } catch (e) {
     if (!cancelled || process.env.DEBUG) {
       logDivider();
@@ -782,6 +1018,8 @@ async function main() {
       logDivider();
       throw e;
     }
+  } finally {
+    stopParentWatcher();
   }
 
   return 0;

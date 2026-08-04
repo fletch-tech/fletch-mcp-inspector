@@ -1,0 +1,382 @@
+import { describe, expect, it } from "vitest";
+import type { PlatformApiClient } from "@mcpjam/sdk/platform";
+import {
+  resolveHostTools,
+  narrowHostComputer,
+} from "../built-in-tools/registry";
+import { WEB_SEARCH_TOOL_NAME } from "../built-in-tools/exa-web-search";
+import { BASH_TOOL_NAME } from "../built-in-tools/bash";
+import { MCPJAM_TOOL_IDS } from "../built-in-tools/mcpjam";
+
+const ctx = {
+  authHeader: "Bearer token-123",
+  projectId: "project-1",
+  chatSessionId: "session-1",
+};
+
+// Tool construction never calls the client; resolution tests only need a
+// truthy instance. Execute paths live in mcpjam-built-in-tools.test.ts.
+const stubClient = {} as PlatformApiClient;
+
+const computer = { kind: "personal", workdir: "/srv" };
+
+describe("resolveHostTools — builtInToolIds", () => {
+  it("resolves web_search to a runnable tool", () => {
+    const tools = resolveHostTools(
+      { builtInToolIds: [WEB_SEARCH_TOOL_NAME] },
+      ctx
+    );
+    expect(Object.keys(tools ?? {})).toEqual([WEB_SEARCH_TOOL_NAME]);
+    expect(typeof tools![WEB_SEARCH_TOOL_NAME].execute).toBe("function");
+  });
+
+  it("skips unknown ids instead of throwing", () => {
+    const tools = resolveHostTools(
+      { builtInToolIds: ["not_a_tool", WEB_SEARCH_TOOL_NAME] },
+      ctx
+    );
+    expect(Object.keys(tools ?? {})).toEqual([WEB_SEARCH_TOOL_NAME]);
+  });
+
+  it("returns undefined for undefined / empty ids", () => {
+    expect(resolveHostTools({}, ctx)).toBeUndefined();
+    expect(resolveHostTools({ builtInToolIds: [] }, ctx)).toBeUndefined();
+  });
+
+  it("returns undefined without auth context (local BYOK paths)", () => {
+    expect(
+      resolveHostTools(
+        { builtInToolIds: [WEB_SEARCH_TOOL_NAME, BASH_TOOL_NAME], computer },
+        null
+      )
+    ).toBeUndefined();
+  });
+
+  it("returns undefined when every requested id is unknown", () => {
+    expect(
+      resolveHostTools({ builtInToolIds: ["not_a_tool"] }, ctx)
+    ).toBeUndefined();
+  });
+
+  it("does not double-prefix a lowercase bearer scheme", () => {
+    // RFC 7235 schemes are case-insensitive; "bearer x" must pass through
+    // instead of becoming "Bearer bearer x".
+    const tools = resolveHostTools(
+      { builtInToolIds: [WEB_SEARCH_TOOL_NAME] },
+      { authHeader: "bearer token-123", projectId: "project-1" }
+    );
+    expect(tools).toBeDefined();
+  });
+
+  it("resolves with a raw (prefixless) bearer — eval call shape", () => {
+    // Eval threads `convexAuthToken` without the "Bearer " prefix; the
+    // resolver normalizes, so the same call shape works for both.
+    const tools = resolveHostTools(
+      { builtInToolIds: [WEB_SEARCH_TOOL_NAME] },
+      { authHeader: "raw-token", projectId: "project-1" }
+    );
+    expect(tools).toBeDefined();
+    expect(Object.keys(tools!)).toEqual([WEB_SEARCH_TOOL_NAME]);
+  });
+});
+
+describe("resolveHostTools — computer-backed bash", () => {
+  it("advertises bash when the id is granted AND a computer is attached", () => {
+    const tools = resolveHostTools(
+      { builtInToolIds: [BASH_TOOL_NAME], computer },
+      { ...ctx, requireToolApproval: true }
+    );
+    expect(Object.keys(tools ?? {})).toEqual([BASH_TOOL_NAME]);
+    const bash = tools![BASH_TOOL_NAME] as { needsApproval?: boolean };
+    expect(typeof tools![BASH_TOOL_NAME].execute).toBe("function");
+    // The host's approval policy reaches the tool.
+    expect(bash.needsApproval).toBe(true);
+  });
+
+  it("skips bash when the host grants the id but attaches no computer", () => {
+    const tools = resolveHostTools(
+      { builtInToolIds: [BASH_TOOL_NAME, WEB_SEARCH_TOOL_NAME] },
+      ctx
+    );
+    expect(Object.keys(tools ?? {})).toEqual([WEB_SEARCH_TOOL_NAME]);
+  });
+
+  it("skips bash for an anonymous guest on the personal-project path (backend rejects the reserve)", () => {
+    const tools = resolveHostTools(
+      { builtInToolIds: [BASH_TOOL_NAME, WEB_SEARCH_TOOL_NAME], computer },
+      { ...ctx, isGuest: true }
+    );
+    expect(Object.keys(tools ?? {})).toEqual([WEB_SEARCH_TOOL_NAME]);
+  });
+
+  it("advertises bash to a guest ONLY on a host-funded swarm executionScope", () => {
+    const tools = resolveHostTools(
+      { builtInToolIds: [BASH_TOOL_NAME, WEB_SEARCH_TOOL_NAME], computer },
+      {
+        ...ctx,
+        isGuest: true,
+        executionScope: {
+          kind: "swarm",
+          swarmId: "swarm-1",
+          accessVersion: 1,
+          projectId: "project-1",
+          workspaceId: "ws-1",
+        },
+      }
+    );
+    expect(Object.keys(tools ?? {})).toContain(BASH_TOOL_NAME);
+  });
+
+  it("skips bash for a guest on a project-scoped executionScope (not host-funded)", () => {
+    const tools = resolveHostTools(
+      { builtInToolIds: [BASH_TOOL_NAME, WEB_SEARCH_TOOL_NAME], computer },
+      {
+        ...ctx,
+        isGuest: true,
+        executionScope: { kind: "project", projectId: "project-1" },
+      }
+    );
+    expect(Object.keys(tools ?? {})).toEqual([WEB_SEARCH_TOOL_NAME]);
+  });
+
+  it("does NOT advertise bash off the computer alone — the id must be granted", () => {
+    const tools = resolveHostTools(
+      { builtInToolIds: [WEB_SEARCH_TOOL_NAME], computer },
+      ctx
+    );
+    expect(Object.keys(tools ?? {})).toEqual([WEB_SEARCH_TOOL_NAME]);
+  });
+});
+
+describe("resolveHostTools — bash in Journey (swarm) sessions", () => {
+  it("suppresses bash and reports a visible reason", () => {
+    const suppressed: Array<{ id: string; reason: string }> = [];
+    const tools = resolveHostTools(
+      { builtInToolIds: [BASH_TOOL_NAME, WEB_SEARCH_TOOL_NAME], computer },
+      {
+        ...ctx,
+        isJourneySession: true,
+        onToolSuppressed: (info) => suppressed.push(info),
+      }
+    );
+    // The rest of the host's built-ins are untouched — only bash drops.
+    expect(Object.keys(tools ?? {})).toEqual([WEB_SEARCH_TOOL_NAME]);
+    expect(suppressed).toHaveLength(1);
+    expect(suppressed[0]!.id).toBe(BASH_TOOL_NAME);
+    // The reason has to say WHY, not just "unavailable": whoever opens the run
+    // needs to tell this apart from a host-config mistake.
+    expect(suppressed[0]!.reason).toMatch(/simulated \(swarm\) sessions/);
+  });
+
+  it("suppresses bash even when an executionScope is threaded", () => {
+    // `executionScope` cannot isolate a Journey run's bash (a signed-in
+    // launcher resolves to project_member), so it must not re-open the gate.
+    const tools = resolveHostTools(
+      { builtInToolIds: [BASH_TOOL_NAME], computer },
+      {
+        ...ctx,
+        isJourneySession: true,
+        executionScope: { kind: "project", projectId: "project-1" },
+      }
+    );
+    expect(tools).toBeUndefined();
+  });
+
+  it("leaves evals and hosted chat unaffected", () => {
+    for (const surface of [{}, { isChatboxSession: true }]) {
+      const tools = resolveHostTools(
+        { builtInToolIds: [BASH_TOOL_NAME], computer },
+        { ...ctx, ...surface }
+      );
+      expect(Object.keys(tools ?? {})).toEqual([BASH_TOOL_NAME]);
+    }
+  });
+
+  it("never constructs the bash tool, so no reserve can be attempted", () => {
+    const tools = resolveHostTools(
+      { builtInToolIds: [BASH_TOOL_NAME], computer },
+      { ...ctx, isJourneySession: true }
+    );
+    // No tool object at all ⇒ nothing the model can invoke ⇒ the reserve call
+    // inside `buildBashTool`'s execute is unreachable for this session.
+    expect(tools?.[BASH_TOOL_NAME]).toBeUndefined();
+  });
+});
+
+describe("resolveHostTools — the trusted ephemeral sandbox binding", () => {
+  const binding = { sandboxId: "sbx_ephemeral_1", workdir: "/srv/app" };
+
+  it("lifts the Journey suppression — a bound session gets bash", () => {
+    const suppressed: Array<{ id: string; reason: string }> = [];
+    const tools = resolveHostTools(
+      { builtInToolIds: [BASH_TOOL_NAME], computer },
+      {
+        ...ctx,
+        isJourneySession: true,
+        sandboxBinding: binding,
+        onToolSuppressed: (info) => suppressed.push(info),
+      }
+    );
+    expect(Object.keys(tools ?? {})).toEqual([BASH_TOOL_NAME]);
+    // Nothing was suppressed, so no notice should have been emitted either.
+    expect(suppressed).toHaveLength(0);
+  });
+
+  it("binds to the sandbox even with NO computer on the config", () => {
+    // The ephemeral path does not consult `config.computer` at all. A snapshot
+    // whose target carries no computer still gets a shell once a binding
+    // exists, because the binding IS the resource.
+    const tools = resolveHostTools(
+      { builtInToolIds: [BASH_TOOL_NAME] },
+      { ...ctx, isJourneySession: true, sandboxBinding: binding }
+    );
+    expect(Object.keys(tools ?? {})).toEqual([BASH_TOOL_NAME]);
+  });
+
+  it("cannot be injected through the wire-sourced config", () => {
+    // THE unforgeability property. `sandboxBinding` does not exist on
+    // HostToolsConfig, so a hostile runtime-config / run-snapshot payload has
+    // no field to smuggle one in through — the value can only arrive on `ctx`,
+    // which is constructed in-process.
+    const hostilePayload = {
+      builtInToolIds: [BASH_TOOL_NAME],
+      computer: { kind: "ephemeral", sandboxId: "sbx_attacker" },
+      sandboxBinding: { sandboxId: "sbx_attacker" },
+    } as never;
+    const tools = resolveHostTools(hostilePayload, {
+      ...ctx,
+      isJourneySession: true,
+    });
+    // Still suppressed: the payload's extra keys are inert.
+    expect(tools?.[BASH_TOOL_NAME]).toBeUndefined();
+  });
+
+  it("still rejects a forged `ephemeral` computer on a non-journey surface", () => {
+    // `narrowHostComputer` is unchanged and only accepts `personal`, so the
+    // union that was NOT built stays impossible to fake.
+    const tools = resolveHostTools(
+      {
+        builtInToolIds: [BASH_TOOL_NAME],
+        computer: { kind: "ephemeral", sandboxId: "sbx_attacker" },
+      },
+      ctx
+    );
+    expect(tools?.[BASH_TOOL_NAME]).toBeUndefined();
+  });
+
+  it("guest and executionScope gates do not apply to the ephemeral path", () => {
+    // A binding-holder has already passed the backend's provision
+    // authorization (project member + run launcher + a claimed, running
+    // attempt); the guest/scope gates below it reason about the personal
+    // reserve, which is not happening here.
+    const tools = resolveHostTools(
+      { builtInToolIds: [BASH_TOOL_NAME] },
+      { ...ctx, isGuest: true, sandboxBinding: binding }
+    );
+    expect(Object.keys(tools ?? {})).toEqual([BASH_TOOL_NAME]);
+  });
+
+  it("inherits requireToolApproval like the personal path does", () => {
+    const tools = resolveHostTools(
+      { builtInToolIds: [BASH_TOOL_NAME] },
+      { ...ctx, sandboxBinding: binding, requireToolApproval: true }
+    );
+    expect(tools![BASH_TOOL_NAME].needsApproval).toBe(true);
+  });
+});
+
+describe("resolveHostTools — workspace tools (platform operation catalog)", () => {
+  it("advertises every workspace id when the platform client is wired", () => {
+    const tools = resolveHostTools(
+      { builtInToolIds: [...MCPJAM_TOOL_IDS] },
+      { ...ctx, mcpjamPlatformClient: stubClient }
+    );
+    expect(Object.keys(tools ?? {}).sort()).toEqual(
+      [...MCPJAM_TOOL_IDS].sort()
+    );
+    expect(typeof tools!["list_project_servers"].execute).toBe("function");
+  });
+
+  it("advertises no workspace id without a platform client", () => {
+    const tools = resolveHostTools(
+      { builtInToolIds: [...MCPJAM_TOOL_IDS, WEB_SEARCH_TOOL_NAME] },
+      ctx
+    );
+    expect(Object.keys(tools ?? {})).toEqual([WEB_SEARCH_TOOL_NAME]);
+  });
+
+  it("does not advertise any workspace id to guest actors", () => {
+    const tools = resolveHostTools(
+      { builtInToolIds: [...MCPJAM_TOOL_IDS, WEB_SEARCH_TOOL_NAME] },
+      { ...ctx, isGuest: true, mcpjamPlatformClient: stubClient }
+    );
+    expect(Object.keys(tools ?? {})).toEqual([WEB_SEARCH_TOOL_NAME]);
+  });
+
+  it("does not advertise any workspace id in chatbox sessions", () => {
+    const tools = resolveHostTools(
+      { builtInToolIds: [...MCPJAM_TOOL_IDS, WEB_SEARCH_TOOL_NAME] },
+      { ...ctx, isChatboxSession: true, mcpjamPlatformClient: stubClient }
+    );
+    expect(Object.keys(tools ?? {})).toEqual([WEB_SEARCH_TOOL_NAME]);
+  });
+
+  it("requireToolApproval gates connection-opening ops but never list_project_servers", () => {
+    const tools = resolveHostTools(
+      {
+        builtInToolIds: [
+          "list_project_servers",
+          "call_server_tool",
+          "diagnose_server",
+        ],
+      },
+      { ...ctx, mcpjamPlatformClient: stubClient, requireToolApproval: true }
+    );
+    const approval = (id: string) =>
+      (tools![id] as { needsApproval?: boolean }).needsApproval;
+    expect(approval("call_server_tool")).toBe(true);
+    expect(approval("diagnose_server")).toBe(true);
+    expect(approval("list_project_servers")).toBe(false);
+  });
+
+  it("live ops do not require approval when the host policy is off", () => {
+    const tools = resolveHostTools(
+      { builtInToolIds: ["call_server_tool"] },
+      { ...ctx, mcpjamPlatformClient: stubClient }
+    );
+    expect(
+      (tools!["call_server_tool"] as { needsApproval?: boolean }).needsApproval
+    ).toBe(false);
+  });
+});
+
+describe("narrowHostComputer", () => {
+  it("accepts the resource shape and preserves workdir", () => {
+    expect(narrowHostComputer({ kind: "personal", workdir: "/srv" })).toEqual({
+      kind: "personal",
+      workdir: "/srv",
+    });
+  });
+
+  it("tolerates and drops the legacy toolset key", () => {
+    expect(narrowHostComputer({ kind: "personal", toolset: "bash" })).toEqual({
+      kind: "personal",
+    });
+  });
+
+  it("rejects non-objects and wrong kinds; empty workdir collapses", () => {
+    expect(narrowHostComputer(undefined)).toBeNull();
+    expect(narrowHostComputer(null)).toBeNull();
+    expect(narrowHostComputer("personal")).toBeNull();
+    expect(narrowHostComputer({ kind: "shared" })).toBeNull();
+    // `personal` remains the ONLY accepted kind. The ephemeral sandbox binding
+    // deliberately travels on `ctx`, not here — widening this union would make
+    // the binding wire-forgeable, which is why it was not done.
+    expect(
+      narrowHostComputer({ kind: "ephemeral", sandboxId: "sbx_1" })
+    ).toBeNull();
+    expect(narrowHostComputer({ kind: "personal", workdir: "   " })).toEqual({
+      kind: "personal",
+    });
+  });
+});

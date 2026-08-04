@@ -4,6 +4,7 @@ import {
   executeToolCallsFromMessages,
 } from "../http-tool-calls.js";
 import type { ModelMessage } from "@ai-sdk/provider-utils";
+import { mcpCallToolResultToModelOutput } from "@mcpjam/sdk";
 
 describe("hasUnresolvedToolCalls", () => {
   describe("empty/basic cases", () => {
@@ -202,7 +203,13 @@ describe("executeToolCallsFromMessages", () => {
         tools,
       });
 
-      expect(mockExecute).toHaveBeenCalledWith({ param: "value" });
+      expect(mockExecute).toHaveBeenCalledWith(
+        { param: "value" },
+        expect.objectContaining({
+          toolCallId: "call-123",
+          messages,
+        })
+      );
       expect(messages).toHaveLength(2);
       expect(messages[1].role).toBe("tool");
       expect((messages[1] as any).content[0].type).toBe("tool-result");
@@ -301,7 +308,7 @@ describe("executeToolCallsFromMessages", () => {
       expect(messages).toHaveLength(2);
       expect((messages[1] as any).content[0].output.type).toBe("error-text");
       expect((messages[1] as any).content[0].output.value).toContain(
-        "Tool 'unknown_tool' not found",
+        "Tool 'unknown_tool' not found"
       );
     });
   });
@@ -331,7 +338,13 @@ describe("executeToolCallsFromMessages", () => {
 
       await executeToolCallsFromMessages(messages, { tools });
 
-      expect(mockExecute).toHaveBeenCalledWith({ path: "/file.txt" });
+      expect(mockExecute).toHaveBeenCalledWith(
+        { path: "/file.txt" },
+        expect.objectContaining({
+          toolCallId: "call-prefixed",
+          messages,
+        })
+      );
     });
   });
 
@@ -479,13 +492,13 @@ describe("executeToolCallsFromMessages", () => {
 
       expect((messages[1] as any).content[0].output.type).toBe("json");
       expect((messages[1] as any).content[0].output.value.big).toBe(
-        "12345678901234567890",
+        "12345678901234567890"
       );
     });
   });
 
   describe("multiple tool calls", () => {
-    it("executes multiple tool calls in sequence", async () => {
+    it("starts multiple tool calls in call order", async () => {
       const executionOrder: string[] = [];
       const tools = {
         tool_a: {
@@ -526,6 +539,214 @@ describe("executeToolCallsFromMessages", () => {
 
       expect(executionOrder).toEqual(["a", "b"]);
       expect(messages).toHaveLength(3);
+    });
+
+    it("executes tool calls within a step in parallel by default (HP-6)", async () => {
+      // tool_a only resolves when tool_b runs. Sequential execution would
+      // deadlock here (tool_b never starts until tool_a resolves); parallel
+      // execution completes.
+      let releaseA!: () => void;
+      const tools = {
+        tool_a: {
+          execute: () =>
+            new Promise<string>((resolve) => {
+              releaseA = () => resolve("a result");
+            }),
+        },
+        tool_b: {
+          execute: async () => {
+            releaseA();
+            return "b result";
+          },
+        },
+      };
+
+      const messages = [
+        {
+          role: "assistant",
+          content: [
+            {
+              type: "tool-call",
+              toolCallId: "call-a",
+              toolName: "tool_a",
+              input: {},
+            },
+            {
+              type: "tool-call",
+              toolCallId: "call-b",
+              toolName: "tool_b",
+              input: {},
+            },
+          ],
+        },
+      ] as unknown as ModelMessage[];
+
+      const newMessages = await executeToolCallsFromMessages(messages, {
+        tools,
+      });
+
+      // Results stay in call order even though tool_b finished first.
+      expect(newMessages).toHaveLength(2);
+      expect((newMessages[0] as any).content[0].toolCallId).toBe("call-a");
+      expect((newMessages[1] as any).content[0].toolCallId).toBe("call-b");
+      expect(messages).toHaveLength(3);
+      expect((messages[1] as any).content[0].toolCallId).toBe("call-a");
+      expect((messages[2] as any).content[0].toolCallId).toBe("call-b");
+    });
+
+    it("isolates per-call failures in parallel execution", async () => {
+      let releaseSlow!: () => void;
+      const tools = {
+        slow_ok: {
+          execute: () =>
+            new Promise<string>((resolve) => {
+              releaseSlow = () => resolve("slow ok");
+            }),
+        },
+        fast_fail: {
+          execute: async () => {
+            releaseSlow();
+            throw new Error("fast one failed");
+          },
+        },
+      };
+
+      const messages = [
+        {
+          role: "assistant",
+          content: [
+            {
+              type: "tool-call",
+              toolCallId: "call-slow",
+              toolName: "slow_ok",
+              input: {},
+            },
+            {
+              type: "tool-call",
+              toolCallId: "call-fail",
+              toolName: "fast_fail",
+              input: {},
+            },
+          ],
+        },
+      ] as unknown as ModelMessage[];
+
+      const newMessages = await executeToolCallsFromMessages(messages, {
+        tools,
+      });
+
+      expect(newMessages).toHaveLength(2);
+      expect((newMessages[0] as any).content[0].toolCallId).toBe("call-slow");
+      expect((newMessages[0] as any).content[0].output).toEqual({
+        type: "text",
+        value: "slow ok",
+      });
+      expect((newMessages[1] as any).content[0].toolCallId).toBe("call-fail");
+      expect((newMessages[1] as any).content[0].output.type).toBe(
+        "error-text"
+      );
+      expect((newMessages[1] as any).content[0].output.value).toBe(
+        "fast one failed"
+      );
+    });
+
+    it("runs strictly sequentially when parallelToolExecution is false", async () => {
+      const events: string[] = [];
+      const tools = {
+        tool_a: {
+          execute: async () => {
+            events.push("a:start");
+            await new Promise((resolve) => setTimeout(resolve, 5));
+            events.push("a:end");
+            return "a";
+          },
+        },
+        tool_b: {
+          execute: async () => {
+            events.push("b:start");
+            return "b";
+          },
+        },
+      };
+
+      const messages = [
+        {
+          role: "assistant",
+          content: [
+            {
+              type: "tool-call",
+              toolCallId: "call-a",
+              toolName: "tool_a",
+              input: {},
+            },
+            {
+              type: "tool-call",
+              toolCallId: "call-b",
+              toolName: "tool_b",
+              input: {},
+            },
+          ],
+        },
+      ] as unknown as ModelMessage[];
+
+      await executeToolCallsFromMessages(messages, {
+        tools,
+        parallelToolExecution: false,
+      });
+
+      // tool_b must not start until tool_a fully resolved.
+      expect(events).toEqual(["a:start", "a:end", "b:start"]);
+    });
+
+    it("propagates an abort from one parallel call without persisting sibling results", async () => {
+      const controller = new AbortController();
+      let releaseSlow!: () => void;
+      const tools = {
+        slow_ok: {
+          execute: () =>
+            new Promise<string>((resolve) => {
+              releaseSlow = () => resolve("slow ok");
+            }),
+        },
+        aborter: {
+          execute: async () => {
+            controller.abort();
+            releaseSlow();
+            return "resolved after abort";
+          },
+        },
+      };
+
+      const messages = [
+        {
+          role: "assistant",
+          content: [
+            {
+              type: "tool-call",
+              toolCallId: "call-slow",
+              toolName: "slow_ok",
+              input: {},
+            },
+            {
+              type: "tool-call",
+              toolCallId: "call-abort",
+              toolName: "aborter",
+              input: {},
+            },
+          ],
+        },
+      ] as unknown as ModelMessage[];
+
+      await expect(
+        executeToolCallsFromMessages(messages, {
+          tools,
+          abortSignal: controller.signal,
+        })
+      ).rejects.toMatchObject({ name: "AbortError" });
+
+      // Neither the aborted call nor its sibling persisted a result.
+      expect(messages).toHaveLength(1);
+      expect(messages[0].role).toBe("assistant");
     });
   });
 
@@ -695,5 +916,879 @@ describe("executeToolCallsFromMessages", () => {
       expect(messages[2].role).toBe("tool");
       expect((messages[2] as any).content[0].toolCallId).toBe("call-1");
     });
+  });
+
+  describe("abort signal", () => {
+    it("throws AbortError without calling the tool when the signal is already aborted", async () => {
+      const execute = vi.fn();
+      const tools = {
+        my_tool: { description: "test", execute },
+      };
+      const controller = new AbortController();
+      controller.abort();
+      const messages = [
+        {
+          role: "assistant",
+          content: [
+            {
+              type: "tool-call",
+              toolCallId: "call-1",
+              toolName: "my_tool",
+              input: {},
+            },
+          ],
+        },
+      ] as unknown as ModelMessage[];
+
+      await expect(
+        executeToolCallsFromMessages(messages, {
+          tools,
+          abortSignal: controller.signal,
+        })
+      ).rejects.toMatchObject({ name: "AbortError" });
+      expect(execute).not.toHaveBeenCalled();
+    });
+
+    it("forwards the abort signal into tool.execute", async () => {
+      const execute = vi.fn().mockResolvedValue({ ok: true });
+      const tools = {
+        my_tool: { description: "test", execute },
+      };
+      const controller = new AbortController();
+      const messages = [
+        {
+          role: "assistant",
+          content: [
+            {
+              type: "tool-call",
+              toolCallId: "call-1",
+              toolName: "my_tool",
+              input: {},
+            },
+          ],
+        },
+      ] as unknown as ModelMessage[];
+
+      await executeToolCallsFromMessages(messages, {
+        tools,
+        abortSignal: controller.signal,
+      });
+
+      expect(execute).toHaveBeenCalledTimes(1);
+      const call = execute.mock.calls[0];
+      expect(call[1]?.abortSignal).toBe(controller.signal);
+    });
+
+    it("drops tool results that resolve after abort (post-await re-check)", async () => {
+      // Regression: if a tool ignores the abort signal and resolves a
+      // result after the signal fired, that result must NOT be
+      // serialized into history. Building it would persist a phantom
+      // "successful tool result" past the cancellation point.
+      const controller = new AbortController();
+      const execute = vi.fn().mockImplementation(async () => {
+        // Tool ignores the signal: aborts mid-flight but still resolves.
+        controller.abort();
+        return { ok: "this should never be persisted" };
+      });
+      const tools = {
+        my_tool: { description: "test", execute },
+      };
+      const messages = [
+        {
+          role: "assistant",
+          content: [
+            {
+              type: "tool-call",
+              toolCallId: "call-1",
+              toolName: "my_tool",
+              input: {},
+            },
+          ],
+        },
+      ] as unknown as ModelMessage[];
+
+      await expect(
+        executeToolCallsFromMessages(messages, {
+          tools,
+          abortSignal: controller.signal,
+        })
+      ).rejects.toMatchObject({ name: "AbortError" });
+
+      // Crucially: no tool-result message was inserted into history,
+      // even though `execute` resolved successfully.
+      expect(messages).toHaveLength(1);
+      expect(messages[0].role).toBe("assistant");
+    });
+
+    it("rethrows tool aborts instead of storing them as error-text results", async () => {
+      const abortError = Object.assign(new Error("aborted"), {
+        name: "AbortError",
+      });
+      const execute = vi.fn().mockRejectedValue(abortError);
+      const tools = {
+        my_tool: { description: "test", execute },
+      };
+      const controller = new AbortController();
+      const messages = [
+        {
+          role: "assistant",
+          content: [
+            {
+              type: "tool-call",
+              toolCallId: "call-1",
+              toolName: "my_tool",
+              input: {},
+            },
+          ],
+        },
+      ] as unknown as ModelMessage[];
+
+      await expect(
+        executeToolCallsFromMessages(messages, {
+          tools,
+          abortSignal: controller.signal,
+        })
+      ).rejects.toBe(abortError);
+
+      // Crucially: no synthesized tool-result was inserted. Persisting
+      // an "AbortError" string into history would poison subsequent turns.
+      expect(messages).toHaveLength(1);
+      expect(messages[0].role).toBe("assistant");
+    });
+  });
+
+  // SEP-1865 App-Provided Tools: the MCPJam free-model handler relies on
+  // this flag to leave app-aliased tool calls unresolved (so the client's
+  // `useChat.onToolCall` can dispatch them into the iframe) instead of
+  // crashing the agent loop with "Tool not found" or
+  // "tool.execute is not a function".
+  describe("skipNonExecutableTools (SEP-1865)", () => {
+    it("silently skips registered app aliases whose tool has no execute function", async () => {
+      const tools = {
+        srv_real: { execute: vi.fn().mockResolvedValue({ ok: true }) },
+        app_abcd1234: {
+          description: "[Demo] ping",
+          // no execute
+        },
+      };
+      const messages = [
+        {
+          role: "assistant",
+          content: [
+            {
+              type: "tool-call",
+              toolCallId: "call-srv",
+              toolName: "srv_real",
+              input: {},
+            },
+            {
+              type: "tool-call",
+              toolCallId: "call-app",
+              toolName: "app_abcd1234",
+              input: {},
+            },
+          ],
+        },
+      ] as unknown as ModelMessage[];
+
+      const newMessages = await executeToolCallsFromMessages(messages, {
+        tools,
+        skipNonExecutableTools: true,
+      });
+
+      expect(tools.srv_real.execute).toHaveBeenCalledTimes(1);
+      // One result inserted for the server tool; the app alias remains
+      // unresolved in messageHistory so the caller can detect it via
+      // hasUnresolvedToolCalls and pause for the client.
+      expect(newMessages).toHaveLength(1);
+      expect((newMessages[0] as any).content[0].toolCallId).toBe("call-srv");
+      // The unresolved app tool call must NOT have produced a synthetic
+      // error result (that would corrupt model context).
+      const allResults = messages.flatMap((m) =>
+        m.role === "tool" ? (m as any).content : []
+      );
+      const appResult = allResults.find(
+        (c: any) => c.toolCallId === "call-app"
+      );
+      expect(appResult).toBeUndefined();
+    });
+
+    it("does not skip unknown app aliases", async () => {
+      const messages = [
+        {
+          role: "assistant",
+          content: [
+            {
+              type: "tool-call",
+              toolCallId: "call-app",
+              toolName: "app_abcd1234",
+              input: {},
+            },
+          ],
+        },
+      ] as unknown as ModelMessage[];
+
+      await executeToolCallsFromMessages(messages, {
+        tools: {},
+        skipNonExecutableTools: true,
+      });
+
+      expect(messages).toHaveLength(2);
+      expect((messages[1] as any).content[0].output.value).toMatch(
+        /not found/i
+      );
+    });
+
+    it("silently skips registered app tools without an execute function", async () => {
+      // App tools are registered server-side via `tool({...})` with no
+      // execute. Without the flag, the helper would TypeError mid-iteration.
+      const tools = {
+        app_abcd1234: {
+          description: "[Demo] ping",
+          // no execute
+        },
+      };
+      const messages = [
+        {
+          role: "assistant",
+          content: [
+            {
+              type: "tool-call",
+              toolCallId: "call-app",
+              toolName: "app_abcd1234",
+              input: {},
+            },
+          ],
+        },
+      ] as unknown as ModelMessage[];
+
+      const newMessages = await executeToolCallsFromMessages(messages, {
+        tools,
+        skipNonExecutableTools: true,
+      });
+
+      expect(newMessages).toHaveLength(0);
+      expect(messages).toHaveLength(1); // no synthesized tool-result
+    });
+
+    it("silently skips registered ui_ tools without an execute function (WebMCP UI tools)", async () => {
+      // Same client-fulfilled contract as app aliases: the UI tool name is
+      // registered no-execute server-side and the browser supplies the
+      // result, so the loop must leave the call unresolved and pause.
+      const tools = {
+        ui_navigate: {
+          description: "Navigate the MCPJam inspector",
+          // no execute
+        },
+      };
+      const messages = [
+        {
+          role: "assistant",
+          content: [
+            {
+              type: "tool-call",
+              toolCallId: "call-ui",
+              toolName: "ui_navigate",
+              input: { target: "playground" },
+            },
+          ],
+        },
+      ] as unknown as ModelMessage[];
+
+      const newMessages = await executeToolCallsFromMessages(messages, {
+        tools,
+        skipNonExecutableTools: true,
+      });
+
+      expect(newMessages).toHaveLength(0);
+      expect(messages).toHaveLength(1); // no synthesized tool-result
+    });
+
+    it("does not skip a ui_-named tool that has a real execute (genuine server tool)", async () => {
+      const tools = {
+        ui_lookalike: {
+          execute: vi.fn().mockResolvedValue({ ok: true }),
+        },
+      };
+      const messages = [
+        {
+          role: "assistant",
+          content: [
+            {
+              type: "tool-call",
+              toolCallId: "call-lookalike",
+              toolName: "ui_lookalike",
+              input: {},
+            },
+          ],
+        },
+      ] as unknown as ModelMessage[];
+
+      await executeToolCallsFromMessages(messages, {
+        tools,
+        skipNonExecutableTools: true,
+      });
+
+      expect(tools.ui_lookalike.execute).toHaveBeenCalledTimes(1);
+      expect(messages).toHaveLength(2); // executed server-side as usual
+    });
+
+    it("still throws Tool not found when the flag is OFF (default)", async () => {
+      const messages = [
+        {
+          role: "assistant",
+          content: [
+            {
+              type: "tool-call",
+              toolCallId: "call-app",
+              toolName: "app_abcd1234",
+              input: {},
+            },
+          ],
+        },
+      ] as unknown as ModelMessage[];
+
+      await executeToolCallsFromMessages(messages, { tools: {} });
+
+      // Helper catches its own throws and writes them as tool-result with
+      // output.type === "error-text" — verify the error string mentions
+      // the unknown tool so this regression is loud.
+      expect(messages).toHaveLength(2);
+      expect((messages[1] as any).content[0].output.value).toMatch(
+        /not found/i
+      );
+    });
+
+    it("leaves an approved-but-resultless client-fulfilled call unresolved (handlePendingApprovals contract)", async () => {
+      // The approval-resume path (`handlePendingApprovals` in the MCPJam
+      // loop) executes with this flag. The new client resolves an APPROVED
+      // ui_* call by shipping the tool-result itself; if a stale client
+      // sends a bare approval response instead, the resume must skip the
+      // no-execute entry — leaving the call unresolved so the loop
+      // re-pauses for client fulfillment — never synthesize a result or
+      // throw.
+      const messages = [
+        {
+          role: "assistant",
+          content: [
+            {
+              type: "tool-call",
+              toolCallId: "call-ui",
+              toolName: "ui_navigate",
+              input: { target: "servers" },
+            },
+            {
+              type: "tool-approval-request",
+              approvalId: "appr-ui",
+              toolCallId: "call-ui",
+            },
+          ],
+        },
+        {
+          role: "tool",
+          content: [
+            {
+              type: "tool-approval-response",
+              approvalId: "appr-ui",
+              approved: true,
+            },
+          ],
+        },
+      ] as unknown as ModelMessage[];
+
+      const newMessages = await executeToolCallsFromMessages(messages, {
+        tools: { ui_navigate: { description: "no execute" } },
+        skipNonExecutableTools: true,
+      });
+
+      expect(newMessages).toHaveLength(0);
+      const results = messages.flatMap((m) =>
+        m.role === "tool" ? (m as any).content : []
+      );
+      expect(
+        results.find((part: any) => part.type === "tool-result")
+      ).toBeUndefined();
+    });
+  });
+});
+
+describe("executeToolCallsFromMessages — toModelOutput (browser-render PR 14)", () => {
+  const callMessage = (toolName: string): ModelMessage[] =>
+    [
+      {
+        role: "assistant",
+        content: [
+          {
+            type: "tool-call",
+            toolCallId: "call-cu-1",
+            toolName,
+            input: { action: "screenshot" },
+          },
+        ],
+      },
+    ] as unknown as ModelMessage[];
+
+  it("uses the tool's toModelOutput mapping as the model-facing output", async () => {
+    const implResult = {
+      screenshotBase64: "aGVsbG8=",
+      widgetToolCalls: [],
+      elapsedMs: 12,
+    };
+    const tools = {
+      computer: {
+        execute: vi.fn().mockResolvedValue(implResult),
+        toModelOutput: vi.fn(({ output }: { output: unknown }) => ({
+          type: "content",
+          value: [
+            {
+              type: "media",
+              data: (output as { screenshotBase64: string }).screenshotBase64,
+              mediaType: "image/png",
+            },
+          ],
+        })),
+      },
+    };
+
+    const messages = callMessage("computer");
+    const newMessages = await executeToolCallsFromMessages(messages, {
+      tools,
+    });
+
+    expect(tools.computer.toModelOutput).toHaveBeenCalledWith({
+      output: implResult,
+    });
+    expect(newMessages).toHaveLength(1);
+    const part = (newMessages[0] as any).content[0];
+    expect(part.type).toBe("tool-result");
+    expect(part.toolCallId).toBe("call-cu-1");
+    expect(part.output).toEqual({
+      type: "content",
+      value: [{ type: "media", data: "aGVsbG8=", mediaType: "image/png" }],
+    });
+  });
+
+  it("does NOT duplicate the raw implementation result onto the part", async () => {
+    // Content outputs carry the full model-facing payload (screenshots);
+    // duplicating the raw result would double-ship the screenshot in every
+    // subsequent per-step request body on the hosted path.
+    const tools = {
+      computer: {
+        execute: async () => ({ screenshotBase64: "eA==" }),
+        toModelOutput: () => ({ type: "text", value: "ok" }),
+      },
+    };
+
+    const messages = callMessage("computer");
+    const newMessages = await executeToolCallsFromMessages(messages, {
+      tools,
+    });
+
+    const part = (newMessages[0] as any).content[0];
+    expect(part.output).toEqual({ type: "text", value: "ok" });
+    expect("result" in part).toBe(false);
+  });
+
+  it("preserves the raw result for an SDK-converted MCP toModelOutput tool", async () => {
+    const implResult = {
+      content: [{ type: "image", data: "aGVsbG8=", mimeType: "image/png" }],
+      _meta: { debug: true },
+    };
+    const tools = {
+      screenshot: {
+        execute: async () => implResult,
+        toModelOutput: () => ({
+          type: "content",
+          value: [{ type: "media", data: "aGVsbG8=", mediaType: "image/png" }],
+        }),
+        _mcpjamPreserveRawResultForUi: true,
+      },
+    };
+
+    const messages = callMessage("screenshot");
+    const newMessages = await executeToolCallsFromMessages(messages, {
+      tools,
+    });
+
+    const part = (newMessages[0] as any).content[0];
+    expect(part.output).toEqual({
+      type: "content",
+      value: [{ type: "media", data: "aGVsbG8=", mediaType: "image/png" }],
+    });
+    expect(part.result).toEqual(implResult);
+  });
+
+  it("preserves the raw result for a toModelOutput tool that returns structuredContent (widget UI hydration)", async () => {
+    // MCP App tools define toModelOutput to scrub structuredContent from the
+    // model copy, but their widgets read `toolResult.structuredContent`. The
+    // raw result must still be stamped on the part (`result:`) for the UI.
+    // This is the agent's path: tools are passed directly (no clientManager).
+    const implResult = {
+      content: [{ type: "text", text: "8 servers" }],
+      structuredContent: {
+        project: { id: "p1", name: "Default" },
+        servers: [{ name: "notion" }],
+        widget: "servers",
+      },
+      _meta: { source: "platform" },
+    };
+    const tools = {
+      show_servers: {
+        execute: vi.fn().mockResolvedValue(implResult),
+        // scrub structuredContent for the model-facing copy
+        toModelOutput: ({ output }: { output: unknown }) => ({
+          type: "json" as const,
+          value: { content: (output as { content: unknown }).content },
+        }),
+      },
+    };
+
+    const messages = callMessage("show_servers");
+    const newMessages = await executeToolCallsFromMessages(messages, { tools });
+
+    const part = (newMessages[0] as any).content[0];
+    // Model copy is scrubbed (no structuredContent)...
+    expect(part.output).toEqual({
+      type: "json",
+      value: { content: implResult.content },
+    });
+    // ...but the raw result (with structuredContent + _meta) survives for the UI.
+    expect(part.result).toEqual(implResult);
+  });
+
+  it("awaits an async toModelOutput", async () => {
+    const tools = {
+      computer: {
+        execute: async () => ({ n: 1 }),
+        toModelOutput: async () => {
+          await new Promise((resolve) => setTimeout(resolve, 5));
+          return { type: "text", value: "async-mapped" };
+        },
+      },
+    };
+
+    const messages = callMessage("computer");
+    const newMessages = await executeToolCallsFromMessages(messages, {
+      tools,
+    });
+
+    expect((newMessages[0] as any).content[0].output).toEqual({
+      type: "text",
+      value: "async-mapped",
+    });
+  });
+
+  it("falls back to normal MCP serialization when toModelOutput declines an ordinary text result", async () => {
+    const implResult = {
+      content: [
+        {
+          type: "text",
+          text: 'bench_write OK — wrote "test_value".',
+        },
+      ],
+    };
+    const tools = {
+      bench_write: {
+        execute: vi.fn().mockResolvedValue(implResult),
+        // SDK-converted MCP tools use this hook only for image-bearing
+        // results. Ordinary text intentionally returns undefined.
+        toModelOutput: vi.fn(({ output }: { output: unknown }) =>
+          mcpCallToolResultToModelOutput(output as never)
+        ),
+        _mcpjamPreserveRawResultForUi: true,
+      },
+    };
+
+    const messages = callMessage("bench_write");
+    const newMessages = await executeToolCallsFromMessages(messages, {
+      tools,
+    });
+
+    expect(tools.bench_write.toModelOutput).toHaveBeenCalledWith({
+      output: implResult,
+    });
+    const part = (newMessages[0] as any).content[0];
+    expect(part.output).toEqual({
+      type: "json",
+      value: implResult,
+    });
+    expect(part.result).toEqual(implResult);
+  });
+
+  it("a throwing toModelOutput records an error tool-result (not a crash)", async () => {
+    const tools = {
+      computer: {
+        execute: async () => ({ n: 1 }),
+        toModelOutput: () => {
+          throw new Error("mapping failed");
+        },
+      },
+    };
+
+    const messages = callMessage("computer");
+    const newMessages = await executeToolCallsFromMessages(messages, {
+      tools,
+    });
+
+    const part = (newMessages[0] as any).content[0];
+    expect(part.output.type).toBe("error-text");
+    expect(part.output.value).toMatch(/mapping failed/);
+  });
+
+  it("tools without toModelOutput keep the JSON serialization path", async () => {
+    const tools = {
+      regular: {
+        execute: async () => ({ ok: true }),
+      },
+    };
+
+    const messages = callMessage("regular");
+    const newMessages = await executeToolCallsFromMessages(messages, {
+      tools,
+    });
+
+    const part = (newMessages[0] as any).content[0];
+    expect(part.output).toEqual({ type: "json", value: { ok: true } });
+    expect(part.result).toEqual({ ok: true });
+  });
+
+  it("maps direct MCP image results without toModelOutput to model-visible content", async () => {
+    const implResult = {
+      content: [{ type: "image", data: "aGVsbG8=", mimeType: "image/png" }],
+      _meta: { raw: "kept" },
+    };
+    const tools = {
+      screenshot: {
+        execute: async () => implResult,
+      },
+    };
+
+    const messages = callMessage("screenshot");
+    const newMessages = await executeToolCallsFromMessages(messages, {
+      tools,
+    });
+
+    const part = (newMessages[0] as any).content[0];
+    expect(part.output).toEqual({
+      type: "content",
+      value: [{ type: "media", data: "aGVsbG8=", mediaType: "image/png" }],
+    });
+    expect(part.result).toEqual(implResult);
+  });
+
+  it("maps embedded MCP image resources without toModelOutput to model-visible content", async () => {
+    const implResult = {
+      content: [
+        {
+          type: "resource",
+          resource: {
+            uri: "mcp://images/one",
+            blob: "aGVsbG8=",
+            mimeType: "image/png",
+          },
+        },
+      ],
+    };
+    const tools = {
+      screenshot: {
+        execute: async () => implResult,
+      },
+    };
+
+    const messages = callMessage("screenshot");
+    const newMessages = await executeToolCallsFromMessages(messages, {
+      tools,
+    });
+
+    const part = (newMessages[0] as any).content[0];
+    expect(part.output).toEqual({
+      type: "content",
+      value: [{ type: "media", data: "aGVsbG8=", mediaType: "image/png" }],
+    });
+    expect(part.result).toEqual(implResult);
+  });
+
+  it("resolves linked MCP image resources without toModelOutput through resources/read", async () => {
+    const implResult = {
+      content: [
+        {
+          type: "resource_link",
+          uri: "mcp://images/one",
+          name: "one.png",
+          mimeType: "image/png",
+        },
+      ],
+    };
+    const tools = {
+      screenshot: {
+        _serverId: "srv-1",
+        execute: async () => implResult,
+      },
+    };
+    const readLinkedResource = vi.fn(
+      async ({
+        uri,
+      }: {
+        serverId: string;
+        uri: string;
+        options?: { abortSignal?: AbortSignal };
+      }) => ({
+        contents: [{ uri, blob: "aGVsbG8=", mimeType: "image/png" }],
+      })
+    );
+
+    const messages = callMessage("screenshot");
+    const newMessages = await executeToolCallsFromMessages(messages, {
+      tools,
+      readLinkedResource,
+    });
+
+    const part = (newMessages[0] as any).content[0];
+    expect(part.output).toEqual({
+      type: "content",
+      value: [{ type: "media", data: "aGVsbG8=", mediaType: "image/png" }],
+    });
+    expect(part.result).toEqual(implResult);
+    expect(readLinkedResource).toHaveBeenCalledWith({
+      serverId: "srv-1",
+      uri: "mcp://images/one",
+      options: undefined,
+    });
+  });
+
+  it("propagates aborts during linked MCP image resource mapping", async () => {
+    const abortController = new AbortController();
+    const implResult = {
+      content: [
+        {
+          type: "resource_link",
+          uri: "mcp://images/one",
+          name: "one.png",
+          mimeType: "image/png",
+        },
+      ],
+    };
+    const tools = {
+      screenshot: {
+        _serverId: "srv-1",
+        execute: async () => implResult,
+      },
+    };
+    const readLinkedResource = vi.fn(async () => {
+      abortController.abort();
+      return {
+        contents: [{ blob: "aGVsbG8=", mimeType: "image/png" }],
+      };
+    });
+
+    const messages = callMessage("screenshot");
+    await expect(
+      executeToolCallsFromMessages(messages, {
+        tools,
+        readLinkedResource,
+        abortSignal: abortController.signal,
+      })
+    ).rejects.toMatchObject({ name: "AbortError" });
+
+    expect(messages).toHaveLength(1);
+    expect(readLinkedResource).toHaveBeenCalledTimes(1);
+  });
+
+  it("passes abortSignal into toModelOutput and drops results after abort", async () => {
+    const abortController = new AbortController();
+    const toModelOutput = vi.fn(
+      async ({ abortSignal }: { abortSignal?: AbortSignal }) => {
+        expect(abortSignal).toBe(abortController.signal);
+        abortController.abort();
+        return {
+          type: "content",
+          value: [{ type: "media", data: "aGVsbG8=", mediaType: "image/png" }],
+        };
+      }
+    );
+    const tools = {
+      screenshot: {
+        execute: async () => ({ ok: true }),
+        toModelOutput,
+      },
+    };
+
+    const messages = callMessage("screenshot");
+    await expect(
+      executeToolCallsFromMessages(messages, {
+        tools,
+        abortSignal: abortController.signal,
+      })
+    ).rejects.toMatchObject({ name: "AbortError" });
+
+    expect(messages).toHaveLength(1);
+    expect(toModelOutput).toHaveBeenCalledTimes(1);
+  });
+
+  it("omits direct MCP image results when direct image visibility is disabled", async () => {
+    const implResult = {
+      content: [{ type: "image", data: "aGVsbG8=", mimeType: "image/png" }],
+    };
+    const tools = {
+      screenshot: {
+        execute: async () => implResult,
+      },
+    };
+
+    const messages = callMessage("screenshot");
+    const newMessages = await executeToolCallsFromMessages(messages, {
+      tools,
+      modelVisibleMcpToolResults: {
+        directContent: { image: false },
+      },
+    });
+
+    const part = (newMessages[0] as any).content[0];
+    expect(part.output).toEqual({
+      type: "content",
+      value: [
+        { type: "text", text: "[image omitted: direct image policy disabled]" },
+      ],
+    });
+  });
+
+  it("omits linked MCP image resources when linked image visibility is disabled", async () => {
+    const implResult = {
+      content: [
+        {
+          type: "resource_link",
+          uri: "mcp://images/one",
+          name: "one.png",
+          mimeType: "image/png",
+        },
+      ],
+    };
+    const tools = {
+      screenshot: {
+        _serverId: "srv-1",
+        execute: async () => implResult,
+      },
+    };
+    const readLinkedResource = vi.fn(async () => ({
+      contents: [{ blob: "aGVsbG8=", mimeType: "image/png" }],
+    }));
+
+    const messages = callMessage("screenshot");
+    const newMessages = await executeToolCallsFromMessages(messages, {
+      tools,
+      readLinkedResource,
+      modelVisibleMcpToolResults: {
+        linkedResources: { blob: { image: false } },
+      },
+    });
+
+    const part = (newMessages[0] as any).content[0];
+    expect(part.output).toEqual({
+      type: "content",
+      value: [
+        { type: "text", text: "[resource link omitted: policy disabled]" },
+      ],
+    });
+    expect(readLinkedResource).not.toHaveBeenCalled();
   });
 });

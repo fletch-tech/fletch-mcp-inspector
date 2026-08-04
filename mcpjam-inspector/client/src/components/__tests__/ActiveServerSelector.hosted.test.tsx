@@ -21,16 +21,16 @@ vi.mock("@/lib/PosthogUtils", () => ({
   detectPlatform: vi.fn().mockReturnValue("web"),
 }));
 
+vi.mock("@/lib/analytics", () => ({
+  track: vi.fn(),
+}));
+
 vi.mock("@/lib/oauth/mcp-oauth", () => ({
   hasOAuthConfig: vi.fn().mockReturnValue(false),
 }));
 
 vi.mock("../connection/AddServerModal", () => ({
   AddServerModal: () => null,
-}));
-
-vi.mock("../chat-v2/chat-input/dialogs/confirm-chat-reset-dialog", () => ({
-  ConfirmChatResetDialog: () => null,
 }));
 
 const HOSTED_HINT =

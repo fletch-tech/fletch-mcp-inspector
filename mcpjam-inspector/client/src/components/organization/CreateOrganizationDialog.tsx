@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
-import { useAuth } from "@/lib/auth/jwt-auth-context";
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
+import { useAuth } from "@workos-inc/authkit-react";
+import { Button } from "@mcpjam/design-system/button";
+import { Input } from "@mcpjam/design-system/input";
 import {
   Dialog,
   DialogContent,
@@ -9,9 +9,10 @@ import {
   DialogFooter,
   DialogHeader,
   DialogTitle,
-} from "@/components/ui/dialog";
+} from "@mcpjam/design-system/dialog";
 import { useOrganizationMutations } from "@/hooks/useOrganizations";
-import { toast } from "sonner";
+import { getBillingErrorMessage } from "@/lib/billing-entitlements";
+import { toast } from "@/lib/toast";
 
 interface CreateOrganizationDialogProps {
   open: boolean;
@@ -59,7 +60,9 @@ export function CreateOrganizationDialog({
       onOpenChange(false);
       onCreated?.(organizationId);
     } catch (error) {
-      toast.error((error as Error).message || "Failed to create organization");
+      toast.error(
+        getBillingErrorMessage(error, "Failed to create organization"),
+      );
     } finally {
       setIsCreating(false);
     }

@@ -1,0 +1,356 @@
+/**
+ * Module-level store of live MCPJam Agent `Chat` instances, keyed by
+ * chatSessionId.
+ *
+ * Why this exists: the agent renders on route-bound surfaces (the Home
+ * takeover) as well as the always-mounted side panel. A `useChat` instance
+ * owned by a route-bound component dies with it on navigation — which a
+ * WebMCP UI tool like `ui_navigate` can trigger mid-turn, killing the
+ * in-flight stream before its tool output and auto-resume are delivered
+ * (and the server only persists turns that complete un-aborted). Hoisting
+ * the `Chat` instance here means any surface can attach/detach via
+ * `useChat({ chat })` without owning the stream's lifetime.
+ *
+ * The per-instance `config` object is the mutable bridge between React and
+ * the instance's closures: the transport `body()` and callbacks read it at
+ * call time, and `useMcpjamAgentSession` keeps it in sync each render.
+ */
+import { Chat } from "@ai-sdk/react";
+import type { UIMessage } from "@ai-sdk/react";
+import { DefaultChatTransport } from "ai";
+import { shouldAutoResumeTurn } from "@/lib/chat-auto-resume";
+import { track } from "@/lib/analytics";
+import { authFetch } from "@/lib/session-token";
+import { useUiToolsRegistry } from "@/lib/webmcp/ui-tools-registry";
+import { handleUiToolCall } from "@/lib/webmcp/ui-tool-executor";
+import { createUiAwareApprovalResponseHandler } from "@/lib/webmcp/ui-tool-approval";
+import {
+  dismissAskUserQuestions,
+  hasPendingAskUserQuestions,
+} from "@/lib/webmcp/ask-user-store";
+import { useAgentPanelStore } from "@/stores/agent-panel/agent-panel-store";
+import { readTourSystemPrompt } from "./tour-session-prompt";
+import type { ModelDefinition } from "@/shared/types";
+
+const AGENT_API_PATH = "/api/web/mcpjam-agent";
+
+/**
+ * Surfaces that die on navigation. The side panel is mounted outside the
+ * router outlet and survives; the Home takeover ("home") is keyed off the
+ * `/home?session=` route and unmounts when a UI tool changes the route.
+ */
+const ROUTE_BOUND_SURFACES = new Set(["home"]);
+
+/**
+ * Cap on retained instances. Eviction skips instances that are streaming or
+ * have a surface attached, so a long-running background turn always finishes
+ * (and therefore persists server-side) even if the user opens several other
+ * sessions meanwhile.
+ *
+ * One exception, see `evictIdleInstances`: a session parked on an unanswered
+ * clarifying question reads as `"streaming"` but is making no progress, so
+ * "streaming" alone would let it pin a slot forever.
+ */
+const MAX_INSTANCES = 4;
+
+export interface AgentChatConfig {
+  chatSessionId: string;
+  /** Kept current by the hook; `body()` reads it at POST time. */
+  projectId: string | null;
+  /** Kept current by the hook; `body()` reads it at POST time. */
+  model: ModelDefinition | undefined;
+  /**
+   * Surfaces currently rendering this session ("home", "side-panel", …).
+   * Effect-managed (symmetric add/remove) so the brief double-attach window
+   * during a handoff is represented accurately, unlike a last-write-wins
+   * field.
+   */
+  attachedSurfaces: Set<string>;
+  /**
+   * True once the persisted transcript has been seeded into the instance
+   * (or the session was minted fresh by a first submit). Lives here — not in
+   * a per-hook ref — so a second surface adopting a live instance can never
+   * re-seed stale history over an in-flight turn.
+   */
+  seeded: boolean;
+  /**
+   * The agent surface's "Tool Approval" preference, synced by the hook from
+   * `agent-tool-approval-storage`. Read at call time by `body()`, the
+   * executor's defer gate, and the auto-send predicate.
+   */
+  requireToolApproval: boolean;
+}
+
+/**
+ * Turn lifecycle shared by every surface attached to this session's Chat.
+ * Timing and attribution live here, NOT in a per-hook ref, so a turn started
+ * on one surface (e.g. Home) and finishing after a hand-off to another (the
+ * side panel) still reports the correct duration — and is emitted exactly
+ * once. `seq` increments per submit; `lastEmittedSeq` is the dedupe marker.
+ */
+export interface AgentTurnLifecycle {
+  startedAt: number | null;
+  seq: number;
+  lastEmittedSeq: number;
+  model: string | null;
+  provider: string | null;
+  /** 1-based turn index snapshotted at submit (survives surface hand-off). */
+  messageIndex: number;
+  /**
+   * Id of the last message BEFORE this turn was submitted. Completion only
+   * attributes tool counts / usage to an assistant message whose id differs
+   * from this — so an error that fires before the turn produced its own
+   * assistant message can't inherit the PREVIOUS turn's tools. `null` when
+   * the session had no messages yet.
+   */
+  boundaryMessageId: string | null;
+}
+
+export interface AgentChatEntry {
+  chat: Chat<UIMessage>;
+  config: AgentChatConfig;
+  /** Cross-surface turn timing/attribution — see AgentTurnLifecycle. */
+  turn: AgentTurnLifecycle;
+  /**
+   * UI-tool-aware approval responses for this instance: Approve on a `ui_*`
+   * part executes in the browser and ships the result; Deny and non-UI
+   * tools send the plain approval response. Pass as the thread's
+   * `onToolApprovalResponse`.
+   */
+  handleToolApprovalResponse: (response: {
+    id: string;
+    approved: boolean;
+  }) => void;
+}
+
+const instances = new Map<string, AgentChatEntry>();
+
+/**
+ * When a navigation-capable UI tool fires while the session is rendered on a
+ * route-bound surface, adopt the session into the always-mounted side panel
+ * BEFORE the route commits. The panel's thread (keyed by session id) attaches
+ * to this same live Chat instance, so the conversation — including the
+ * in-flight turn — stays visible and continues streaming there.
+ *
+ * Runs synchronously (store writes only) from the executor's pre-execute
+ * hook; the hoisted instance makes the ordering soft — even if the panel
+ * mounts a frame after the route change, nothing is lost.
+ */
+function maybeHandoffToPanel(config: AgentChatConfig, toolName: string): void {
+  const onRouteBoundSurface = [...config.attachedSurfaces].some((s) =>
+    ROUTE_BOUND_SURFACES.has(s)
+  );
+  if (!onRouteBoundSurface) return;
+  const panel = useAgentPanelStore.getState();
+  if (panel.activeSessionId === config.chatSessionId && panel.isOpen) return;
+  if (!config.projectId) {
+    // The panel's project-mismatch GC (AgentSidePanelMount) would clear a
+    // null-project pointer immediately — skip rather than flicker.
+    track("mcpjam_agent_panel_handoff_skipped", {
+      location: "mcpjam_agent",
+      session_id: config.chatSessionId,
+      tool_name: toolName,
+      reason: "no_project_id",
+    });
+    return;
+  }
+  panel.setActiveSession(config.chatSessionId, config.projectId);
+  panel.setOpen(true);
+  track("mcpjam_agent_panel_handoff", {
+    location: "mcpjam_agent",
+    from_surface: "home",
+    session_id: config.chatSessionId,
+    tool_name: toolName,
+  });
+}
+
+function evictIdleInstances(excludeKey: string): void {
+  if (instances.size <= MAX_INSTANCES) return;
+  for (const [key, entry] of instances) {
+    if (instances.size <= MAX_INSTANCES) return;
+    // Never evict the entry that triggered this sweep: it was created a
+    // moment ago and its surface attaches in a React effect AFTER creation,
+    // so it looks idle+detached here. Evicting it would make the next
+    // getOrCreateAgentChat mint a second instance for the same session.
+    if (key === excludeKey) continue;
+    const status = entry.chat.status;
+    // A session parked on an unanswered clarifying question reports
+    // `"streaming"`, NOT `"ready"`: the SDK awaits `onToolCall`, and our
+    // `execute` is sitting on the card's promise (pinned by the ask-user SDK
+    // canary). It is nonetheless making no progress and nothing is rendering
+    // it, so treating it as busy would leak the promise, strand the turn, and
+    // let `instances` grow past the cap for as long as the user never returns.
+    const parkedOnQuestion = hasPendingAskUserQuestions(key);
+    const idle = status === "ready" || status === "error" || parkedOnQuestion;
+    if (idle && entry.config.attachedSurfaces.size === 0) {
+      // Settle before dropping the entry: nothing will render this session's
+      // thread again, so the question can never be answered. Safe because
+      // eviction requires zero attached surfaces — no thread is painting the
+      // card, so this cannot cancel a question the user can see.
+      dismissAskUserQuestions("session_evicted", { scope: key });
+      instances.delete(key);
+    }
+  }
+}
+
+/**
+ * Mark a new turn started on the shared entry: bumps `seq` and snapshots the
+ * start time + model/provider AT SUBMIT, so a config change mid-stream can't
+ * misattribute the completion. No-op if the entry is gone.
+ */
+export function markAgentTurnStarted(
+  chatSessionId: string,
+  attribution: {
+    model: string | null;
+    provider: string | null;
+    messageIndex: number;
+    boundaryMessageId: string | null;
+  },
+): void {
+  const entry = instances.get(chatSessionId);
+  if (!entry) return;
+  entry.turn.seq += 1;
+  entry.turn.startedAt = Date.now();
+  entry.turn.model = attribution.model;
+  entry.turn.provider = attribution.provider;
+  entry.turn.messageIndex = attribution.messageIndex;
+  entry.turn.boundaryMessageId = attribution.boundaryMessageId;
+}
+
+/**
+ * Claim the current turn's completion for emission. Returns the submit-time
+ * snapshot exactly once per turn — the first surface to observe the terminal
+ * status edge wins; a second observer (e.g. a post-handoff panel watching the
+ * same shared Chat) gets `null` and must not emit. `null` also when no entry
+ * exists. Clears `startedAt` so a stray later edge can't double-count.
+ */
+export function claimAgentTurnCompletion(chatSessionId: string): {
+  startedAt: number | null;
+  model: string | null;
+  provider: string | null;
+  messageIndex: number;
+  boundaryMessageId: string | null;
+} | null {
+  const entry = instances.get(chatSessionId);
+  if (!entry) return null;
+  if (entry.turn.lastEmittedSeq === entry.turn.seq) return null;
+  entry.turn.lastEmittedSeq = entry.turn.seq;
+  const snapshot = {
+    startedAt: entry.turn.startedAt,
+    model: entry.turn.model,
+    provider: entry.turn.provider,
+    messageIndex: entry.turn.messageIndex,
+    boundaryMessageId: entry.turn.boundaryMessageId,
+  };
+  entry.turn.startedAt = null;
+  return snapshot;
+}
+
+export function getOrCreateAgentChat(chatSessionId: string): AgentChatEntry {
+  const existing = instances.get(chatSessionId);
+  if (existing) {
+    // LRU touch: re-insert so iteration order reflects recency.
+    instances.delete(chatSessionId);
+    instances.set(chatSessionId, existing);
+    return existing;
+  }
+
+  const config: AgentChatConfig = {
+    chatSessionId,
+    projectId: null,
+    model: undefined,
+    attachedSurfaces: new Set(),
+    seeded: false,
+    requireToolApproval: false,
+  };
+
+  const chat: Chat<UIMessage> = new Chat<UIMessage>({
+    id: chatSessionId,
+    transport: new DefaultChatTransport({
+      api: AGENT_API_PATH,
+      fetch: authFetch,
+      body: () => ({
+        model: config.model,
+        projectId: config.projectId,
+        chatSessionId,
+        requireToolApproval: config.requireToolApproval,
+        // WebMCP UI tools snapshot, drained fresh at POST time (same
+        // contract as `useChatSession`). The server validates again in
+        // `validateUiToolEntries`.
+        uiTools: useUiToolsRegistry.getState().snapshotForChatBody(),
+        // Guided-tour instructions for this session, if any (the route
+        // prepends body.systemPrompt to the agent identity prompt). Read at
+        // POST time so the tour context survives reloads and Recent Chats
+        // resume. Constant per session, so the system-prompt prefix stays
+        // cache-stable; `undefined` is dropped at serialization, leaving
+        // non-tour bodies unchanged.
+        systemPrompt: readTourSystemPrompt(chatSessionId) ?? undefined,
+      }),
+    }),
+    // WebMCP UI tools are no-execute server-side; the stream pauses until
+    // the client supplies the result via `addToolOutput`. Non-UI names fall
+    // through untouched (this surface has no app tools). `addToolOutput`
+    // targets the instance directly, so fulfillment survives the
+    // originating surface unmounting mid-execute.
+    onToolCall: async ({ toolCall }) => {
+      await handleUiToolCall({
+        toolName: (toolCall as { toolName: string }).toolName,
+        toolCallId: (toolCall as { toolCallId: string }).toolCallId,
+        input: (toolCall as { input: unknown }).input,
+        addToolOutput: (output) => {
+          chat.addToolOutput(output);
+        },
+        onNavigationToolCall: (toolName) => {
+          maybeHandoffToPanel(config, toolName);
+        },
+        requireToolApproval: config.requireToolApproval,
+        // Duplicate detection is per chat session — this instance's key.
+        telemetryScope: chatSessionId,
+      });
+    },
+    // Resume the turn automatically once every tool call has an output —
+    // without this, `addToolOutput` would sit unsent until the next user
+    // message — or once every approval request has an answer (the MCP/
+    // skill-tool deny/approve path), but never while an approval pill is still
+    // pending (BUG-4). Shared with the Playground surface so the two can't
+    // drift; see `shouldAutoResumeTurn` for the full rationale.
+    sendAutomaticallyWhen: shouldAutoResumeTurn,
+  });
+
+  const handleToolApprovalResponse = createUiAwareApprovalResponseHandler({
+    getMessages: () => chat.messages,
+    addToolApprovalResponse: (response) => {
+      chat.addToolApprovalResponse(response);
+    },
+    addToolOutput: (output) => {
+      chat.addToolOutput(output);
+    },
+    onNavigationToolCall: (toolName) => {
+      maybeHandoffToPanel(config, toolName);
+    },
+    // Keeps reload-approved calls in this session's duplicate ring.
+    telemetryScope: chatSessionId,
+  });
+
+  const entry: AgentChatEntry = {
+    chat,
+    config,
+    handleToolApprovalResponse,
+    turn: {
+      startedAt: null,
+      seq: 0,
+      lastEmittedSeq: 0,
+      model: null,
+      provider: null,
+      messageIndex: 0,
+      boundaryMessageId: null,
+    },
+  };
+  instances.set(chatSessionId, entry);
+  evictIdleInstances(chatSessionId);
+  return entry;
+}
+
+export function __resetAgentChatInstancesForTests(): void {
+  instances.clear();
+}

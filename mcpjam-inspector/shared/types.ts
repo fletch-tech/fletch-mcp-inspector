@@ -1,4 +1,12 @@
 // Shared types between client and server
+import { HOSTED_MODEL_IDS } from "./hosted-model-ids.generated";
+
+import type {
+  AuthMethod,
+  IdentityAssertionFormat,
+  RegistrationMode,
+  XaaClientAuthMethod,
+} from "./xaa";
 
 // Legacy server config (keeping for compatibility)
 export interface ServerConfig {
@@ -95,6 +103,7 @@ export interface StreamingMessage {
 export type ModelProvider =
   | "anthropic"
   | "azure"
+  | "bedrock"
   | "openai"
   | "ollama"
   | "deepseek"
@@ -106,33 +115,129 @@ export type ModelProvider =
   | "openrouter"
   | "z-ai"
   | "minimax"
+  | "qwen"
   | "custom";
 
-// Premium models (e.g. claude-sonnet-4.5, gpt-5, gpt-5.1) were removed to reduce free tier costs.
-// See: https://github.com/MCPJam/inspector/pull/1391
-// We may add them back as a premium offering in the future.
-const MCPJAM_PROVIDED_MODEL_IDS: string[] = [
-  "openai/gpt-oss-120b",
-  "openai/gpt-5-nano",
-  "anthropic/claude-haiku-4.5",
-  "openai/gpt-5.1-codex-mini",
-  "openai/gpt-5-mini",
-  "moonshotai/kimi-k2-thinking",
-  "moonshotai/kimi-k2-0905",
-  "google/gemini-2.5-flash",
-  "x-ai/grok-code-fast-1",
-  "deepseek/deepseek-v3.2",
-  "google/gemini-3-flash-preview",
-  "meta-llama/llama-4-scout",
-  "moonshotai/kimi-k2.5",
-  "x-ai/grok-4.1-fast",
-  "z-ai/glm-4.7",
-  "z-ai/glm-4.7-flash",
-  "minimax/minimax-m2.1",
-];
+// The MCPJam-hosted ("free") model ids — the billing seed. Sourced from the
+// checked-in generated snapshot (emitted by the backend model-catalog
+// generator), no longer hand-maintained. The server-side hosted-model catalog
+// PRE-SEEDS its dynamic cache from this list, so the union of (seed ∪ backend
+// catalog) keeps billing classification correct even when the catalog is
+// empty/unreachable (a cold start still bills hosted models to MCPJam credits).
+export const MCPJAM_PROVIDED_MODEL_IDS: string[] = [...HOSTED_MODEL_IDS];
 
-export const isMCPJamProvidedModel = (modelId: string): boolean => {
-  return MCPJAM_PROVIDED_MODEL_IDS.includes(modelId);
+// Guests are no longer model-curated: every hosted model is guest-allowed and
+// the backend enforces spend caps rather than an allowlist. Retained as an
+// alias of the full provided set for the snapshot/offline classification path
+// (`isMCPJamGuestAllowedModel`); the live catalog's per-model `guestAllowed`
+// flag (now always true) is the authoritative source when available.
+const MCPJAM_GUEST_ALLOWED_MODEL_IDS: string[] = [...MCPJAM_PROVIDED_MODEL_IDS];
+
+/** Minimal shape `getCanonicalModelId` matches against — `SUPPORTED_MODELS`
+ * satisfies it, and so does a `ModelDefinition[]` derived from the backend
+ * catalog. */
+export type CanonicalModelCandidate = { id: string | Model; provider: string };
+
+// Canonical (OpenRouter-style) id prefixes whose ModelProvider key differs from
+// the prefix. Everything else uses the prefix verbatim.
+const HOSTED_PROVIDER_ALIASES: Record<string, string> = {
+  "x-ai": "xai",
+  "meta-llama": "meta",
+  mistralai: "mistral",
+};
+
+/** Derive the provider key from a canonical hosted id's prefix. */
+export function hostedProviderFromCanonicalId(id: string): string {
+  const slash = id.indexOf("/");
+  const prefix = (slash > 0 ? id.slice(0, slash) : id).toLowerCase();
+  return HOSTED_PROVIDER_ALIASES[prefix] ?? prefix;
+}
+
+// The hosted snapshot projected to `{ id, provider }` so `getCanonicalModelId`
+// can still map a BARE hosted id (e.g. "gpt-5-nano" + provider "openai") to its
+// prefixed form now that the hosted display rows are gone from SUPPORTED_MODELS.
+const HOSTED_CANONICAL_CANDIDATES: CanonicalModelCandidate[] =
+  HOSTED_MODEL_IDS.map((id) => ({
+    id,
+    provider: hostedProviderFromCanonicalId(id),
+  }));
+
+export const getCanonicalModelId = (
+  modelId: string,
+  provider?: string,
+  /**
+   * Extra known models to canonicalize against (unioned with the static
+   * `SUPPORTED_MODELS`). The client injects the dynamic backend catalog ∪ BYOK
+   * list here so catalog-only ids canonicalize correctly; defaults to `[]`, so
+   * every server/shared caller keeps the exact prior static behavior.
+   */
+  extraModels: readonly CanonicalModelCandidate[] = []
+): string => {
+  const normalizedModelId = modelId.trim();
+  if (!normalizedModelId) {
+    return normalizedModelId;
+  }
+
+  // BYOK statics (SUPPORTED_MODELS) + the hosted snapshot candidates (hosted
+  // display rows were removed from SUPPORTED_MODELS) + any injected catalog.
+  const knownModels: readonly CanonicalModelCandidate[] =
+    extraModels.length > 0
+      ? [...SUPPORTED_MODELS, ...HOSTED_CANONICAL_CANDIDATES, ...extraModels]
+      : [...SUPPORTED_MODELS, ...HOSTED_CANONICAL_CANDIDATES];
+
+  const normalizedProvider = provider?.trim().toLowerCase();
+
+  // When a provider is supplied, prefer hosted/prefixed matches first so
+  // bare ids (e.g. "gpt-4o-mini" — BYOK) don't shadow their hosted
+  // counterparts (e.g. "openai/gpt-4o-mini" — MCPJam-provided).
+  if (normalizedProvider) {
+    const providerModels = knownModels.filter(
+      (model) => model.provider.toLowerCase() === normalizedProvider
+    );
+
+    // If the caller didn't already pass a prefixed id, look for a prefixed
+    // (hosted) match first within this provider — bare ids must not win here.
+    const prefixedMatch = !normalizedModelId.includes("/")
+      ? providerModels.find((model) =>
+          String(model.id).endsWith(`/${normalizedModelId}`)
+        )
+      : undefined;
+
+    const providerScopedMatch =
+      prefixedMatch ??
+      providerModels.find((model) => String(model.id) === normalizedModelId);
+
+    if (providerScopedMatch) {
+      return String(providerScopedMatch.id);
+    }
+  }
+
+  const exactMatch = knownModels.find(
+    (model) => String(model.id) === normalizedModelId
+  );
+  if (exactMatch) {
+    return String(exactMatch.id);
+  }
+
+  return normalizedModelId;
+};
+
+export const isMCPJamProvidedModel = (
+  modelId: string,
+  provider?: string
+): boolean => {
+  return MCPJAM_PROVIDED_MODEL_IDS.includes(
+    getCanonicalModelId(modelId, provider)
+  );
+};
+
+export const isMCPJamGuestAllowedModel = (
+  modelId: string,
+  provider?: string
+): boolean => {
+  return MCPJAM_GUEST_ALLOWED_MODEL_IDS.includes(
+    getCanonicalModelId(modelId, provider)
+  );
 };
 
 export const isGPT5Model = (modelId: string | Model): boolean => {
@@ -148,15 +253,33 @@ export const isGPT5Model = (modelId: string | Model): boolean => {
 export interface ModelDefinition {
   id: Model | string;
   name: string;
-  provider: ModelProvider;
+  /**
+   * Known provider keys keep autocomplete; `string` is accepted so a brand-new
+   * backend-catalog provider (e.g. "alibaba", "nvidia") renders on its own with
+   * no code change — the whole point of sourcing the picker from the catalog.
+   */
+  provider: ModelProvider | (string & {});
   /** Set when provider === "custom" to identify which custom provider to use */
   customProviderName?: string;
   contextLength?: number;
   disabled?: boolean;
   disabledReason?: string;
+  /**
+   * True when the model comes from the MCPJam backend hosted catalog (billed to
+   * MCPJam credits). Drives `isMCPJamProvidedModelMenuItem` and the free/paid
+   * locks. Absent on BYOK/org/custom models.
+   */
+  hosted?: boolean;
+  /**
+   * Whether MCPJam serves this hosted model to signed-out guests. Sourced from
+   * the catalog DTO; absent → treated as guest-gated (locked for guests).
+   */
+  guestAllowed?: boolean;
 }
 
 export enum Model {
+  CLAUDE_FABLE_5 = "claude-fable-5",
+  CLAUDE_SONNET_5 = "claude-sonnet-5",
   CLAUDE_OPUS_4_1 = "claude-opus-4-1",
   CLAUDE_OPUS_4_0 = "claude-opus-4-0",
   CLAUDE_SONNET_4_5 = "claude-sonnet-4-5",
@@ -184,7 +307,6 @@ export enum Model {
   DEEPSEEK_CHAT = "deepseek-chat",
   DEEPSEEK_REASONER = "deepseek-reasoner",
   // Google Gemini models
-  GEMINI_3_PRO = "gemini-3-pro-preview",
   GEMINI_2_5_PRO = "gemini-2.5-pro",
   GEMINI_2_5_FLASH = "gemini-2.5-flash",
   GEMINI_2_5_FLASH_LITE = "gemini-2.5-flash-lite",
@@ -201,6 +323,10 @@ export enum Model {
   // Mistral models
   MISTRAL_LARGE_LATEST = "mistral-large-latest",
   MISTRAL_SMALL_LATEST = "mistral-small-latest",
+  MISTRAL_SMALL_2603 = "mistral-small-2603",
+  MISTRAL_MEDIUM_3_5 = "mistral-medium-3-5",
+  MISTRAL_LARGE_2512 = "mistral-large-2512",
+  DEVSTRAL_2512 = "devstral-2512",
   CODESTRAL_LATEST = "codestral-latest",
   MINISTRAL_8B_LATEST = "ministral-8b-latest",
   MINISTRAL_3B_LATEST = "ministral-3b-latest",
@@ -208,11 +334,22 @@ export enum Model {
   GROK_3 = "grok-3",
   GROK_3_MINI = "grok-3-mini",
   GROK_CODE_FAST_1 = "grok-code-fast-1",
+  GROK_4_5 = "grok-4.5",
   GROK_4_FAST_NON_REASONING = "grok-4-fast-non-reasoning",
   GROK_4_FAST_REASONING = "grok-4-fast-reasoning",
 }
 
+// SUPPORTED_MODELS now holds only BYOK entries (the user brings their own key):
+// `Model.*`-enum ids and "azure/…" ids. Hosted ("free") models are no longer
+// listed here — they come from the backend catalog (live) or the generated
+// snapshot (fallback). See hostedModelDefinitionsFromSnapshot / HOSTED_MODEL_IDS.
 export const SUPPORTED_MODELS: ModelDefinition[] = [
+  {
+    id: Model.CLAUDE_FABLE_5,
+    name: "Claude Fable 5",
+    provider: "anthropic",
+    contextLength: 1000000,
+  },
   {
     id: Model.CLAUDE_OPUS_4_1,
     name: "Claude Opus 4.1",
@@ -272,18 +409,6 @@ export const SUPPORTED_MODELS: ModelDefinition[] = [
     name: "GPT-5.1 Codex Mini",
     provider: "openai",
     contextLength: 200000,
-  },
-  {
-    id: "openai/gpt-5.1",
-    name: "GPT-5.1 (Free)",
-    provider: "openai",
-    contextLength: 400000,
-  },
-  {
-    id: "openai/gpt-5.1-codex",
-    name: "GPT-5.1 Codex (Free)",
-    provider: "openai",
-    contextLength: 400000,
   },
   { id: Model.GPT_5, name: "GPT-5", provider: "openai", contextLength: 400000 },
   {
@@ -354,12 +479,6 @@ export const SUPPORTED_MODELS: ModelDefinition[] = [
   },
   // Google Gemini models (latest first)
   {
-    id: Model.GEMINI_3_PRO,
-    name: "Gemini 3 Pro (Preview)",
-    provider: "google",
-    contextLength: 1000000,
-  },
-  {
     id: Model.GEMINI_2_5_PRO,
     name: "Gemini 2.5 Pro",
     provider: "google",
@@ -377,109 +496,31 @@ export const SUPPORTED_MODELS: ModelDefinition[] = [
     provider: "google",
     contextLength: 1048576,
   },
-  {
-    id: "openai/gpt-oss-120b",
-    name: "GPT-OSS 120B (Free)",
-    provider: "openai",
-    contextLength: 131072,
-  },
-  {
-    id: "openai/gpt-5-nano",
-    name: "GPT-5 Nano (Free)",
-    provider: "openai",
-    contextLength: 16000,
-  },
-  {
-    id: "anthropic/claude-haiku-4.5",
-    name: "Claude Haiku 4.5 (Free)",
-    provider: "anthropic",
-    contextLength: 200000,
-  },
-  {
-    id: "openai/gpt-5.1-codex-mini",
-    name: "GPT-5.1 Codex Mini (Free)",
-    provider: "openai",
-    contextLength: 400000,
-  },
-  {
-    id: "openai/gpt-5-mini",
-    name: "GPT-5 Mini (Free)",
-    provider: "openai",
-    contextLength: 128000,
-  },
-  {
-    id: "moonshotai/kimi-k2-thinking",
-    name: "Kimi K2 Thinking (Free)",
-    provider: "moonshotai",
-    contextLength: 262144,
-  },
-  {
-    id: "moonshotai/kimi-k2-0905",
-    name: "Kimi K2 (Free)",
-    provider: "moonshotai",
-    contextLength: 262144,
-  },
-  {
-    id: "google/gemini-2.5-flash",
-    name: "Gemini 2.5 Flash (Free)",
-    provider: "google",
-    contextLength: 1048576,
-  },
-  {
-    id: "x-ai/grok-code-fast-1",
-    name: "Grok Code Fast 1 (Free)",
-    provider: "xai",
-    contextLength: 256000,
-  },
-  {
-    id: "deepseek/deepseek-v3.2",
-    name: "DeepSeek V3.2 (Free)",
-    provider: "deepseek",
-    contextLength: 128000,
-  },
-  {
-    id: "google/gemini-3-flash-preview",
-    name: "Gemini 3 Flash Preview (Free)",
-    provider: "google",
-    contextLength: 1048576,
-  },
-  {
-    id: "meta-llama/llama-4-scout",
-    name: "Llama 4 Scout (Free)",
-    provider: "meta",
-    contextLength: 512000,
-  },
-  {
-    id: "moonshotai/kimi-k2.5",
-    name: "Kimi K2.5 (Free)",
-    provider: "moonshotai",
-    contextLength: 262144,
-  },
-  {
-    id: "x-ai/grok-4.1-fast",
-    name: "Grok 4.1 Fast (Free)",
-    provider: "xai",
-    contextLength: 2000000,
-  },
-  {
-    id: "z-ai/glm-4.7",
-    name: "GLM 4.7 (Free)",
-    provider: "z-ai",
-    contextLength: 200000,
-  },
-  {
-    id: "z-ai/glm-4.7-flash",
-    name: "GLM 4.7 Flash (Free)",
-    provider: "z-ai",
-    contextLength: 200000,
-  },
-  {
-    id: "minimax/minimax-m2.1",
-    name: "MiniMax M2.1 (Free)",
-    provider: "minimax",
-    contextLength: 128000,
-  },
   // Mistral models
+  {
+    id: Model.MISTRAL_SMALL_2603,
+    name: "Mistral Small 4",
+    provider: "mistral",
+    contextLength: 262144,
+  },
+  {
+    id: Model.MISTRAL_MEDIUM_3_5,
+    name: "Mistral Medium 3.5",
+    provider: "mistral",
+    contextLength: 262144,
+  },
+  {
+    id: Model.MISTRAL_LARGE_2512,
+    name: "Mistral Large 3 2512",
+    provider: "mistral",
+    contextLength: 262144,
+  },
+  {
+    id: Model.DEVSTRAL_2512,
+    name: "Devstral 2 2512",
+    provider: "mistral",
+    contextLength: 262144,
+  },
   {
     id: Model.MISTRAL_LARGE_LATEST,
     name: "Mistral Large",
@@ -530,6 +571,12 @@ export const SUPPORTED_MODELS: ModelDefinition[] = [
     contextLength: 256000,
   },
   {
+    id: Model.GROK_4_5,
+    name: "Grok 4.5",
+    provider: "xai",
+    contextLength: 500000,
+  },
+  {
     id: Model.GROK_4_FAST_NON_REASONING,
     name: "Grok 4 Fast Non-Reasoning",
     provider: "xai",
@@ -541,7 +588,6 @@ export const SUPPORTED_MODELS: ModelDefinition[] = [
     provider: "xai",
     contextLength: 2000000,
   },
-
   // Azure Models
   {
     id: "azure/gpt-5.1",
@@ -568,9 +614,250 @@ export const getModelById = (id: string): ModelDefinition | undefined => {
   return SUPPORTED_MODELS.find((model) => model.id === id);
 };
 
+const HOSTED_MODEL_IDS_SET: ReadonlySet<string> = new Set(HOSTED_MODEL_IDS);
+
 export const isModelSupported = (id: string): boolean => {
-  return SUPPORTED_MODELS.some((model) => model.id === id);
+  const canonical = getCanonicalModelId(id);
+  // BYOK statics (bare `Model.*`/azure ids) — the exhaustive local list.
+  if (SUPPORTED_MODELS.some((model) => model.id === id)) return true;
+  // Known hosted model from the snapshot seed.
+  if (HOSTED_MODEL_IDS_SET.has(canonical)) return true;
+  // A provider-prefixed id we don't statically know may still be a valid
+  // backend-catalog model added AFTER this snapshot (or an org OpenRouter /
+  // custom selection). Treat it as supported and let the live catalog / runtime
+  // be the real gate — gating on the static snapshot here would re-introduce
+  // the hand-maintained ceiling the dynamic catalog exists to remove.
+  return canonical.includes("/");
 };
+
+/**
+ * Derive a readable display name from a canonical hosted id for the fallback
+ * path (guests/offline see this instead of the live catalog's curated name):
+ * drop the redundant provider prefix (the picker groups by provider) and
+ * title-case the model segment. e.g. "openai/gpt-4o-mini" → "Gpt 4o Mini".
+ */
+export function hostedDisplayNameFromCanonicalId(id: string): string {
+  const slash = id.indexOf("/");
+  const modelPart = slash >= 0 ? id.slice(slash + 1) : id;
+  const titled = modelPart
+    .split(/[-_]/)
+    .filter(Boolean)
+    .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
+    .join(" ");
+  return titled || id;
+}
+
+/**
+ * Build ModelDefinitions for the full hosted ("free") catalog from the snapshot
+ * seed — the client picker's last-resort fallback when the live backend catalog
+ * is unreachable (guest / offline / Electron / empty cache). Display names are
+ * derived from the id (rich metadata comes from the live catalog); provider is
+ * derived from the id prefix. Never empty.
+ */
+export function hostedModelDefinitionsFromSnapshot(): ModelDefinition[] {
+  return HOSTED_MODEL_IDS.map((id) => ({
+    id,
+    name: hostedDisplayNameFromCanonicalId(id),
+    provider: hostedProviderFromCanonicalId(id),
+    hosted: true,
+    guestAllowed: isMCPJamGuestAllowedModel(id),
+  }));
+}
+
+/**
+ * Amazon Bedrock model ids are bare strings like
+ * "us.anthropic.claude-sonnet-4-5-20250929-v1:0" — an optional geo prefix
+ * (us./eu./apac./us-gov./global/...), a known vendor segment, a model name,
+ * and an optional ":N" revision suffix (absent on legacy ids like
+ * "anthropic.claude-v2" or "amazon.titan-tg1-large"). Ollama ids (the other
+ * bare-id shape in the app) never carry a `vendor.` segment from this list,
+ * so the pattern safely disambiguates the two (e.g. "llama3.1:8b" or
+ * "mistral:latest" don't match).
+ */
+const BEDROCK_BARE_MODEL_ID_PATTERN =
+  /^(?:[a-z]{2,6}(?:-[a-z]+)?\.)?(?:ai21|amazon|anthropic|cohere|deepseek|luma|meta|minimax|mistral|moonshot|nvidia|openai|qwen|stability|twelvelabs|writer)\.[A-Za-z0-9][\w.-]*(?::\d+)?$/;
+
+/**
+ * True when a model id is recognizably Amazon Bedrock: a bare model /
+ * inference-profile id, or a Bedrock ARN (e.g.
+ * "arn:aws:bedrock:us-east-1:123456789012:inference-profile/..."). The ARN
+ * check is partition-agnostic so GovCloud/China ARNs (arn:aws-us-gov:...,
+ * arn:aws-cn:...) match too.
+ */
+export const isBedrockModelId = (modelId: string): boolean => {
+  return (
+    /^arn:aws(?:-[a-z0-9-]+)?:bedrock:/i.test(modelId) ||
+    BEDROCK_BARE_MODEL_ID_PATTERN.test(modelId)
+  );
+};
+
+/**
+ * The concrete connect-form OAuth protocol eras, in chronological order
+ * (oldest first). The dropdown (AuthenticationSection's PROTOCOL_OPTIONS)
+ * renders newest-first separately; this tuple's order is not the UI order.
+ * SINGLE SOURCE OF TRUTH: both the {@link ServerFormOAuthProtocolMode} union
+ * and {@link normalizeOauthProtocolMode}'s membership check derive from this
+ * tuple, so a new era is added in exactly one place and the two can no longer
+ * drift on which values survive a stored/prefilled pin.
+ */
+export const SERVER_FORM_OAUTH_PROTOCOL_MODES = [
+  "2025-03-26",
+  "2025-06-18",
+  "2025-11-25",
+  "2026-07-28",
+] as const;
+
+/** A resolved connect-form OAuth protocol era (never the "auto" sentinel). */
+export type ServerFormOAuthProtocolConcreteMode =
+  (typeof SERVER_FORM_OAUTH_PROTOCOL_MODES)[number];
+
+export type ServerFormOAuthProtocolMode =
+  | "auto"
+  | ServerFormOAuthProtocolConcreteMode;
+
+/**
+ * The default concrete era used when nothing is stored and "auto" cannot be
+ * biased by a wire pin (the current "Latest" release).
+ */
+export const DEFAULT_OAUTH_PROTOCOL_CONCRETE_MODE: ServerFormOAuthProtocolConcreteMode =
+  "2025-11-25";
+
+export function isConcreteOauthProtocolMode(
+  value: string
+): value is ServerFormOAuthProtocolConcreteMode {
+  return (SERVER_FORM_OAUTH_PROTOCOL_MODES as readonly string[]).includes(value);
+}
+
+export function isServerFormOAuthProtocolMode(
+  value: unknown
+): value is ServerFormOAuthProtocolMode {
+  return (
+    value === "auto" ||
+    (typeof value === "string" && isConcreteOauthProtocolMode(value))
+  );
+}
+
+/**
+ * Coerce an arbitrary stored/prefilled protocol string to a connect-form OAuth
+ * protocol mode, preserving both the 2026-07-28 draft era AND the deferred
+ * "auto" sentinel. "auto" is a valid {@link ServerFormOAuthProtocolMode} that
+ * the wire-pin bridge resolves later, so it MUST survive hydration — coercing
+ * it to a concrete era here drops the sentinel and makes the bridge unreachable
+ * for prefilled/edited servers. Only unknown values and `undefined` fall back
+ * to the current concrete default (2025-11-25). Single-sourced here so the Add
+ * and Edit connect-form paths cannot drift: they previously kept private,
+ * hand-maintained copies that both had to be patched in lockstep to avoid
+ * silently degrading a stored 2026-07-28 pin down to 2025-11-25.
+ */
+export function normalizeOauthProtocolMode(
+  value?: string
+): ServerFormOAuthProtocolMode {
+  if (value === "auto") {
+    return "auto";
+  }
+  return value != null && isConcreteOauthProtocolMode(value)
+    ? value
+    : DEFAULT_OAUTH_PROTOCOL_CONCRETE_MODE;
+}
+
+/**
+ * Resolve a connect-form OAuth protocol mode to the concrete era the flow will
+ * actually run. An explicit era passes straight through — it always wins. The
+ * deferred "auto" sentinel resolves from concrete MCP evidence. An explicit
+ * wire pin wins, followed by the version negotiated during initialization.
+ * When authentication prevents negotiation there is no version evidence, so
+ * Auto uses the 2025-11-25 compatibility flow.
+ *
+ * Keep the Auto sentinel in persisted form data; callers use this resolver
+ * only when they need the concrete version for an OAuth session or preview.
+ */
+export function resolveEffectiveOauthProtocolMode(
+  mode: ServerFormOAuthProtocolMode,
+  wireProtocolVersion?: string,
+  negotiatedProtocolVersion?: string
+): ServerFormOAuthProtocolConcreteMode {
+  if (mode !== "auto") {
+    return mode;
+  }
+  if (
+    wireProtocolVersion !== undefined &&
+    isConcreteOauthProtocolMode(wireProtocolVersion)
+  ) {
+    return wireProtocolVersion;
+  }
+  if (
+    negotiatedProtocolVersion !== undefined &&
+    isConcreteOauthProtocolMode(negotiatedProtocolVersion)
+  ) {
+    return negotiatedProtocolVersion;
+  }
+  return DEFAULT_OAUTH_PROTOCOL_CONCRETE_MODE;
+}
+
+/**
+ * Resolve canonical intent plus compatibility data into the concrete version
+ * that must be frozen into one OAuth session. Records created before
+ * `oauthProtocolMode` existed retain their concrete profile as an explicit
+ * choice; new Auto records never reuse a previous flow's concrete result.
+ */
+export function resolveOAuthProtocolSelection(input: {
+  mode?: ServerFormOAuthProtocolMode;
+  legacyProtocolVersion?: string;
+  wireProtocolVersion?: string;
+  negotiatedProtocolVersion?: string;
+}): {
+  mode: ServerFormOAuthProtocolMode;
+  protocolVersion: ServerFormOAuthProtocolConcreteMode;
+  source:
+    | "explicit_oauth"
+    | "wire_pin"
+    | "negotiated"
+    | "auth_gated_fallback";
+} {
+  const mode =
+    input.mode ??
+    (input.legacyProtocolVersion !== undefined &&
+    isConcreteOauthProtocolMode(input.legacyProtocolVersion)
+      ? input.legacyProtocolVersion
+      : "auto");
+  return {
+    mode,
+    protocolVersion: resolveEffectiveOauthProtocolMode(
+      mode,
+      input.wireProtocolVersion,
+      input.negotiatedProtocolVersion
+    ),
+    source:
+      mode !== "auto"
+        ? "explicit_oauth"
+        : input.wireProtocolVersion !== undefined &&
+          isConcreteOauthProtocolMode(input.wireProtocolVersion)
+        ? "wire_pin"
+        : input.negotiatedProtocolVersion !== undefined &&
+          isConcreteOauthProtocolMode(input.negotiatedProtocolVersion)
+        ? "negotiated"
+        : "auth_gated_fallback",
+  };
+}
+
+/**
+ * @deprecated Use {@link RegistrationMode} (re-exported from shared/xaa) — the
+ * unified client-registration vocabulary shared by the OAuth flows and the
+ * XAA debugger. Structurally identical; kept as an alias for older imports.
+ */
+export type ServerFormOAuthRegistrationMode = RegistrationMode;
+
+/**
+ * The auth type a server-form row is configured with. "xaa" (Cross-App Access)
+ * is a distinct flow from "oauth": the inspector server mints the access token
+ * server-side via token-exchange rather than running a browser OAuth flow.
+ * "auto" resolves at connect time: XAA when the server is XAA-configured
+ * (IdP mode + stored client id) — a hard selection, never a fallback after a
+ * failed mint — and otherwise "discover": use a stored OAuth token when one
+ * exists, else connect unauthenticated and escalate to interactive OAuth only
+ * when the server answers 401 (the MCP spec's canonical discovery sequence).
+ */
+export type ServerFormAuthType = "auto" | "oauth" | "bearer" | "none" | "xaa";
 
 export interface ServerFormData {
   name: string;
@@ -580,11 +867,125 @@ export interface ServerFormData {
   url?: string;
   headers?: Record<string, string>;
   env?: Record<string, string>;
+  /**
+   * EXPLICIT secret write. The plain `env` / `headers` above feed the
+   * in-memory connect only — persistence (Convex) writes secrets exclusively
+   * from this patch, via `buildSecretSyncOptions`, and reads key PRESENCE as
+   * intent:
+   *
+   * - key ABSENT       → leave the stored value untouched (an edit that never
+   *                      opened the secrets section must not clobber it);
+   * - key present `{}`  → explicitly CLEAR the stored value;
+   * - key present, set  → replace the stored value.
+   *
+   * That three-state contract is why the plain fields cannot simply be
+   * persisted as a fallback: there, an untouched edit form and a deliberate
+   * clear are indistinguishable.
+   *
+   * The consequence for producers: anything holding REAL secret values — a JSON
+   * import, a bundle install, a deep link — has to set this too, and only when
+   * the values are non-empty (an empty patch would wipe the credentials of an
+   * existing server with the same name). Setting just `env` / `headers` yields
+   * a server that connects once from memory and comes back credential-less
+   * after a reload, with nothing to indicate anything was dropped.
+   */
+  secretPatch?: {
+    env?: Record<string, string>;
+    headers?: Record<string, string>;
+  };
+  clientCapabilities?: Record<string, unknown>;
   useOAuth?: boolean;
+  /**
+   * Canonical auth method (Convex `authMethod` column). The useOAuth/useXaa
+   * booleans are its derived compat mirrors — the backend re-derives them on
+   * every write. "auto" selects XAA when the server is XAA-configured, and
+   * otherwise "discover" (stored token if present, else unauthenticated with
+   * OAuth escalation on 401) — see server/utils/effective-auth.ts.
+   */
+  authMethod?: AuthMethod;
+  /**
+   * Reset boundary: when true the backend nulls the sticky XAA identity
+   * config (authServerMode, xaaSubject, xaaEmail). Sent when a modal save
+   * explicitly moves the server's auth type off XAA; plain saves preserve.
+   */
+  clearXaaConfig?: boolean;
+  oauthProtocolMode?: ServerFormOAuthProtocolMode;
+  /**
+   * Per-server MCP wire-version pin chosen at ADD time (the edit flow writes
+   * it directly through `projectServerConfig:setConfig` instead of the form
+   * payload). Persisted on the project layer
+   * (`projectServerRefs.mcpProtocolVersionOverride`), NOT on the server's own
+   * config blob — the add flow applies it once the hosted server row exists,
+   * then reconnects. Undefined = inherit host default / SDK default.
+   */
+  mcpProtocolVersionOverride?: import("@mcpjam/sdk/browser").McpProtocolVersion;
+  /**
+   * Unified client-registration mode (Client↔AS leg) shared by the OAuth
+   * flows and the XAA debugger: how this server's client establishes its
+   * identity at the authorization server. "auto" resolves to a concrete
+   * strategy at flow time (OAuth: resolveAuthorizationPlan; XAA debugger:
+   * falls back to preregistered). Persisted per-server (Convex
+   * `registrationMode` column). Replaces `oauthRegistrationMode` and the
+   * XAA-only `xaaRegistrationStrategy`.
+   */
+  registrationMode?: RegistrationMode;
   oauthScopes?: string[];
   clientId?: string;
   clientSecret?: string;
+  hasClientSecret?: boolean;
+  clearClientSecret?: boolean;
+  /** Optional issuer override for the cross-app authorization test target. */
+  xaaAuthzIssuer?: string;
+  /**
+   * Opt-in: accept a path-scoped authorization server whose metadata
+   * advertises the same-origin root as issuer (multi-tenant AS deployments
+   * with path-scoped issuers). Off = strict RFC 8414 issuer match.
+   */
+  xaaAllowPathScopedIssuer?: boolean;
+  /**
+   * The OAuth Debugger's equivalent of `xaaAllowPathScopedIssuer`, kept as a
+   * separate per-server field so enabling the relaxation for one debugger does
+   * not silently widen trust in the other. Off = strict RFC 8414 issuer match.
+   */
+  oauthAllowPathScopedIssuer?: boolean;
+  /**
+   * Cross-App Access (XAA) connect flag. When true the server authenticates via
+   * the XAA token-exchange flow rather than standard OAuth. Mutually exclusive
+   * with `useOAuth` — the form only ever sets one.
+   */
+  useXaa?: boolean;
+  /**
+   * Which identity provider mints the XAA assertion. v1 only writes "mcpjam"
+   * (the built-in test IdP); "own" is reserved for the bring-your-own-IdP
+   * follow-up.
+   */
+  authServerMode?: "mcpjam" | "own";
+  /** Optional simulated-identity override (subject) for the MCPJam test IdP. Blank = signed-in user. */
+  xaaSubject?: string;
+  /** Optional simulated-identity override (email) for the MCPJam test IdP. Blank = signed-in user. */
+  xaaEmail?: string;
+  /**
+   * XAA-debugger-only preset for the identity assertion the MCPJam test IdP
+   * mints (draft-ietf-oauth-identity-assertion-authz-grant): "oidc" (default)
+   * mints an ID token; "saml" mints a signed SAML assertion AND asks for a
+   * saml-nameid `sub_id` on the ID-JAG. Persisted per-server; saves that omit
+   * it must preserve the stored value (the save-path `?? existing` merge).
+   */
+  xaaIdentityAssertionFormat?: IdentityAssertionFormat;
+  /**
+   * XAA-debugger-only CIMD client authentication ("none" public default |
+   * "private_key_jwt" confidential). Persisted per-server; only meaningful when
+   * registrationMode resolves to "cimd". Saves that omit it preserve the stored
+   * value (the save-path `?? existing` merge).
+   */
+  xaaClientAuth?: XaaClientAuthMethod;
+  /** Registry credential key for resolving OAuth client ID from env (e.g. "github") */
+  oauthCredentialKey?: string;
+  /** True for registry servers that use backend-managed preregistered OAuth credentials */
+  useRegistryOAuthProxy?: boolean;
   requestTimeout?: number;
+  /** Convex _id of the registry server for project/registry bookkeeping */
+  registryServerId?: string;
 }
 
 export interface OauthTokens {

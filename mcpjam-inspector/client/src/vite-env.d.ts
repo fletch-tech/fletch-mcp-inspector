@@ -5,8 +5,11 @@ interface ImportMetaEnv {
   readonly VITE_DOCKER?: string;
   readonly VITE_RUNTIME?: string;
   readonly VITE_MCPJAM_HOSTED_MODE?: string;
-  readonly VITE_MAIN_URL?: string;
-  readonly VITE_CONVEX_URL: string;
+  readonly VITE_MCPJAM_NONPROD_LOCKDOWN?: string;
+  readonly VITE_MCPJAM_EMPLOYEE_EMAIL_DOMAINS?: string;
+  readonly VITE_MCPJAM_SANDBOX_ORIGIN?: string;
+  readonly VITE_WORKOS_DEV_MODE?: string;
+  // more env variables...
 }
 
 interface ImportMeta {

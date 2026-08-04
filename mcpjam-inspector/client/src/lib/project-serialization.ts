@@ -1,0 +1,617 @@
+import type { ServerWithName, ConnectionStatus } from "@/state/app-types";
+import {
+  normalizeOAuthProtocolVersion,
+  normalizeOAuthRegistrationStrategy,
+} from "@/lib/oauth/profile";
+import {
+  normalizeOauthProtocolMode,
+  type ServerFormOAuthProtocolMode,
+} from "@/shared/types.js";
+import {
+  normalizeAuthMethod,
+  normalizeIdentityAssertionFormat,
+  normalizeRegistrationMode,
+  normalizeXaaClientAuth,
+} from "@/shared/xaa.js";
+
+type SerializeOptions = {
+  /**
+   * When true, drop secret-bearing fields (STDIO `env`, HTTP
+   * `Authorization` headers) from the output. When false, keep them
+   * verbatim.
+   *
+   * Sharing payloads MUST redact: STDIO `env` commonly carries API
+   * keys / DB credentials, and HTTP `Authorization` carries bearers.
+   * Persistence payloads (the legacy localStorage → Convex migration)
+   * MUST preserve these — without them, a migrated STDIO server is
+   * non-functional and the user has to re-enter every credential, and
+   * an HTTP server configured with a static `Authorization` header
+   * (self-hosted MCP with a long-lived bearer, etc.) silently fails
+   * to reconnect after migration clears the legacy localStorage copy.
+   */
+  redactSecrets: boolean;
+};
+
+function hasBearerAuthorizationHeader(headers: unknown): boolean {
+  if (!headers || typeof headers !== "object") {
+    return false;
+  }
+
+  return Object.entries(headers as Record<string, unknown>).some(
+    ([key, value]) =>
+      key.trim().toLowerCase() === "authorization" &&
+      typeof value === "string" &&
+      value.trim().toLowerCase().startsWith("bearer ")
+  );
+}
+
+function hasRedactedBearerFlag(config: unknown): boolean {
+  return (
+    !!config &&
+    typeof config === "object" &&
+    (config as Record<string, unknown>).hasBearerToken === true
+  );
+}
+
+function serializeServersInternal(
+  servers: Record<string, ServerWithName>,
+  options: SerializeOptions
+): Record<string, unknown> {
+  const result: Record<string, unknown> = {};
+
+  for (const [serverId, server] of Object.entries(servers)) {
+    const serializedServer: Record<string, unknown> = {
+      name: server.name,
+      enabled: server.enabled,
+      useOAuth: server.useOAuth,
+    };
+    if (server.oauthProtocolMode !== undefined) {
+      serializedServer.oauthProtocolMode = server.oauthProtocolMode;
+    }
+
+    if (server.xaaAuthzIssuer !== undefined) {
+      serializedServer.xaaAuthzIssuer = server.xaaAuthzIssuer;
+    }
+    if (server.xaaAllowPathScopedIssuer !== undefined) {
+      serializedServer.xaaAllowPathScopedIssuer =
+        server.xaaAllowPathScopedIssuer;
+    }
+    if (server.oauthAllowPathScopedIssuer !== undefined) {
+      serializedServer.oauthAllowPathScopedIssuer =
+        server.oauthAllowPathScopedIssuer;
+    }
+    if (server.useXaa !== undefined) {
+      serializedServer.useXaa = server.useXaa;
+    }
+    if (server.authServerMode !== undefined) {
+      serializedServer.authServerMode = server.authServerMode;
+    }
+    if (server.xaaSubject !== undefined) {
+      serializedServer.xaaSubject = server.xaaSubject;
+    }
+    if (server.xaaEmail !== undefined) {
+      serializedServer.xaaEmail = server.xaaEmail;
+    }
+    if (server.xaaIdentityAssertionFormat !== undefined) {
+      serializedServer.xaaIdentityAssertionFormat =
+        server.xaaIdentityAssertionFormat;
+    }
+    if (server.registrationMode !== undefined) {
+      serializedServer.registrationMode = server.registrationMode;
+    }
+    if (server.xaaClientAuth !== undefined) {
+      serializedServer.xaaClientAuth = server.xaaClientAuth;
+    }
+    if (server.authMethod !== undefined) {
+      serializedServer.authMethod = server.authMethod;
+    }
+
+    if (server.config) {
+      const config: Record<string, unknown> = {};
+
+      if ((server.config as any).url) {
+        config.url =
+          (server.config as any).url instanceof URL
+            ? (server.config as any).url.href
+            : (server.config as any).url;
+      }
+      if ((server.config as any).command)
+        config.command = (server.config as any).command;
+      if ((server.config as any).args)
+        config.args = (server.config as any).args;
+      if (!options.redactSecrets && (server.config as any).env)
+        config.env = (server.config as any).env;
+      if ((server.config as any).timeout)
+        config.timeout = (server.config as any).timeout;
+      if ((server.config as any).clientCapabilities)
+        config.clientCapabilities = (server.config as any).clientCapabilities;
+
+      if ((server.config as any).requestInit) {
+        const requestInit: Record<string, unknown> = {};
+        if ((server.config as any).requestInit.headers) {
+          const headers: Record<string, string> = {};
+          for (const [key, value] of Object.entries(
+            (server.config as any).requestInit.headers
+          )) {
+            if (
+              options.redactSecrets &&
+              key.toLowerCase() === "authorization"
+            ) {
+              continue;
+            }
+            headers[key] = value as string;
+          }
+          requestInit.headers = headers;
+        }
+        config.requestInit = requestInit;
+      }
+
+      serializedServer.config = config;
+    }
+
+    if ((server.useOAuth || server.useXaa) && server.oauthFlowProfile) {
+      // OAuthTestProfile.scopes is a UI-shaped string ("read,write" or
+      // "read write"); the Convex `servers.oauthScopes` field is
+      // v.array(v.string()). Split here so syncProjectServers can pass the
+      // value straight through without tripping schema validation.
+      const rawScopes = server.oauthFlowProfile.scopes;
+      const scopesArray = Array.isArray(rawScopes)
+        ? (rawScopes as string[])
+        : typeof rawScopes === "string"
+        ? rawScopes.split(/[\s,]+/).filter(Boolean)
+        : [];
+      serializedServer.oauthFlowProfile = {
+        serverUrl: server.oauthFlowProfile.serverUrl,
+        resourceUrl: server.oauthFlowProfile.resourceUrl,
+        protocolVersion: server.oauthFlowProfile.protocolVersion,
+        registrationStrategy: server.oauthFlowProfile.registrationStrategy,
+        scopes: scopesArray,
+        clientId: server.oauthFlowProfile.clientId,
+      };
+    }
+
+    result[serverId] = serializedServer;
+  }
+
+  return result;
+}
+
+/**
+ * Serialize servers for an outbound share/invite payload (`ShareProjectDialog`,
+ * `use-project-state` clone-to-org / fork flows). Drops STDIO `env` so secrets
+ * stay on the local machine.
+ */
+export function serializeServersForSharing(
+  servers: Record<string, ServerWithName>
+): Record<string, unknown> {
+  return serializeServersInternal(servers, { redactSecrets: true });
+}
+
+/**
+ * Serialize servers for in-account persistence — currently only the
+ * legacy-localStorage → Convex migration. Preserves STDIO `env` because the
+ * migration target is the same actor's own Convex project (not a share
+ * recipient), and dropping env would leave migrated STDIO servers
+ * non-functional.
+ *
+ * Do NOT use this for any share/export/invite payload. If a future feature
+ * needs to copy a project across actors, route it through
+ * `serializeServersForSharing`.
+ */
+export function serializeServersForPersistence(
+  servers: Record<string, ServerWithName>
+): Record<string, unknown> {
+  return serializeServersInternal(servers, { redactSecrets: false });
+}
+
+export function deserializeServersFromConvex(
+  servers: Record<string, any> | any[]
+): Record<string, ServerWithName> {
+  const result: Record<string, ServerWithName> = {};
+
+  // Handle array (from servers table) or object (legacy project.servers)
+  const entries = Array.isArray(servers)
+    ? servers.map((s) => [s.name, s] as [string, any])
+    : Object.entries(servers);
+
+  for (const [serverId, serverData] of entries) {
+    if (!serverData) continue;
+
+    const config: any = {};
+
+    // NEW: Read from flat fields (servers table)
+    if (serverData.url) {
+      try {
+        config.url = new URL(serverData.url);
+      } catch {
+        config.url = serverData.url;
+      }
+    }
+    if (serverData.command) config.command = serverData.command;
+    if (serverData.args) config.args = serverData.args;
+    if (serverData.env) config.env = serverData.env;
+    if (serverData.timeout) config.timeout = serverData.timeout;
+    if (serverData.clientCapabilities) {
+      config.clientCapabilities = serverData.clientCapabilities;
+    }
+    if (serverData.headers) {
+      config.requestInit = { headers: serverData.headers };
+    }
+
+    // LEGACY: Also check nested config (backward compat with project.servers)
+    if (serverData.config) {
+      if (serverData.config.url) {
+        try {
+          config.url = new URL(serverData.config.url);
+        } catch {
+          config.url = serverData.config.url;
+        }
+      }
+      if (serverData.config.command) config.command = serverData.config.command;
+      if (serverData.config.args) config.args = serverData.config.args;
+      if (serverData.config.env) config.env = serverData.config.env;
+      if (serverData.config.timeout) config.timeout = serverData.config.timeout;
+      if (serverData.config.clientCapabilities)
+        config.clientCapabilities = serverData.config.clientCapabilities;
+      if (serverData.config.requestInit)
+        config.requestInit = serverData.config.requestInit;
+    }
+
+    const server: ServerWithName = {
+      name: serverData.name || serverId,
+      config,
+      lastConnectionTime: new Date(),
+      connectionStatus: "disconnected" as ConnectionStatus,
+      retryCount: 0,
+      enabled: serverData.enabled ?? false,
+      useOAuth: serverData.useOAuth ?? false,
+      // New rows persist canonical intent. Old rows only have the concrete
+      // profile/version; treat that concrete value as their intent so this
+      // additive field does not change existing behavior.
+      oauthProtocolMode:
+        serverData.oauthProtocolMode !== undefined
+          ? normalizeOauthProtocolMode(serverData.oauthProtocolMode)
+          : undefined,
+      hasClientSecret: serverData.hasClientSecret === true,
+      hasEnv: serverData.hasEnv === true,
+      hasHeaders: serverData.hasHeaders === true,
+      hasBearerToken:
+        serverData.hasBearerToken === true ||
+        hasRedactedBearerFlag(serverData.config) ||
+        hasBearerAuthorizationHeader(config.requestInit?.headers),
+    };
+
+    const xaaAuthzIssuer =
+      serverData.xaaAuthzIssuer ?? serverData.config?.xaaAuthzIssuer;
+    if (xaaAuthzIssuer !== undefined) {
+      server.xaaAuthzIssuer = xaaAuthzIssuer;
+    }
+    const xaaAllowPathScopedIssuer =
+      serverData.xaaAllowPathScopedIssuer ??
+      serverData.config?.xaaAllowPathScopedIssuer;
+    if (xaaAllowPathScopedIssuer !== undefined) {
+      server.xaaAllowPathScopedIssuer = xaaAllowPathScopedIssuer === true;
+    }
+    const oauthAllowPathScopedIssuer =
+      serverData.oauthAllowPathScopedIssuer ??
+      serverData.config?.oauthAllowPathScopedIssuer;
+    if (oauthAllowPathScopedIssuer !== undefined) {
+      server.oauthAllowPathScopedIssuer = oauthAllowPathScopedIssuer === true;
+    }
+    if (serverData.useXaa !== undefined) {
+      server.useXaa = serverData.useXaa === true;
+    }
+    if (serverData.authServerMode !== undefined) {
+      server.authServerMode = serverData.authServerMode;
+    }
+    if (serverData.xaaSubject !== undefined) {
+      server.xaaSubject = serverData.xaaSubject;
+    }
+    if (serverData.xaaEmail !== undefined) {
+      server.xaaEmail = serverData.xaaEmail;
+    }
+    // Narrow the bare wire value to a known format; drop anything unknown so
+    // the debugger falls back to the OIDC default (normalize-or-clear).
+    const xaaIdentityAssertionFormat = normalizeIdentityAssertionFormat(
+      serverData.xaaIdentityAssertionFormat,
+    );
+    if (xaaIdentityAssertionFormat !== undefined) {
+      server.xaaIdentityAssertionFormat = xaaIdentityAssertionFormat;
+    }
+    // Narrow the bare wire value to a known mode; drop anything unknown so the
+    // flows fall back to their defaults. Accepts the legacy per-flow keys
+    // (xaaRegistrationStrategy, oauthRegistrationMode) from old exports —
+    // canonical key wins when both are present.
+    const registrationMode = normalizeRegistrationMode(
+      serverData.registrationMode ??
+        serverData.xaaRegistrationStrategy ??
+        serverData.oauthRegistrationMode,
+    );
+    if (registrationMode !== undefined) {
+      server.registrationMode = registrationMode;
+    }
+    // Narrow the CIMD client-auth method; drop anything unknown so the debugger
+    // falls back to public CIMD.
+    const xaaClientAuth = normalizeXaaClientAuth(serverData.xaaClientAuth);
+    if (xaaClientAuth !== undefined) {
+      server.xaaClientAuth = xaaClientAuth;
+    }
+    if (typeof serverData.xaaDcrClientId === "string") {
+      server.xaaDcrClientId = serverData.xaaDcrClientId;
+    }
+    if (
+      serverData.xaaDcrTokenEndpointAuthMethod === "client_secret_post" ||
+      serverData.xaaDcrTokenEndpointAuthMethod === "client_secret_basic" ||
+      serverData.xaaDcrTokenEndpointAuthMethod === "none"
+    ) {
+      server.xaaDcrTokenEndpointAuthMethod =
+        serverData.xaaDcrTokenEndpointAuthMethod;
+    }
+    if (typeof serverData.xaaDcrIssuer === "string") {
+      server.xaaDcrIssuer = serverData.xaaDcrIssuer;
+    }
+    if (typeof serverData.xaaDcrClientSecretExpiresAt === "number") {
+      server.xaaDcrClientSecretExpiresAt =
+        serverData.xaaDcrClientSecretExpiresAt;
+    }
+    if (typeof serverData.xaaDcrRegisteredAt === "number") {
+      server.xaaDcrRegisteredAt = serverData.xaaDcrRegisteredAt;
+    }
+    if (
+      serverData.xaaDcrStatus === "registered" ||
+      serverData.xaaDcrStatus === "registering" ||
+      serverData.xaaDcrStatus === "uncertain"
+    ) {
+      server.xaaDcrStatus = serverData.xaaDcrStatus;
+    }
+    if (serverData.hasXaaDcrRegistration !== undefined) {
+      server.hasXaaDcrRegistration =
+        serverData.hasXaaDcrRegistration === true;
+    }
+    const authMethod = normalizeAuthMethod(serverData.authMethod);
+    if (authMethod !== undefined) {
+      server.authMethod = authMethod;
+    }
+
+    // Handle oauthFlowProfile from legacy nested structure
+    if (serverData.oauthFlowProfile) {
+      server.oauthFlowProfile = serverData.oauthFlowProfile;
+    }
+
+    // NEW: Handle flat OAuth profile fields from the servers table
+    // Convert oauthScopes array to comma-separated string for OAuthTestProfile.scopes
+    const flatProtocolVersion = normalizeOAuthProtocolVersion(
+      serverData.oauthProtocolVersion,
+    );
+    if (
+      server.oauthProtocolMode === undefined &&
+      flatProtocolVersion !== undefined
+    ) {
+      server.oauthProtocolMode =
+        flatProtocolVersion as ServerFormOAuthProtocolMode;
+    }
+    const flatRegistrationStrategy = normalizeOAuthRegistrationStrategy(
+      serverData.oauthRegistrationStrategy,
+    );
+    if (
+      serverData.oauthScopes ||
+      serverData.clientId ||
+      serverData.hasClientSecret ||
+      serverData.oauthResourceUrl ||
+      flatProtocolVersion ||
+      flatRegistrationStrategy
+    ) {
+      const existingProfile = (server.oauthFlowProfile as any) || {};
+      server.oauthFlowProfile = {
+        ...existingProfile,
+        scopes: Array.isArray(serverData.oauthScopes)
+          ? serverData.oauthScopes.join(",")
+          : existingProfile.scopes || "",
+        clientId: serverData.clientId || existingProfile.clientId || "",
+        clientSecret: "",
+        resourceUrl:
+          serverData.oauthResourceUrl || existingProfile.resourceUrl || "",
+        // Persisted debugger test-profile choices. Absent (legacy rows or an
+        // unknown wire value) keeps the legacy-nested value when present and
+        // otherwise falls to the reader-side defaults (DCR / 2025-11-25).
+        ...(flatProtocolVersion
+          ? { protocolVersion: flatProtocolVersion }
+          : {}),
+        ...(flatRegistrationStrategy
+          ? { registrationStrategy: flatRegistrationStrategy }
+          : {}),
+      } as typeof server.oauthFlowProfile;
+    }
+
+    result[serverId] = server;
+  }
+
+  return result;
+}
+
+export function serversHaveChanged(
+  local: Record<string, ServerWithName>,
+  remote: Record<string, any> | any[]
+): boolean {
+  // Handle array (from servers table) or object (legacy)
+  const remoteRecord = Array.isArray(remote)
+    ? Object.fromEntries(remote.map((s) => [s.name, s]))
+    : remote;
+
+  const localKeys = Object.keys(local);
+  const remoteKeys = Object.keys(remoteRecord);
+
+  if (localKeys.length !== remoteKeys.length) return true;
+
+  for (const key of localKeys) {
+    if (!remoteKeys.includes(key)) return true;
+
+    const localServer = local[key];
+    const remoteServer = remoteRecord[key];
+
+    if (localServer.name !== remoteServer.name) return true;
+    if (localServer.enabled !== remoteServer.enabled) return true;
+    if (localServer.useOAuth !== remoteServer.useOAuth) return true;
+    const remoteOauthProtocolMode =
+      typeof remoteServer.oauthProtocolMode === "string"
+        ? normalizeOauthProtocolMode(remoteServer.oauthProtocolMode)
+        : normalizeOAuthProtocolVersion(remoteServer.oauthProtocolVersion);
+    if (
+      (localServer.oauthProtocolMode ?? undefined) !==
+      (remoteOauthProtocolMode ?? undefined)
+    )
+      return true;
+
+    const remoteXaaAuthzIssuer =
+      remoteServer.xaaAuthzIssuer ?? remoteServer.config?.xaaAuthzIssuer;
+    if ((localServer.xaaAuthzIssuer ?? undefined) !== (remoteXaaAuthzIssuer ?? undefined))
+      return true;
+
+    const remoteXaaAllowPathScopedIssuer =
+      remoteServer.xaaAllowPathScopedIssuer ??
+      remoteServer.config?.xaaAllowPathScopedIssuer;
+    if (
+      (localServer.xaaAllowPathScopedIssuer ?? undefined) !==
+      (remoteXaaAllowPathScopedIssuer ?? undefined)
+    )
+      return true;
+
+    const remoteOauthAllowPathScopedIssuer =
+      remoteServer.oauthAllowPathScopedIssuer ??
+      remoteServer.config?.oauthAllowPathScopedIssuer;
+    if (
+      (localServer.oauthAllowPathScopedIssuer ?? undefined) !==
+      (remoteOauthAllowPathScopedIssuer ?? undefined)
+    )
+      return true;
+
+    // Get local URL
+    const localUrl =
+      (localServer.config as any)?.url?.toString?.() ||
+      (localServer.config as any)?.url;
+
+    // Get remote URL (flat field or nested config)
+    const remoteUrl = remoteServer.url || remoteServer.config?.url;
+    if (localUrl !== remoteUrl) return true;
+
+    // Get remote command (flat field or nested config)
+    const remoteCommand = remoteServer.command || remoteServer.config?.command;
+    if ((localServer.config as any)?.command !== remoteCommand) return true;
+
+    // Get remote args (flat field or nested config)
+    const remoteArgs = remoteServer.args || remoteServer.config?.args;
+    if (
+      JSON.stringify((localServer.config as any)?.args) !==
+      JSON.stringify(remoteArgs)
+    )
+      return true;
+
+    // Get remote timeout (flat field or nested config)
+    const remoteTimeout = remoteServer.timeout || remoteServer.config?.timeout;
+    if ((localServer.config as any)?.timeout !== remoteTimeout) return true;
+
+    const remoteClientCapabilities =
+      remoteServer.clientCapabilities ||
+      remoteServer.config?.clientCapabilities;
+    if (
+      JSON.stringify((localServer.config as any)?.clientCapabilities) !==
+      JSON.stringify(remoteClientCapabilities)
+    )
+      return true;
+
+    // Get remote requestInit/headers (flat headers or nested config.requestInit)
+    const remoteRequestInit = remoteServer.headers
+      ? { headers: remoteServer.headers }
+      : remoteServer.config?.requestInit;
+    const remoteHasHeaders = remoteServer.hasHeaders === true;
+    const remoteHeadersAreRedacted =
+      remoteHasHeaders &&
+      (remoteRequestInit == null ||
+        (typeof remoteRequestInit === "object" &&
+          (remoteRequestInit as any).headers === undefined));
+    if (!remoteHeadersAreRedacted) {
+      if (
+        JSON.stringify((localServer.config as any)?.requestInit) !==
+        JSON.stringify(remoteRequestInit)
+      )
+        return true;
+    }
+
+    // Get remote env (flat field or nested config)
+    const remoteEnv = remoteServer.env || remoteServer.config?.env;
+    const remoteHasEnv = remoteServer.hasEnv === true;
+    const remoteEnvIsRedacted = remoteHasEnv && remoteEnv === undefined;
+    if (!remoteEnvIsRedacted) {
+      if (
+        JSON.stringify((localServer.config as any)?.env) !==
+        JSON.stringify(remoteEnv)
+      )
+        return true;
+    }
+
+    if (
+      Boolean(localServer.hasClientSecret) !==
+      Boolean(remoteServer.hasClientSecret)
+    )
+      return true;
+    if (Boolean(localServer.hasEnv) !== Boolean(remoteServer.hasEnv))
+      return true;
+    if (Boolean(localServer.hasHeaders) !== Boolean(remoteServer.hasHeaders))
+      return true;
+    const localHasBearerToken =
+      localServer.hasBearerToken === true ||
+      hasRedactedBearerFlag(localServer.config) ||
+      hasBearerAuthorizationHeader(
+        (localServer.config as any)?.requestInit?.headers
+      );
+    const localBearerFlagIsPresent =
+      Object.prototype.hasOwnProperty.call(localServer, "hasBearerToken") ||
+      hasRedactedBearerFlag(localServer.config);
+    const remoteHasBearerToken =
+      remoteServer.hasBearerToken === true ||
+      hasRedactedBearerFlag(remoteServer.config) ||
+      hasBearerAuthorizationHeader((remoteRequestInit as any)?.headers);
+    const remoteBearerFlagIsMissing =
+      !Object.prototype.hasOwnProperty.call(remoteServer, "hasBearerToken") &&
+      !Object.prototype.hasOwnProperty.call(
+        remoteServer.config ?? {},
+        "hasBearerToken"
+      );
+    const remoteBearerIsUnknown =
+      remoteHeadersAreRedacted &&
+      remoteBearerFlagIsMissing &&
+      !localBearerFlagIsPresent;
+    if (
+      !remoteBearerIsUnknown &&
+      Boolean(localHasBearerToken) !== Boolean(remoteHasBearerToken)
+    )
+      return true;
+
+    // Check OAuth profile (handle both flat and nested structures)
+    // For flat structure, convert oauthScopes array to comma-separated string for comparison
+    const remoteOAuthProfile =
+      remoteServer.oauthScopes ||
+      remoteServer.clientId ||
+      remoteServer.hasClientSecret ||
+      remoteServer.oauthResourceUrl
+        ? {
+            ...(remoteServer.oauthFlowProfile ?? {}),
+            scopes: Array.isArray(remoteServer.oauthScopes)
+              ? remoteServer.oauthScopes.join(",")
+              : remoteServer.oauthScopes,
+            clientId: remoteServer.clientId,
+            clientSecret: "",
+            resourceUrl:
+              remoteServer.oauthResourceUrl ??
+              remoteServer.oauthFlowProfile?.resourceUrl,
+          }
+        : remoteServer.oauthFlowProfile;
+    if (
+      JSON.stringify(localServer.oauthFlowProfile) !==
+      JSON.stringify(remoteOAuthProfile)
+    )
+      return true;
+  }
+
+  return false;
+}

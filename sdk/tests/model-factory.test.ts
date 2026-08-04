@@ -1,14 +1,18 @@
 import {
   parseLLMString,
   createModelFromString,
+  buildOrgModelFromResolvedConfig,
+  assertOrgModelAllowed,
+  OrgProviderConfigError,
   type BaseUrls,
   type CreateModelOptions,
+  type OrgProviderResolvedConfig,
 } from "../src/model-factory";
 
 // Mock all provider packages
-jest.mock("@ai-sdk/anthropic", () => ({
-  createAnthropic: jest.fn(() => {
-    const modelFn = jest.fn((modelId: string) => ({
+vi.mock("@ai-sdk/anthropic", () => ({
+  createAnthropic: vi.fn(() => {
+    const modelFn = vi.fn((modelId: string) => ({
       provider: "anthropic",
       modelId,
       type: "mock-model",
@@ -17,14 +21,14 @@ jest.mock("@ai-sdk/anthropic", () => ({
   }),
 }));
 
-jest.mock("@ai-sdk/openai", () => ({
-  createOpenAI: jest.fn(() => {
-    const modelFn = jest.fn((modelId: string) => ({
+vi.mock("@ai-sdk/openai", () => ({
+  createOpenAI: vi.fn(() => {
+    const modelFn = vi.fn((modelId: string) => ({
       provider: "openai",
       modelId,
       type: "mock-model",
     }));
-    modelFn.chat = jest.fn((modelId: string) => ({
+    modelFn.chat = vi.fn((modelId: string) => ({
       provider: "openai-chat",
       modelId,
       type: "mock-model",
@@ -33,9 +37,9 @@ jest.mock("@ai-sdk/openai", () => ({
   }),
 }));
 
-jest.mock("@ai-sdk/deepseek", () => ({
-  createDeepSeek: jest.fn(() => {
-    const modelFn = jest.fn((modelId: string) => ({
+vi.mock("@ai-sdk/deepseek", () => ({
+  createDeepSeek: vi.fn(() => {
+    const modelFn = vi.fn((modelId: string) => ({
       provider: "deepseek",
       modelId,
       type: "mock-model",
@@ -44,9 +48,9 @@ jest.mock("@ai-sdk/deepseek", () => ({
   }),
 }));
 
-jest.mock("@ai-sdk/google", () => ({
-  createGoogleGenerativeAI: jest.fn(() => {
-    const modelFn = jest.fn((modelId: string) => ({
+vi.mock("@ai-sdk/google", () => ({
+  createGoogleGenerativeAI: vi.fn(() => {
+    const modelFn = vi.fn((modelId: string) => ({
       provider: "google",
       modelId,
       type: "mock-model",
@@ -55,9 +59,9 @@ jest.mock("@ai-sdk/google", () => ({
   }),
 }));
 
-jest.mock("@ai-sdk/azure", () => ({
-  createAzure: jest.fn(() => {
-    const modelFn = jest.fn((modelId: string) => ({
+vi.mock("@ai-sdk/azure", () => ({
+  createAzure: vi.fn(() => {
+    const modelFn = vi.fn((modelId: string) => ({
       provider: "azure",
       modelId,
       type: "mock-model",
@@ -66,9 +70,9 @@ jest.mock("@ai-sdk/azure", () => ({
   }),
 }));
 
-jest.mock("@ai-sdk/mistral", () => ({
-  createMistral: jest.fn(() => {
-    const modelFn = jest.fn((modelId: string) => ({
+vi.mock("@ai-sdk/mistral", () => ({
+  createMistral: vi.fn(() => {
+    const modelFn = vi.fn((modelId: string) => ({
       provider: "mistral",
       modelId,
       type: "mock-model",
@@ -77,9 +81,9 @@ jest.mock("@ai-sdk/mistral", () => ({
   }),
 }));
 
-jest.mock("@ai-sdk/xai", () => ({
-  createXai: jest.fn(() => {
-    const modelFn = jest.fn((modelId: string) => ({
+vi.mock("@ai-sdk/xai", () => ({
+  createXai: vi.fn(() => {
+    const modelFn = vi.fn((modelId: string) => ({
       provider: "xai",
       modelId,
       type: "mock-model",
@@ -88,9 +92,9 @@ jest.mock("@ai-sdk/xai", () => ({
   }),
 }));
 
-jest.mock("@openrouter/ai-sdk-provider", () => ({
-  createOpenRouter: jest.fn(() => {
-    const modelFn = jest.fn((modelId: string) => ({
+vi.mock("@openrouter/ai-sdk-provider", () => ({
+  createOpenRouter: vi.fn(() => {
+    const modelFn = vi.fn((modelId: string) => ({
       provider: "openrouter",
       modelId,
       type: "mock-model",
@@ -99,10 +103,21 @@ jest.mock("@openrouter/ai-sdk-provider", () => ({
   }),
 }));
 
-jest.mock("ollama-ai-provider-v2", () => ({
-  createOllama: jest.fn(() => {
-    const modelFn = jest.fn((modelId: string) => ({
+vi.mock("ollama-ai-provider-v2", () => ({
+  createOllama: vi.fn(() => {
+    const modelFn = vi.fn((modelId: string) => ({
       provider: "ollama",
+      modelId,
+      type: "mock-model",
+    }));
+    return modelFn;
+  }),
+}));
+
+vi.mock("@ai-sdk/amazon-bedrock", () => ({
+  createAmazonBedrock: vi.fn(() => {
+    const modelFn = vi.fn((modelId: string) => ({
+      provider: "bedrock",
       modelId,
       type: "mock-model",
     }));
@@ -120,10 +135,11 @@ import { createMistral } from "@ai-sdk/mistral";
 import { createXai } from "@ai-sdk/xai";
 import { createOpenRouter } from "@openrouter/ai-sdk-provider";
 import { createOllama } from "ollama-ai-provider-v2";
+import { createAmazonBedrock } from "@ai-sdk/amazon-bedrock";
 
 describe("model-factory", () => {
   beforeEach(() => {
-    jest.clearAllMocks();
+    vi.clearAllMocks();
   });
 
   describe("parseLLMString", () => {
@@ -150,6 +166,7 @@ describe("model-factory", () => {
         "anthropic",
         "openai",
         "azure",
+        "bedrock",
         "deepseek",
         "google",
         "ollama",
@@ -449,6 +466,35 @@ describe("model-factory", () => {
       });
     });
 
+    describe("bedrock provider", () => {
+      it("should create bedrock model with api key", () => {
+        createModelFromString(
+          "bedrock/us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+          defaultOptions
+        );
+
+        expect(createAmazonBedrock).toHaveBeenCalledWith({
+          apiKey: "test-api-key",
+        });
+      });
+
+      it("should pass custom base URL when provided", () => {
+        const options: CreateModelOptions = {
+          apiKey: "test-api-key",
+          baseUrls: {
+            bedrock: "https://bedrock-runtime.eu-west-1.amazonaws.com",
+          },
+        };
+
+        createModelFromString("bedrock/us.amazon.nova-pro-v1:0", options);
+
+        expect(createAmazonBedrock).toHaveBeenCalledWith({
+          apiKey: "test-api-key",
+          baseURL: "https://bedrock-runtime.eu-west-1.amazonaws.com",
+        });
+      });
+    });
+
     describe("error handling", () => {
       it("should throw for unknown provider", () => {
         expect(() =>
@@ -484,5 +530,257 @@ describe("model-factory", () => {
 
       expect(Object.keys(baseUrls)).toHaveLength(4);
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// buildOrgModelFromResolvedConfig + assertOrgModelAllowed
+// ---------------------------------------------------------------------------
+
+describe("buildOrgModelFromResolvedConfig", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("openai: calls createOpenAI with apiKey", () => {
+    const config: OrgProviderResolvedConfig = {
+      providerKey: "openai",
+      apiKey: "sk-test",
+    };
+    buildOrgModelFromResolvedConfig(config, "gpt-4o");
+    expect(createOpenAI).toHaveBeenCalledWith({ apiKey: "sk-test" });
+  });
+
+  it("anthropic: calls createAnthropic with apiKey", () => {
+    const config: OrgProviderResolvedConfig = {
+      providerKey: "anthropic",
+      apiKey: "ant-test",
+    };
+    buildOrgModelFromResolvedConfig(config, "claude-3-5-sonnet-20241022");
+    expect(createAnthropic).toHaveBeenCalledWith({ apiKey: "ant-test" });
+  });
+
+  it("azure: extracts resourceName from baseUrl", () => {
+    const config: OrgProviderResolvedConfig = {
+      providerKey: "azure",
+      apiKey: "az-key",
+      baseUrl: "https://my-resource.openai.azure.com",
+    };
+    buildOrgModelFromResolvedConfig(config, "gpt-4");
+    expect(createAzure).toHaveBeenCalledWith({
+      apiKey: "az-key",
+      resourceName: "my-resource",
+    });
+  });
+
+  it("azure: falls back to baseURL when resource name not parseable", () => {
+    const config: OrgProviderResolvedConfig = {
+      providerKey: "azure",
+      apiKey: "az-key",
+      baseUrl: "https://custom.example.com/azure",
+    };
+    buildOrgModelFromResolvedConfig(config, "gpt-4");
+    expect(createAzure).toHaveBeenCalledWith({
+      apiKey: "az-key",
+      baseURL: "https://custom.example.com/azure",
+    });
+  });
+
+  it("openrouter: includes HTTP-Referer and X-Title headers", () => {
+    const config: OrgProviderResolvedConfig = {
+      providerKey: "openrouter",
+      apiKey: "or-key",
+    };
+    buildOrgModelFromResolvedConfig(config, "anthropic/claude-3-opus");
+    expect(createOpenRouter).toHaveBeenCalledWith({
+      apiKey: "or-key",
+      headers: {
+        "HTTP-Referer": "https://www.mcpjam.com/",
+        "X-Title": "MCPJam",
+      },
+    });
+  });
+
+  it("bedrock: calls createAmazonBedrock with apiKey and baseURL", () => {
+    const config: OrgProviderResolvedConfig = {
+      providerKey: "bedrock",
+      apiKey: "bedrock-key",
+      baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com",
+    };
+    buildOrgModelFromResolvedConfig(
+      config,
+      "us.anthropic.claude-sonnet-4-5-20250929-v1:0"
+    );
+    expect(createAmazonBedrock).toHaveBeenCalledWith({
+      apiKey: "bedrock-key",
+      baseURL: "https://bedrock-runtime.us-east-1.amazonaws.com",
+    });
+  });
+
+  it("bedrock: throws provider_not_configured without baseUrl", () => {
+    const config: OrgProviderResolvedConfig = {
+      providerKey: "bedrock",
+      apiKey: "bedrock-key",
+    };
+    expect(() =>
+      buildOrgModelFromResolvedConfig(config, "us.amazon.nova-pro-v1:0")
+    ).toThrow(OrgProviderConfigError);
+  });
+
+  it("ollama: normalizes baseUrl to end with /api", () => {
+    const config: OrgProviderResolvedConfig = {
+      providerKey: "ollama",
+      baseUrl: "http://localhost:11434",
+    };
+    buildOrgModelFromResolvedConfig(config, "llama3");
+    expect(createOllama).toHaveBeenCalledWith({
+      baseURL: "http://localhost:11434/api",
+    });
+  });
+
+  it("ollama: keeps baseUrl that already has /api", () => {
+    const config: OrgProviderResolvedConfig = {
+      providerKey: "ollama",
+      baseUrl: "http://localhost:11434/api",
+    };
+    buildOrgModelFromResolvedConfig(config, "llama3");
+    expect(createOllama).toHaveBeenCalledWith({
+      baseURL: "http://localhost:11434/api",
+    });
+  });
+
+  it("ollama: throws when baseUrl is missing", () => {
+    const config: OrgProviderResolvedConfig = { providerKey: "ollama" };
+    expect(() =>
+      buildOrgModelFromResolvedConfig(config, "llama3")
+    ).toThrow(OrgProviderConfigError);
+  });
+
+  it("custom openai-compatible: strips providerKey prefix from modelId", () => {
+    const config: OrgProviderResolvedConfig = {
+      providerKey: "custom:my-provider",
+      apiKey: "key",
+      baseUrl: "http://my-provider.local",
+      protocol: "openai-compatible",
+    };
+    buildOrgModelFromResolvedConfig(config, "custom:my-provider:gpt-4");
+    expect(createOpenAI).toHaveBeenCalledWith({
+      apiKey: "key",
+      baseURL: "http://my-provider.local",
+    });
+  });
+
+  it("custom anthropic-compatible: calls createAnthropic with baseUrl", () => {
+    const config: OrgProviderResolvedConfig = {
+      providerKey: "custom:ant-compat",
+      apiKey: "key",
+      baseUrl: "http://ant-compat.local",
+      protocol: "anthropic-compatible",
+    };
+    buildOrgModelFromResolvedConfig(config, "claude-haiku");
+    expect(createAnthropic).toHaveBeenCalledWith({
+      apiKey: "key",
+      baseURL: "http://ant-compat.local",
+    });
+  });
+
+  it("unsupported provider: throws OrgProviderConfigError", () => {
+    const config: OrgProviderResolvedConfig = {
+      providerKey: "unknown-provider" as any,
+    };
+    expect(() =>
+      buildOrgModelFromResolvedConfig(config, "model")
+    ).toThrow(OrgProviderConfigError);
+  });
+
+  it("missing apiKey for cloud provider: throws OrgProviderConfigError", () => {
+    const config: OrgProviderResolvedConfig = { providerKey: "openai" };
+    expect(() =>
+      buildOrgModelFromResolvedConfig(config, "gpt-4o")
+    ).toThrow(OrgProviderConfigError);
+  });
+});
+
+describe("assertOrgModelAllowed", () => {
+  it("openrouter: allows model in selectedModels", () => {
+    const config: OrgProviderResolvedConfig = {
+      providerKey: "openrouter",
+      selectedModels: ["anthropic/claude-3-opus", "openai/gpt-4o"],
+    };
+    expect(() =>
+      assertOrgModelAllowed(config, "anthropic/claude-3-opus")
+    ).not.toThrow();
+  });
+
+  it("openrouter: rejects model not in selectedModels", () => {
+    const config: OrgProviderResolvedConfig = {
+      providerKey: "openrouter",
+      selectedModels: ["openai/gpt-4o"],
+    };
+    expect(() =>
+      assertOrgModelAllowed(config, "anthropic/claude-3-opus")
+    ).toThrow(OrgProviderConfigError);
+  });
+
+  it("openrouter: allows any model when selectedModels is empty", () => {
+    const config: OrgProviderResolvedConfig = {
+      providerKey: "openrouter",
+      selectedModels: [],
+    };
+    expect(() =>
+      assertOrgModelAllowed(config, "anything/model")
+    ).not.toThrow();
+  });
+
+  it("bedrock: allows model in selectedModels", () => {
+    const config: OrgProviderResolvedConfig = {
+      providerKey: "bedrock",
+      selectedModels: ["us.anthropic.claude-sonnet-4-5-20250929-v1:0"],
+    };
+    expect(() =>
+      assertOrgModelAllowed(
+        config,
+        "us.anthropic.claude-sonnet-4-5-20250929-v1:0"
+      )
+    ).not.toThrow();
+  });
+
+  it("bedrock: rejects model not in selectedModels", () => {
+    const config: OrgProviderResolvedConfig = {
+      providerKey: "bedrock",
+      selectedModels: ["us.anthropic.claude-sonnet-4-5-20250929-v1:0"],
+    };
+    expect(() =>
+      assertOrgModelAllowed(config, "us.amazon.nova-pro-v1:0")
+    ).toThrow(OrgProviderConfigError);
+  });
+
+  it("custom: allows model in modelIds (after prefix strip)", () => {
+    const config: OrgProviderResolvedConfig = {
+      providerKey: "custom:my-provider",
+      modelIds: ["gpt-4", "gpt-3.5-turbo"],
+    };
+    expect(() =>
+      assertOrgModelAllowed(config, "custom:my-provider:gpt-4")
+    ).not.toThrow();
+  });
+
+  it("custom: rejects model not in modelIds", () => {
+    const config: OrgProviderResolvedConfig = {
+      providerKey: "custom:my-provider",
+      modelIds: ["gpt-4"],
+    };
+    expect(() =>
+      assertOrgModelAllowed(config, "custom:my-provider:gpt-5")
+    ).toThrow(OrgProviderConfigError);
+  });
+
+  it("built-in providers: pass through without allowlist check", () => {
+    const config: OrgProviderResolvedConfig = {
+      providerKey: "anthropic",
+    };
+    expect(() =>
+      assertOrgModelAllowed(config, "any-model-id")
+    ).not.toThrow();
   });
 });

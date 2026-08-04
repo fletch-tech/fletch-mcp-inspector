@@ -1,264 +1,41 @@
 @import "tailwindcss";
 @import "tw-animate-css";
-
-/* Theme preset styles: these override CSS variables based on the selected data-theme-preset */
-@import "./styles/presets/brutalist.css";
-@import "./styles/presets/soft-pop.css";
-@import "./styles/presets/tangerine.css";
+@import "@mcpjam/design-system/index.css";
 @import "./styles/presets/fletch.css";
 
 @source "../../node_modules/streamdown/dist/*.js";
-
-@theme {
-  --color-background: hsl(var(--background));
-  --color-foreground: hsl(var(--foreground));
-  --color-card: hsl(var(--card));
-  --color-card-foreground: hsl(var(--card-foreground));
-  --color-primary: hsl(var(--primary));
-  --color-primary-foreground: hsl(var(--primary-foreground));
-  --color-muted: hsl(var(--muted));
-  --color-muted-foreground: hsl(var(--muted-foreground));
-}
-
-@custom-variant dark (&:is(.dark *));
-
-:root {
-  --background: oklch(0.9818 0.0054 95.0986);
-  --foreground: oklch(0.3438 0.0269 95.7226);
-  --card: oklch(0.9818 0.0054 95.0986);
-  --card-foreground: oklch(0.1908 0.002 106.5859);
-  --popover: oklch(1 0 0);
-  --popover-foreground: oklch(0.2671 0.0196 98.939);
-  --primary: oklch(0.6832 0.1382 38.744);
-  --primary-foreground: oklch(1 0 0);
-  --secondary: oklch(0.9245 0.0138 92.9892);
-  --secondary-foreground: oklch(0.4334 0.0177 98.6048);
-  --muted: oklch(0.9341 0.0153 90.239);
-  --muted-foreground: oklch(0.6059 0.0075 97.4233);
-  --accent: oklch(0.9245 0.0138 92.9892);
-  --accent-foreground: oklch(0.2671 0.0196 98.939);
-  --destructive: oklch(0.55 0.22 27);
-  --destructive-foreground: oklch(0.25 0.1 25);
-  --border: oklch(0.8847 0.0069 97.3627);
-  --input: oklch(0.7621 0.0156 98.3528);
-  --ring: oklch(0.6171 0.1375 39.0427);
-  /* Semantic status colors */
-  --success: oklch(0.696 0.17 152.5);
-  --success-foreground: oklch(1 0 0);
-  --warning: oklch(0.769 0.188 85.3);
-  --warning-foreground: oklch(0.239 0.06 60);
-  --info: oklch(0.623 0.214 259);
-  --info-foreground: oklch(1 0 0);
-  --pending: oklch(0.769 0.188 85.3);
-  --pending-foreground: oklch(0.239 0.06 60);
-  /* Overlay color */
-  --overlay: oklch(0 0 0 / 0.5);
-  --chart-1: oklch(0.5583 0.1276 42.9956);
-  --chart-2: oklch(0.6898 0.1581 290.4107);
-  --chart-3: oklch(0.8816 0.0276 93.128);
-  --chart-4: oklch(0.8822 0.0403 298.1792);
-  --chart-5: oklch(0.5608 0.1348 42.0584);
-  --sidebar: oklch(0.9663 0.008 98.8792);
-  --sidebar-foreground: oklch(0.359 0.0051 106.6524);
-  --sidebar-primary: oklch(0.6171 0.1375 39.0427);
-  --sidebar-primary-foreground: oklch(0.9881 0 0);
-  --sidebar-accent: oklch(0.9245 0.0138 92.9892);
-  --sidebar-accent-foreground: oklch(0.325 0 0);
-  --sidebar-border: oklch(0.9401 0 0);
-  --sidebar-ring: oklch(0.7731 0 0);
-  --font-sans:
-    ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
-    Roboto, "Helvetica Neue", Arial, "Noto Sans", sans-serif,
-    "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol", "Noto Color Emoji";
-  --font-serif: ui-serif, Georgia, Cambria, "Times New Roman", Times, serif;
-  --font-mono:
-    ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono",
-    "Courier New", monospace;
-  --font-code:
-    "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,
-    "Liberation Mono", "Courier New", monospace;
-  /* JSON syntax highlighting colors (light mode) - Asana-inspired */
-  --json-key: oklch(0.55 0.2 255); /* Blue for keys */
-  --json-string: oklch(0.5 0.1 55); /* Warm brown/tan */
-  --json-number: oklch(0.5 0.1 55); /* Same as strings */
-  --json-boolean: oklch(0.5 0.15 145); /* Green (for true) */
-  --json-boolean-false: oklch(0.55 0.18 25); /* Red/coral (for false) */
-  --json-null: oklch(0.55 0.02 270); /* Gray */
-  --json-punctuation: oklch(0.55 0.01 270); /* Muted gray */
-  --radius: 0.5rem;
-  --shadow-x: 0;
-  --shadow-y: 1px;
-  --shadow-blur: 3px;
-  --shadow-spread: 0px;
-  --shadow-opacity: 0.1;
-  --shadow-color: oklch(0 0 0);
-  --shadow-2xs: 0 1px 3px 0px hsl(0 0% 0% / 0.05);
-  --shadow-xs: 0 1px 3px 0px hsl(0 0% 0% / 0.05);
-  --shadow-sm:
-    0 1px 3px 0px hsl(0 0% 0% / 0.1), 0 1px 2px -1px hsl(0 0% 0% / 0.1);
-  --shadow: 0 1px 3px 0px hsl(0 0% 0% / 0.1), 0 1px 2px -1px hsl(0 0% 0% / 0.1);
-  --shadow-md:
-    0 1px 3px 0px hsl(0 0% 0% / 0.1), 0 2px 4px -1px hsl(0 0% 0% / 0.1);
-  --shadow-lg:
-    0 1px 3px 0px hsl(0 0% 0% / 0.1), 0 4px 6px -1px hsl(0 0% 0% / 0.1);
-  --shadow-xl:
-    0 1px 3px 0px hsl(0 0% 0% / 0.1), 0 8px 10px -1px hsl(0 0% 0% / 0.1);
-  --shadow-2xl: 0 1px 3px 0px hsl(0 0% 0% / 0.25);
-  --tracking-normal: 0em;
-  --spacing: 0.25rem;
-}
-
-.dark {
-  --background: oklch(0.2679 0.0036 106.6427);
-  --foreground: oklch(0.8074 0.0142 93.0137);
-  /* JSON syntax highlighting colors (dark mode) - Asana-inspired */
-  --json-key: oklch(0.7 0.18 255); /* Blue for keys */
-  --json-string: oklch(0.7 0.1 55); /* Warm brown/tan */
-  --json-number: oklch(0.7 0.1 55); /* Same as strings */
-  --json-boolean: oklch(0.65 0.15 145); /* Green (for true) */
-  --json-boolean-false: oklch(0.68 0.16 25); /* Red/coral (for false) */
-  --json-null: oklch(0.6 0.02 270); /* Gray */
-  --json-punctuation: oklch(0.5 0.01 270); /* Muted gray */
-  --card: oklch(0.2679 0.0036 106.6427);
-  --card-foreground: oklch(0.9818 0.0054 95.0986);
-  --popover: oklch(0.3085 0.0035 106.6039);
-  --popover-foreground: oklch(0.9211 0.004 106.4781);
-  --primary: oklch(0.6724 0.1308 38.7559);
-  --primary-foreground: oklch(1 0 0);
-  --secondary: oklch(0.9818 0.0054 95.0986);
-  --secondary-foreground: oklch(0.3085 0.0035 106.6039);
-  --muted: oklch(0.2213 0.0038 106.707);
-  --muted-foreground: oklch(0.7713 0.0169 99.0657);
-  --accent: oklch(0.213 0.0078 95.4245);
-  --accent-foreground: oklch(0.9663 0.008 98.8792);
-  --destructive: oklch(0.6368 0.2078 25.3313);
-  --destructive-foreground: oklch(1 0 0);
-  --border: oklch(0.3618 0.0101 106.8928);
-  --input: oklch(0.4336 0.0113 100.2195);
-  --ring: oklch(0.6724 0.1308 38.7559);
-  /* Semantic status colors */
-  --success: oklch(0.648 0.15 152);
-  --success-foreground: oklch(1 0 0);
-  --warning: oklch(0.75 0.183 55);
-  --warning-foreground: oklch(0.95 0.06 70);
-  --info: oklch(0.623 0.214 259);
-  --info-foreground: oklch(1 0 0);
-  --pending: oklch(0.75 0.183 55);
-  --pending-foreground: oklch(0.95 0.06 70);
-  /* Overlay color */
-  --overlay: oklch(0 0 0 / 0.5);
-  --chart-1: oklch(0.5583 0.1276 42.9956);
-  --chart-2: oklch(0.6898 0.1581 290.4107);
-  --chart-3: oklch(0.213 0.0078 95.4245);
-  --chart-4: oklch(0.3074 0.0516 289.323);
-  --chart-5: oklch(0.5608 0.1348 42.0584);
-  --sidebar: oklch(0.2357 0.0024 67.7077);
-  --sidebar-foreground: oklch(0.8074 0.0142 93.0137);
-  --sidebar-primary: oklch(0.325 0 0);
-  --sidebar-primary-foreground: oklch(0.9881 0 0);
-  --sidebar-accent: oklch(0.168 0.002 106.6177);
-  --sidebar-accent-foreground: oklch(0.8074 0.0142 93.0137);
-  --sidebar-border: oklch(0.9401 0 0);
-  --sidebar-ring: oklch(0.7731 0 0);
-  --font-sans:
-    ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
-    Roboto, "Helvetica Neue", Arial, "Noto Sans", sans-serif,
-    "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol", "Noto Color Emoji";
-  --font-serif: ui-serif, Georgia, Cambria, "Times New Roman", Times, serif;
-  --font-mono:
-    ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono",
-    "Courier New", monospace;
-  --radius: 0.5rem;
-  --shadow-x: 0;
-  --shadow-y: 1px;
-  --shadow-blur: 3px;
-  --shadow-spread: 0px;
-  --shadow-opacity: 0.1;
-  --shadow-color: oklch(0 0 0);
-  --shadow-2xs: 0 1px 3px 0px hsl(0 0% 0% / 0.05);
-  --shadow-xs: 0 1px 3px 0px hsl(0 0% 0% / 0.05);
-  --shadow-sm:
-    0 1px 3px 0px hsl(0 0% 0% / 0.1), 0 1px 2px -1px hsl(0 0% 0% / 0.1);
-  --shadow: 0 1px 3px 0px hsl(0 0% 0% / 0.1), 0 1px 2px -1px hsl(0 0% 0% / 0.1);
-  --shadow-md:
-    0 1px 3px 0px hsl(0 0% 0% / 0.1), 0 2px 4px -1px hsl(0 0% 0% / 0.1);
-  --shadow-lg:
-    0 1px 3px 0px hsl(0 0% 0% / 0.1), 0 4px 6px -1px hsl(0 0% 0% / 0.1);
-  --shadow-xl:
-    0 1px 3px 0px hsl(0 0% 0% / 0.1), 0 8px 10px -1px hsl(0 0% 0% / 0.1);
-  --shadow-2xl: 0 1px 3px 0px hsl(0 0% 0% / 0.25);
-}
-
-@theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --color-card: var(--card);
-  --color-card-foreground: var(--card-foreground);
-  --color-popover: var(--popover);
-  --color-popover-foreground: var(--popover-foreground);
-  --color-primary: var(--primary);
-  --color-primary-foreground: var(--primary-foreground);
-  --color-secondary: var(--secondary);
-  --color-secondary-foreground: var(--secondary-foreground);
-  --color-muted: var(--muted);
-  --color-muted-foreground: var(--muted-foreground);
-  --color-accent: var(--accent);
-  --color-accent-foreground: var(--accent-foreground);
-  --color-destructive: var(--destructive);
-  --color-destructive-foreground: var(--destructive-foreground);
-  --color-border: var(--border);
-  --color-input: var(--input);
-  --color-ring: var(--ring);
-  /* Semantic status colors */
-  --color-success: var(--success);
-  --color-success-foreground: var(--success-foreground);
-  --color-warning: var(--warning);
-  --color-warning-foreground: var(--warning-foreground);
-  --color-info: var(--info);
-  --color-info-foreground: var(--info-foreground);
-  --color-pending: var(--pending);
-  --color-pending-foreground: var(--pending-foreground);
-  --color-overlay: var(--overlay);
-  --color-chart-1: var(--chart-1);
-  --color-chart-2: var(--chart-2);
-  --color-chart-3: var(--chart-3);
-  --color-chart-4: var(--chart-4);
-  --color-chart-5: var(--chart-5);
-  --color-sidebar: var(--sidebar);
-  --color-sidebar-foreground: var(--sidebar-foreground);
-  --color-sidebar-primary: var(--sidebar-primary);
-  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
-  --color-sidebar-accent: var(--sidebar-accent);
-  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
-  --color-sidebar-border: var(--sidebar-border);
-  --color-sidebar-ring: var(--sidebar-ring);
-
-  --font-sans: var(--font-sans);
-  --font-mono: var(--font-mono);
-  --font-serif: var(--font-serif);
-
-  --radius-sm: calc(var(--radius) - 4px);
-  --radius-md: calc(var(--radius) - 2px);
-  --radius-lg: var(--radius);
-  --radius-xl: calc(var(--radius) + 4px);
-
-  --shadow-2xs: var(--shadow-2xs);
-  --shadow-xs: var(--shadow-xs);
-  --shadow-sm: var(--shadow-sm);
-  --shadow: var(--shadow);
-  --shadow-md: var(--shadow-md);
-  --shadow-lg: var(--shadow-lg);
-  --shadow-xl: var(--shadow-xl);
-  --shadow-2xl: var(--shadow-2xl);
-}
+@source "../../../design-system/src/**/*.tsx";
+/* @mcpjam/chat-ui is aliased to source (outside client/src), so Tailwind must
+   scan it to emit the transcript's utility classes. Includes .ts because
+   thread-helpers.ts carries className strings (tool-state icon styles). The
+   read-only transcript relies on the inspector's existing global shadcn tokens
+   for color values, so no package stylesheet import is needed here. */
+@source "../../../chat-ui/src/**/*.{ts,tsx}";
 
 @layer base {
   * {
     @apply border-border outline-ring/50;
   }
 
+  html,
+  body,
+  #root {
+    height: 100%;
+    min-height: 100%;
+  }
+
+  html,
+  body {
+    margin: 0;
+    overflow: hidden;
+  }
+
   body {
     @apply bg-background text-foreground overscroll-none;
+  }
+
+  #root {
+    @apply min-h-0 overflow-hidden;
   }
 
   /* Custom scrollbar for dark mode */
@@ -312,6 +89,204 @@
   .scrollbar-hidden::-webkit-scrollbar {
     display: none;
   }
+
+  .bg-brand-500 {
+    background-color: var(
+      --bg-brand-500,
+      var(--bg-basic-orange-strong, #ff8a00)
+    );
+  }
+
+  .text-white-default {
+    color: var(--text-white-default, #ffffff);
+  }
+
+  /* Mistral "M" mark colors — consumed by MistralStaticAvatar
+     (`mistral-avatar.tsx`) via `--mistral-spinner-{brand,white}`. The old
+     `.mistral-spinner-indicator` selector and `--mistral-spinner-{badge,strong}`
+     vars fed the retired avatar-ring spinner; the thinking indicator is now
+     Le Chat's SMIL five-square loader (`mistral-spinner.tsx`), which carries
+     its own brand hex, so those are dropped. */
+  .mistral-mark-colors {
+    --mistral-spinner-brand: #fa500e;
+    --mistral-spinner-white: #ffffff;
+  }
+
+  .dark .mistral-mark-colors,
+  .app-theme-scope.dark .mistral-mark-colors,
+  [data-thread-theme="dark"] .mistral-mark-colors {
+    --mistral-spinner-brand: #fa500f;
+    --mistral-spinner-white: #ffffff;
+  }
+
+  /* Trace timeline waterfall — category bar fills */
+  .trace-waterfall-bar-prompt {
+    background-color: var(--trace-waterfall-bar-prompt);
+  }
+  .trace-waterfall-bar-llm {
+    background-color: var(--trace-waterfall-bar-llm);
+  }
+  .trace-waterfall-bar-tool {
+    background-color: var(--trace-waterfall-bar-tool);
+  }
+  .trace-waterfall-bar-step {
+    background-color: var(--trace-waterfall-bar-step);
+  }
+  .trace-waterfall-bar-error {
+    background-color: var(--trace-waterfall-bar-error);
+  }
+  .trace-waterfall-bar-prompt,
+  .trace-waterfall-bar-llm,
+  .trace-waterfall-bar-tool,
+  .trace-waterfall-bar-step,
+  .trace-waterfall-bar-error {
+    box-shadow: inset 0 0 0 1px rgb(255 255 255 / 0.28),
+      0 1px 3px rgb(15 23 42 / 0.08);
+  }
+  .dark .trace-waterfall-bar-prompt,
+  .dark .trace-waterfall-bar-llm,
+  .dark .trace-waterfall-bar-tool,
+  .dark .trace-waterfall-bar-step,
+  .dark .trace-waterfall-bar-error,
+  .app-theme-scope.dark .trace-waterfall-bar-prompt,
+  .app-theme-scope.dark .trace-waterfall-bar-llm,
+  .app-theme-scope.dark .trace-waterfall-bar-tool,
+  .app-theme-scope.dark .trace-waterfall-bar-step,
+  .app-theme-scope.dark .trace-waterfall-bar-error {
+    box-shadow: inset 0 0 0 1px rgb(255 255 255 / 0.12),
+      0 1px 4px rgb(0 0 0 / 0.26);
+  }
+  .trace-waterfall-row-selected {
+    background-color: var(--trace-waterfall-row-selected);
+  }
+
+  /*
+   * Trace icons + row borders (light): same hue/chroma as bar fills; darkened L for stroke contrast.
+   * Chromatic drop-shadow mimics the “glow” of solid bars; neutral shadow matches .trace-waterfall-bar-*.
+   */
+  .trace-waterfall-glyph-prompt {
+    color: oklch(from var(--trace-waterfall-bar-prompt) calc(l - 0.36) c h);
+    filter: drop-shadow(0 1px 3px rgb(15 23 42 / 0.08))
+      drop-shadow(
+        0 0 5px oklch(from var(--trace-waterfall-bar-prompt) l c h / 0.5)
+      );
+  }
+  .trace-waterfall-glyph-llm {
+    color: oklch(from var(--trace-waterfall-bar-llm) calc(l - 0.36) c h);
+    filter: drop-shadow(0 1px 3px rgb(15 23 42 / 0.08))
+      drop-shadow(
+        0 0 5px oklch(from var(--trace-waterfall-bar-llm) l c h / 0.5)
+      );
+  }
+  .trace-waterfall-glyph-tool {
+    color: oklch(from var(--trace-waterfall-bar-tool) calc(l - 0.36) c h);
+    filter: drop-shadow(0 1px 3px rgb(15 23 42 / 0.08))
+      drop-shadow(
+        0 0 5px oklch(from var(--trace-waterfall-bar-tool) l c h / 0.5)
+      );
+  }
+  .trace-waterfall-glyph-step {
+    color: oklch(from var(--trace-waterfall-bar-step) calc(l - 0.36) c h);
+    filter: drop-shadow(0 1px 3px rgb(15 23 42 / 0.08))
+      drop-shadow(
+        0 0 5px oklch(from var(--trace-waterfall-bar-step) l c h / 0.5)
+      );
+  }
+  .trace-waterfall-glyph-error {
+    color: oklch(from var(--trace-waterfall-bar-error) calc(l - 0.36) c h);
+    filter: drop-shadow(0 1px 3px rgb(15 23 42 / 0.08))
+      drop-shadow(
+        0 0 5px oklch(from var(--trace-waterfall-bar-error) l c h / 0.5)
+      );
+  }
+
+  .trace-waterfall-row-accent-prompt {
+    border-left-color: oklch(
+      from var(--trace-waterfall-bar-prompt) calc(l - 0.36) c h
+    );
+  }
+  .trace-waterfall-row-accent-llm {
+    border-left-color: oklch(
+      from var(--trace-waterfall-bar-llm) calc(l - 0.36) c h
+    );
+  }
+  .trace-waterfall-row-accent-tool {
+    border-left-color: oklch(
+      from var(--trace-waterfall-bar-tool) calc(l - 0.36) c h
+    );
+  }
+  .trace-waterfall-row-accent-step {
+    border-left-color: oklch(
+      from var(--trace-waterfall-bar-step) calc(l - 0.36) c h
+    );
+  }
+  .trace-waterfall-row-accent-error {
+    border-left-color: oklch(
+      from var(--trace-waterfall-bar-error) calc(l - 0.36) c h
+    );
+  }
+
+  .dark .trace-waterfall-glyph-prompt,
+  .app-theme-scope.dark .trace-waterfall-glyph-prompt {
+    color: var(--trace-waterfall-accent-prompt);
+    filter: drop-shadow(0 1px 4px rgb(0 0 0 / 0.26))
+      drop-shadow(
+        0 0 6px oklch(from var(--trace-waterfall-bar-prompt) l c h / 0.45)
+      );
+  }
+  .dark .trace-waterfall-glyph-llm,
+  .app-theme-scope.dark .trace-waterfall-glyph-llm {
+    color: var(--trace-waterfall-accent-llm);
+    filter: drop-shadow(0 1px 4px rgb(0 0 0 / 0.26))
+      drop-shadow(
+        0 0 6px oklch(from var(--trace-waterfall-bar-llm) l c h / 0.45)
+      );
+  }
+  .dark .trace-waterfall-glyph-tool,
+  .app-theme-scope.dark .trace-waterfall-glyph-tool {
+    color: var(--trace-waterfall-accent-tool);
+    filter: drop-shadow(0 1px 4px rgb(0 0 0 / 0.26))
+      drop-shadow(
+        0 0 6px oklch(from var(--trace-waterfall-bar-tool) l c h / 0.45)
+      );
+  }
+  .dark .trace-waterfall-glyph-step,
+  .app-theme-scope.dark .trace-waterfall-glyph-step {
+    color: var(--trace-waterfall-accent-step);
+    filter: drop-shadow(0 1px 4px rgb(0 0 0 / 0.26))
+      drop-shadow(
+        0 0 6px oklch(from var(--trace-waterfall-bar-step) l c h / 0.45)
+      );
+  }
+  .dark .trace-waterfall-glyph-error,
+  .app-theme-scope.dark .trace-waterfall-glyph-error {
+    color: var(--trace-waterfall-accent-error);
+    filter: drop-shadow(0 1px 4px rgb(0 0 0 / 0.26))
+      drop-shadow(
+        0 0 6px oklch(from var(--trace-waterfall-bar-error) l c h / 0.45)
+      );
+  }
+
+  .dark .trace-waterfall-row-accent-prompt,
+  .app-theme-scope.dark .trace-waterfall-row-accent-prompt {
+    border-left-color: var(--trace-waterfall-accent-prompt);
+  }
+  .dark .trace-waterfall-row-accent-llm,
+  .app-theme-scope.dark .trace-waterfall-row-accent-llm {
+    border-left-color: var(--trace-waterfall-accent-llm);
+  }
+  .dark .trace-waterfall-row-accent-tool,
+  .app-theme-scope.dark .trace-waterfall-row-accent-tool {
+    border-left-color: var(--trace-waterfall-accent-tool);
+  }
+  .dark .trace-waterfall-row-accent-step,
+  .app-theme-scope.dark .trace-waterfall-row-accent-step {
+    border-left-color: var(--trace-waterfall-accent-step);
+  }
+  .dark .trace-waterfall-row-accent-error,
+  .app-theme-scope.dark .trace-waterfall-row-accent-error {
+    border-left-color: var(--trace-waterfall-accent-error);
+  }
 }
 
 .disable-transitions * {
@@ -327,6 +302,799 @@
 
   50% {
     opacity: 1;
+  }
+}
+
+/* Swarm persona pixel golems — idle bob on the wrapper span. */
+@keyframes persona-pixel-bob {
+  0%,
+  100% {
+    transform: translateY(1px);
+  }
+
+  50% {
+    transform: translateY(-2px);
+  }
+}
+
+@keyframes persona-pixel-bob-active {
+  0%,
+  100% {
+    transform: translateY(1px);
+  }
+
+  50% {
+    transform: translateY(-3px);
+  }
+}
+
+/* Head hop: 1px = one grid cell inside the scaled SVG. */
+@keyframes persona-golem-head {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+
+  50% {
+    transform: translateY(-1px);
+  }
+}
+
+@keyframes persona-golem-pulse {
+  50% {
+    opacity: 0.45;
+  }
+}
+
+@keyframes persona-golem-pulse-fast {
+  50% {
+    opacity: 0.45;
+  }
+}
+
+@keyframes persona-golem-flicker {
+  0%,
+  55% {
+    opacity: 1;
+  }
+
+  30%,
+  80% {
+    opacity: 0.2;
+  }
+}
+
+.animate-persona-pixel-bob {
+  animation: persona-pixel-bob 1.6s ease-in-out infinite;
+}
+
+.animate-persona-pixel-bob-active {
+  animation: persona-pixel-bob-active 0.9s ease-in-out infinite;
+}
+
+.animate-persona-golem-head {
+  animation: persona-golem-head 2.6s steps(1, end) infinite;
+}
+
+.animate-persona-golem-pulse {
+  animation: persona-golem-pulse 3s ease-in-out infinite;
+}
+
+.animate-persona-golem-pulse-fast {
+  animation: persona-golem-pulse-fast 1.1s ease-in-out infinite;
+}
+
+.animate-persona-golem-flicker {
+  animation: persona-golem-flicker 1.7s steps(2, end) infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-persona-pixel-bob,
+  .animate-persona-pixel-bob-active,
+  .animate-persona-golem-head,
+  .animate-persona-golem-pulse,
+  .animate-persona-golem-pulse-fast,
+  .animate-persona-golem-flicker {
+    animation: none;
+  }
+}
+
+@keyframes thinking-dot-pulse {
+  0%,
+  100% {
+    transform: scale(1);
+  }
+
+  50% {
+    transform: scale(1.25);
+  }
+}
+
+.animate-thinking-dot-pulse {
+  animation: thinking-dot-pulse 1.25s ease-in-out infinite;
+  backface-visibility: hidden;
+  transform: translateZ(0);
+  transform-origin: 50% center;
+  -webkit-font-smoothing: subpixel-antialiased;
+  will-change: transform;
+}
+
+/* MCPJam thinking indicator — three primary dots in a staggered bounce
+   wave. Uses `--primary` for fill/glow so light/dark themes stay on-brand. */
+@keyframes mcpjam-mark-dot-wave {
+  0%,
+  80%,
+  100% {
+    transform: translateY(0) scale(0.88);
+    opacity: 0.55;
+  }
+
+  40% {
+    transform: translateY(-2px) scale(1);
+    opacity: 1;
+  }
+}
+
+.mcpjam-mark-indicator {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.25rem;
+  min-height: 1.25rem;
+}
+
+.mcpjam-mark-indicator__dot {
+  display: inline-block;
+  height: 0.4375rem;
+  width: 0.4375rem;
+  border-radius: 9999px;
+  animation: mcpjam-mark-dot-wave 1.25s ease-in-out infinite;
+  transform-origin: center center;
+  will-change: transform, opacity;
+}
+
+.mcpjam-mark-indicator__dot--1 {
+  animation-delay: 0ms;
+}
+
+.mcpjam-mark-indicator__dot--2 {
+  animation-delay: 160ms;
+}
+
+.mcpjam-mark-indicator__dot--3 {
+  animation-delay: 320ms;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .mcpjam-mark-indicator__dot {
+    animation: thinking-dot-pulse 1.5s ease-in-out infinite;
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* n8n thinking indicator — MCPJam's three-dot bounce wave recolored to n8n's
+   coral brand red (#FF6D5A, the n8n logo fill). Shares the
+   `mcpjam-mark-dot-wave` keyframes and reduced-motion fallback. */
+.n8n-mark-indicator {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.25rem;
+  min-height: 1.25rem;
+}
+
+.n8n-mark-indicator__dot {
+  display: inline-block;
+  height: 0.4375rem;
+  width: 0.4375rem;
+  border-radius: 9999px;
+  background-color: #ff6d5a;
+  animation: mcpjam-mark-dot-wave 1.25s ease-in-out infinite;
+  transform-origin: center center;
+  will-change: transform, opacity;
+}
+
+.n8n-mark-indicator__dot--1 {
+  animation-delay: 0ms;
+}
+
+.n8n-mark-indicator__dot--2 {
+  animation-delay: 160ms;
+}
+
+.n8n-mark-indicator__dot--3 {
+  animation-delay: 320ms;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .n8n-mark-indicator__dot {
+    animation: thinking-dot-pulse 1.5s ease-in-out infinite;
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* Perplexity thinking indicator — captured verbatim from perplexity.ai. A 20px
+   overflow-hidden window onto a wide SVG (`viewBox 0 0 1248 24`) holding the
+   Perplexity mark drawn as 52 progressive rotation frames. The strip steps left
+   one frame at a time (`translate 0% → -100%`, `steps(52)`), so a single mark
+   sits in the window and flips frame-to-frame in place. Stroke is `currentColor`;
+   the component sets a themed foreground tone. */
+@keyframes perplexity-indicator {
+  0% {
+    transform: translateZ(0) translate(0%);
+  }
+  100% {
+    transform: translateZ(0) translate(-100%);
+  }
+}
+
+.perplexity-indicator__strip {
+  height: 100%;
+  width: auto;
+  flex-shrink: 0;
+  /* Sprite sheet: 52 mark frames tiled across the strip, each exactly the width
+     of the 20px window. `steps(52)` snaps the strip one whole frame at a time so
+     a single mark sits in the window and flips frame-to-frame (a page-flip / in-
+     place rotation). `linear` here is wrong — it slides the strip continuously,
+     so several marks sweep across the window at once. 3s ≈ 17fps reads as a calm
+     morph; tweak the duration to taste. */
+  animation: perplexity-indicator 3s steps(52) infinite;
+  animation-fill-mode: both;
+  will-change: transform;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .perplexity-indicator__strip {
+    /* Freeze on the first frame (the full symmetric mark) instead of looping. */
+    animation: none;
+    transform: translate(0%);
+  }
+}
+
+/* Mistral Le Chat "Thinking" shimmer label — verbatim port of Le Chat's
+   `animate-shimmer-text` rule (captured from chat.mistral.ai DevTools). A
+   200%-wide gradient clips to the glyphs and a bright stripe sweeps
+   150% → -50% over 2s ease-in-out infinite. Pairs with the SMIL five-square
+   loader in `indicators/mistral-spinner.tsx`.
+
+   `--mistral-shimmer-{base,highlight}` derive the two tones so `data-theme`
+   can swap them. Dark mode is the verbatim capture (base
+   rgba(255,255,255,.498), highlight #fff); the light override inverts to a
+   dark base/highlight below. */
+.mistral-shimmer-text {
+  --mistral-shimmer-base: rgba(255, 255, 255, 0.498);
+  --mistral-shimmer-highlight: #ffffff;
+  background-image: linear-gradient(
+    90deg,
+    var(--mistral-shimmer-base) 0%,
+    var(--mistral-shimmer-base) 40%,
+    var(--mistral-shimmer-highlight) 50%,
+    var(--mistral-shimmer-base) 60%,
+    var(--mistral-shimmer-base) 100%
+  );
+  background-size: 200% 100%;
+  background-clip: text;
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  animation: mistral-shimmer-text 2s ease-in-out infinite;
+  will-change: background-position;
+}
+
+/* Light mode: Le Chat's capture was dark-theme; mirror it on light with a
+   dark base + near-black highlight so the bright stripe still reads. */
+.mistral-shimmer-text[data-theme="light"] {
+  --mistral-shimmer-base: rgba(0, 0, 0, 0.498);
+  --mistral-shimmer-highlight: #000000;
+}
+
+@keyframes mistral-shimmer-text {
+  0%,
+  20% {
+    background-position: 150% 0;
+  }
+  100% {
+    background-position: -50% 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .mistral-shimmer-text {
+    animation: none;
+    background: none;
+    -webkit-text-fill-color: currentColor;
+  }
+}
+
+/* Notion AI "Working" shimmer label — verbatim port of Notion's own
+   `.nds-shimmer-text` rule (captured from notion.so DevTools, light theme).
+   A 200%-wide gradient clips to the glyphs and a band sweeps across over
+   1.5s linear infinite. Pairs with `indicators/notion-shimmer.tsx`.
+
+   `--nds-shimmer-{faded,solid}` derive the two tones so `data-theme` can swap
+   them. Light is the verbatim capture (faded #d4d3cf = --c-texDis, solid
+   #7d7a75 = --c-texSec); the dark override is reconstructed (the probe was
+   light theme). Keyframe endpoints are reconstructed to reproduce the sweep —
+   only the name, 200% size, 1.5s linear timing, and the resting `200% 50%`
+   position came across the wire. */
+.nds-shimmer-text {
+  --nds-shimmer-faded: #d4d3cf;
+  --nds-shimmer-solid: #7d7a75;
+
+  background-image: linear-gradient(
+    to right,
+    var(--nds-shimmer-faded) 0%,
+    var(--nds-shimmer-solid) 50%,
+    var(--nds-shimmer-faded) 100%
+  );
+  background-size: 200% 100%;
+  background-position: 200% 50%;
+  background-clip: text;
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  animation: nds-shimmer-text 1.5s linear infinite;
+  will-change: background-position;
+}
+
+/* Dark mode: Notion's capture was light-theme; mirror it on dark with a
+   muted base + lighter band so the sweep still reads against dark chrome. */
+.nds-shimmer-text[data-theme="dark"] {
+  --nds-shimmer-faded: #5a5a57;
+  --nds-shimmer-solid: #c2c0bb;
+}
+
+@keyframes nds-shimmer-text {
+  from {
+    background-position: 200% 50%;
+  }
+  to {
+    background-position: 0% 50%;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .nds-shimmer-text {
+    animation: none;
+    background: none;
+    -webkit-text-fill-color: currentcolor;
+  }
+}
+
+/* Notion AI loader icon. Notion draws this glyph on a <canvas> (48x32 backing,
+   shown 24x16 at 0.3 opacity) via requestAnimationFrame — there's no markup to
+   port, so it was captured frame-by-frame from notion.so: 47 frames, 48x32 px
+   each, measured loop ~1.567s. Replayed as a horizontal sprite strip stepped
+   one frame at a time (steps(47)); background-size halves the 2x-DPR sprite so
+   each frame shows at 24px crisp. */
+.notion-loader-icon {
+  width: 24px;
+  height: 16px;
+  flex: none;
+  opacity: 0.55;
+  background-image: url(/notion-icon-sprite.png);
+  background-repeat: no-repeat;
+  background-size: 1128px 16px; /* 47 frames × 24px */
+  animation: notion-loader-icon 1.567s steps(47) infinite;
+}
+
+/* The captured sprite is a dark-gray stroke (Notion drew it on a light
+   theme). On dark chrome that's invisible, so invert it to light gray. */
+.notion-loader-icon[data-theme="dark"] {
+  filter: invert(1);
+}
+
+@keyframes notion-loader-icon {
+  to {
+    background-position: -1128px 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .notion-loader-icon {
+    animation: none;
+    background-position: 0 0;
+  }
+}
+
+.claude-loading-indicator__stage {
+  isolation: isolate;
+}
+
+.claude-loading-indicator__strip,
+.claude-loading-indicator__static {
+  position: absolute;
+  fill: #d97757;
+}
+
+.claude-loading-indicator__static {
+  inset: 0;
+}
+
+.claude-loading-indicator__strip {
+  left: 0;
+  top: 0;
+  width: 100%;
+  height: auto;
+  transform: translateY(0);
+  transform-origin: top center;
+  will-change: opacity, transform;
+}
+
+.claude-loading-indicator__strip--900 {
+  animation: claude-strip-900-position 1.7s linear infinite,
+    claude-strip-900-visibility 1.7s step-end infinite;
+}
+
+.claude-loading-indicator__strip--800 {
+  animation: claude-strip-800-position 1.7s linear infinite,
+    claude-strip-800-visibility 1.7s step-end infinite;
+}
+
+/* Use step timing within wide keyframe ranges so production minification cannot
+   collapse adjacent boundaries, while keeping the original faster frame cadence. */
+@keyframes claude-strip-900-position {
+  0% {
+    transform: translateY(0%);
+    animation-timing-function: steps(8, end);
+  }
+  47.058824%,
+  100% {
+    transform: translateY(-88.8889%);
+  }
+}
+
+/* Keep these thresholds separated enough to survive CSS minification. */
+@keyframes claude-strip-900-visibility {
+  0%,
+  52.9% {
+    opacity: 1;
+  }
+  53%,
+  100% {
+    opacity: 0;
+  }
+}
+
+@keyframes claude-strip-800-position {
+  0%,
+  58.823529% {
+    transform: translateY(0%);
+    animation-timing-function: steps(7, end);
+  }
+  100% {
+    transform: translateY(-87.5%);
+  }
+}
+
+@keyframes claude-strip-800-visibility {
+  0%,
+  52.9% {
+    opacity: 0;
+  }
+  53%,
+  100% {
+    opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .claude-loading-indicator__strip {
+    animation: none;
+    opacity: 0;
+  }
+
+  .claude-loading-indicator__static {
+    display: block;
+  }
+}
+
+/* M365 Copilot thinking pulse — three gradient circles cycle through
+   "enter from left, grow to center, exit right" over 3.6s. Verbatim
+   timing from Copilot's Houdini paint worklet (`animation-name: r1a0u976`,
+   `cubic-bezier(0.8, 0, 0.2, 1)` aka Fluent's --curveEasyEaseMax).
+
+   The original encodes all three circles in ONE keyframe rule by
+   driving 9 CSS custom properties (3 per circle: opacity, scale,
+   x-position) read by `paint(pulsingDot)`. We split that into three
+   independent @keyframes — one per circle — because we're rendering
+   with literal DOM elements instead of a paint worklet.
+
+   Each circle is positioned at the box center (cx=7, cy=7 within the
+   14×14 stage) and slides ±7px (left edge ↔ center ↔ right edge).
+   `transform-origin` defaults to center so `scale(0)` collapses each
+   circle into its own midpoint. */
+
+.copilot-pulse-indicator {
+  position: relative;
+  display: inline-block;
+  width: 14px;
+  height: 14px;
+}
+
+.copilot-pulse-indicator__circle {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 14px;
+  height: 14px;
+  margin: -7px 0 0 -7px;
+  border-radius: 9999px;
+  /* Longhand form on purpose: esbuild's CSS minifier collapses the
+     `animation` shorthand to `animation: none` when `animation-name` is
+     omitted (the modifier classes below supply the name via cascade).
+     That collapse strips duration/timing/iteration too, killing the
+     dot-color-cycling animation in production. Same family of staging-
+     only minifier hazard as the Claude strip-keyframe collapse fixed in
+     #1727 / c45b3d590. */
+  animation-duration: 3600ms;
+  animation-timing-function: cubic-bezier(0.8, 0, 0.2, 1);
+  animation-iteration-count: infinite;
+  will-change: transform, opacity;
+}
+
+.copilot-pulse-indicator__circle--1 {
+  background-image: linear-gradient(135deg, #d161aa 0%, #e96d80 100%);
+  animation-name: copilot-pulse-circle-1;
+}
+
+.copilot-pulse-indicator__circle--2 {
+  background-image: linear-gradient(135deg, #42a3a6 0%, #73af69 100%);
+  animation-name: copilot-pulse-circle-2;
+}
+
+.copilot-pulse-indicator__circle--3 {
+  background-image: linear-gradient(135deg, #65a5dd 0%, #8173ee 100%);
+  animation-name: copilot-pulse-circle-3;
+}
+
+/* Per-property unwrap of @keyframes r1a0u976. Each circle's stops
+   are extracted verbatim from the live computed keyframe rule:
+     x-position 0/50/100  →  translateX(-7px / 0 / 7px)
+     scale 0%/100%        →  scale(0) / scale(1)
+     opacity 0/1          →  unchanged */
+@keyframes copilot-pulse-circle-1 {
+  0% {
+    opacity: 1;
+    transform: translateX(0) scale(1);
+  }
+  16.67% {
+    opacity: 0;
+    transform: translateX(7px) scale(0);
+  }
+  33.33% {
+    opacity: 0;
+    transform: translateX(-7px) scale(0);
+  }
+  50% {
+    opacity: 0;
+    transform: translateX(-7px) scale(0);
+  }
+  66.67% {
+    opacity: 1;
+    transform: translateX(-7px) scale(0);
+  }
+  83.33% {
+    opacity: 1;
+    transform: translateX(0) scale(1);
+  }
+  100% {
+    opacity: 1;
+    transform: translateX(0) scale(1);
+  }
+}
+
+@keyframes copilot-pulse-circle-2 {
+  0% {
+    opacity: 1;
+    transform: translateX(-7px) scale(0);
+  }
+  16.67% {
+    opacity: 1;
+    transform: translateX(0) scale(1);
+  }
+  33.33% {
+    opacity: 1;
+    transform: translateX(0) scale(1);
+  }
+  50% {
+    opacity: 0;
+    transform: translateX(7px) scale(0);
+  }
+  66.67% {
+    opacity: 0;
+    transform: translateX(-7px) scale(0);
+  }
+  83.33% {
+    opacity: 0;
+    transform: translateX(-7px) scale(0);
+  }
+  100% {
+    opacity: 1;
+    transform: translateX(-7px) scale(0);
+  }
+}
+
+@keyframes copilot-pulse-circle-3 {
+  0% {
+    opacity: 0;
+    transform: translateX(-7px) scale(0);
+  }
+  16.67% {
+    opacity: 0;
+    transform: translateX(-7px) scale(0);
+  }
+  33.33% {
+    opacity: 1;
+    transform: translateX(-7px) scale(0);
+  }
+  50% {
+    opacity: 1;
+    transform: translateX(0) scale(1);
+  }
+  66.67% {
+    opacity: 1;
+    transform: translateX(0) scale(1);
+  }
+  83.33% {
+    opacity: 0;
+    transform: translateX(7px) scale(0);
+  }
+  100% {
+    opacity: 0;
+    transform: translateX(-7px) scale(0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .copilot-pulse-indicator__circle {
+    /* Freeze on the "at-center" state for circle 1; circles 2 and 3
+       hide. Gives reduced-motion users a single static colored dot
+       instead of nothing or a jittering composite. */
+    animation: none;
+    opacity: 0;
+    transform: translateX(0) scale(0);
+  }
+  .copilot-pulse-indicator__circle--1 {
+    opacity: 1;
+    transform: translateX(0) scale(1);
+  }
+}
+
+/* Cursor "shine" thinking indicator — verbatim port of Cursor's own
+   `.make-shine` rule (captured from Cursor 1.x DevTools). A 200%-wide
+   linear gradient masks the text, then animates `background-position`
+   from 0% to -200% over 2 seconds linear/infinite, which slides the
+   single bright stripe across the glyph silhouette.
+
+   We use `currentColor` + `color-mix` instead of Cursor's
+   `--text-primary`/`--text-tertiary` tokens so the indicator inherits
+   the inspector's surrounding text color (chat shell renders it inside
+   `text-muted-foreground/80`). Visual result is the same — a brighter
+   stripe gliding through a dimmer base. */
+/* `.codex-shine-indicator` shares this entire rule body via the
+   multi-selector — Codex (OpenAI CLI) reuses Cursor's shimmer to
+   render its "Thinking" indicator in the playground. The keyframe
+   (`cursor-shine`) and the `--cursor-shine-base` custom property keep
+   their Cursor-flavored names because they're stylesheet-internal;
+   renaming them isn't worth churning Cursor's tests. */
+.cursor-shine-indicator,
+.codex-shine-indicator {
+  /* `--cursor-shine-base` is what Cursor calls `--base` — a single
+     foreground tone the gradient stops derive from. The 48% and 94%
+     mixes are verbatim from Cursor's resolved `--text-tertiary` /
+     `--text-primary` definitions:
+       --text-tertiary: color-mix(in oklab, var(--base) 48%, transparent)
+       --text-primary:  color-mix(in oklab, var(--base) 94%, transparent)
+     Default is the dark-mode base (#E4E4E4) captured from a live
+     DevTools dump; the light-mode override sits in
+     `.cursor-shine-indicator[data-theme="light"]` below. */
+  --cursor-shine-base: #e4e4e4;
+  background-image: linear-gradient(
+    90deg,
+    color-mix(in oklab, var(--cursor-shine-base) 48%, transparent) 0%,
+    color-mix(in oklab, var(--cursor-shine-base) 48%, transparent) 40%,
+    color-mix(in oklab, var(--cursor-shine-base) 94%, transparent) 50%,
+    color-mix(in oklab, var(--cursor-shine-base) 48%, transparent) 60%,
+    color-mix(in oklab, var(--cursor-shine-base) 48%, transparent) 100%
+  );
+  background-size: 200% 100%;
+  background-clip: text;
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  animation: cursor-shine 2s linear infinite;
+  will-change: background-position;
+}
+
+/* Light-mode base. Cursor swaps `--base` between #E4E4E4 (dark theme)
+   and a near-black for light. #1a1a1a here is the inspector's standard
+   light-mode foreground and gives the same 48%/94% contrast on white
+   that #E4E4E4 gives on Cursor's #181818 editor background. */
+.cursor-shine-indicator[data-theme="light"],
+.codex-shine-indicator[data-theme="light"] {
+  --cursor-shine-base: #1a1a1a;
+}
+
+@keyframes cursor-shine {
+  0% {
+    background-position: 100% 0;
+  }
+  100% {
+    background-position: -100% 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .cursor-shine-indicator,
+  .codex-shine-indicator {
+    animation: none;
+    background: none;
+    -webkit-text-fill-color: currentColor;
+  }
+}
+
+/* Claude Code CLI spinner — the braille "working" cycle (⠋⠙⠹…) ora and
+   most terminal tools use. Claude Code borrows Claude's chat surface but
+   is a terminal agent, so its busy state is a monospace spinner, not the
+   claude.ai mascot. Colored MCPJam orange via `text-primary` on the
+   element (see the component); the glyph uses `currentColor` so it inherits
+   that. `::before` content is a discrete (non-interpolated) property, so
+   each keyframe snaps to its frame; an engine without content animation
+   simply shows the static base glyph. */
+.claude-code-cli-indicator {
+  display: inline-flex;
+  align-items: center;
+}
+
+.claude-code-cli-indicator__spinner::before {
+  content: "⠋";
+  display: inline-block;
+  width: 1ch;
+  text-align: center;
+  animation: claude-code-cli-spinner 1s linear infinite;
+}
+
+.claude-code-cli-indicator__label {
+  margin-left: 0.45em;
+}
+
+@keyframes claude-code-cli-spinner {
+  0% {
+    content: "⠋";
+  }
+  10% {
+    content: "⠙";
+  }
+  20% {
+    content: "⠹";
+  }
+  30% {
+    content: "⠸";
+  }
+  40% {
+    content: "⠼";
+  }
+  50% {
+    content: "⠴";
+  }
+  60% {
+    content: "⠦";
+  }
+  70% {
+    content: "⠧";
+  }
+  80% {
+    content: "⠇";
+  }
+  90% {
+    content: "⠏";
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .claude-code-cli-indicator__spinner::before {
+    content: "⠿";
+    animation: none;
   }
 }
 
@@ -359,6 +1127,70 @@
 
 .animate-spin-pulse {
   animation: spin-pulse 1s ease-in-out infinite;
+}
+
+/* AI insights accent bar — static warm glow */
+.ai-shimmer-bar {
+  background: linear-gradient(
+    90deg,
+    oklch(0.68 0.14 39 / 0.2) 0%,
+    oklch(0.68 0.14 39 / 0.45) 50%,
+    oklch(0.68 0.14 39 / 0.2) 100%
+  );
+}
+
+.dark .ai-shimmer-bar {
+  background: linear-gradient(
+    90deg,
+    oklch(0.67 0.13 39 / 0.15) 0%,
+    oklch(0.67 0.13 39 / 0.4) 50%,
+    oklch(0.67 0.13 39 / 0.15) 100%
+  );
+}
+
+@keyframes ai-insight-shimmer {
+  0% {
+    background-position: 0% 50%;
+  }
+  100% {
+    background-position: 200% 50%;
+  }
+}
+
+/* Warm amber wash + slow shimmer for AI-generated run insight copy */
+.ai-insight-glow {
+  background: linear-gradient(
+    105deg,
+    oklch(0.72 0.12 45 / 0.035) 0%,
+    oklch(0.75 0.11 42 / 0.05) 45%,
+    oklch(0.72 0.12 45 / 0.035) 90%
+  );
+  background-size: 200% 100%;
+  animation: ai-insight-shimmer 6s ease-in-out infinite;
+}
+
+.dark .ai-insight-glow {
+  background: linear-gradient(
+    105deg,
+    oklch(0.67 0.13 39 / 0.055) 0%,
+    oklch(0.7 0.12 42 / 0.075) 45%,
+    oklch(0.67 0.13 39 / 0.055) 90%
+  );
+  background-size: 200% 100%;
+}
+
+.ai-sparkle-icon {
+  color: oklch(0.72 0.12 45);
+}
+
+.dark .ai-sparkle-icon {
+  color: oklch(0.75 0.11 42);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ai-insight-glow {
+    animation: none;
+  }
 }
 
 /* JSON syntax highlighting classes */
@@ -443,7 +1275,172 @@
   animation: csp-alert-blink 2s ease-in-out 3;
 }
 
+/* Onboarding: send button pulse glow */
+@keyframes onboarding-pulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 oklch(0.75 0.18 55 / 0.6);
+  }
+  50% {
+    box-shadow: 0 0 0 6px oklch(0.75 0.18 55 / 0);
+  }
+}
+
+.animate-onboarding-pulse {
+  animation: onboarding-pulse 2s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-onboarding-pulse {
+    animation: none;
+    box-shadow: 0 0 0 3px oklch(0.75 0.18 55 / 0.3);
+  }
+}
+
+/* Hand-drawn NUX arrow: stroke draw-on animation */
+@keyframes hand-draw-stroke {
+  from {
+    stroke-dashoffset: 1;
+  }
+  to {
+    stroke-dashoffset: 0;
+  }
+}
+
+.hand-draw-path {
+  stroke-dasharray: 1;
+  stroke-dashoffset: 1;
+}
+
+.hand-draw-path-body {
+  animation: hand-draw-stroke 1s cubic-bezier(0.33, 1, 0.68, 1) forwards;
+}
+
+/* Filled arrowhead pops in after the stroke finishes drawing */
+.hand-draw-arrowhead-fill {
+  opacity: 0;
+  animation: hand-draw-arrowhead-fade 0.26s cubic-bezier(0.33, 1, 0.68, 1) 0.72s
+    forwards;
+}
+
+@keyframes hand-draw-arrowhead-fade {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+/* Hand-drawn NUX arrow: text fade-in */
+@keyframes hand-draw-text-appear {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.hand-draw-text-appear {
+  opacity: 0;
+  animation: hand-draw-text-appear 0.4s cubic-bezier(0.33, 1, 0.68, 1) 0.85s
+    forwards;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .hand-draw-path {
+    stroke-dashoffset: 0;
+    animation: none;
+  }
+  .hand-draw-arrowhead-fill {
+    opacity: 1;
+    animation: none;
+  }
+  .hand-draw-text-appear {
+    opacity: 1;
+    transform: none;
+    animation: none;
+  }
+}
+
+/* Hold the host canvas's connecting edges invisible until the server pills
+   have landed via Framer Motion's layoutId morph (~SNAPPY_CAMERA + buffer).
+   Otherwise the lines render immediately while cards are still translating,
+   which reads as "edges drawn before servers arrive". */
+.host-redesign-canvas[data-edges-ready="false"] .react-flow__edges {
+  opacity: 0;
+}
+.host-redesign-canvas[data-edges-ready="true"] .react-flow__edges {
+  opacity: 1;
+  transition: opacity 360ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+/* Hide ReactFlow's viewport (node + edge layers) until fitView has settled —
+   prevents the one-frame "off-center" flash where nodes render at their raw
+   canvas coords before the viewport pans into place. The nodes pane and the
+   edges pane both sit inside .react-flow__viewport. */
+.host-redesign-canvas[data-viewport-ready="false"] .react-flow__viewport {
+  opacity: 0;
+}
+.host-redesign-canvas[data-viewport-ready="true"] .react-flow__viewport {
+  opacity: 1;
+  transition: opacity 220ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+/* Reduced-motion: the canvas still needs the visibility gate (otherwise the
+   pre-fitView flash is worse), but instant rather than animated. */
+@media (prefers-reduced-motion: reduce) {
+  .host-redesign-canvas[data-edges-ready="true"] .react-flow__edges,
+  .host-redesign-canvas[data-viewport-ready="true"] .react-flow__viewport {
+    transition: none;
+  }
+}
+
 /* Font code variable for theme */
 @theme inline {
   --font-code: var(--font-code);
+}
+
+/*
+ * Metric/display numerals for eval dashboards (accuracy, deltas, counts).
+ * IBM Plex Mono gives the stats an instrument-panel character with true
+ * tabular figures so trend columns stay aligned. Generates the `font-metric`
+ * utility. Falls back to the system mono stack offline.
+ */
+@theme {
+  --font-metric: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, Monaco,
+    Consolas, "Liberation Mono", "Courier New", monospace;
+}
+
+/* Goose Desktop thinking indicator (`indicators/goose-icon.tsx`).
+   Renders the Goose mark static — no entrance pop-in or bob loop. */
+.goose-icon-indicator {
+  transform-origin: 0 100%;
+}
+
+/* Cline thinking indicator (`indicators/cline-mark.tsx`). No busy-state
+   animation was captured from the Cline probe, so this is a neutral generic
+   loading pulse on the brand mark — not Cline's real thinking effect. */
+.cline-mark-indicator {
+  animation: cline-mark-pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes cline-mark-pulse {
+  0%,
+  100% {
+    opacity: 0.45;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .cline-mark-indicator {
+    animation: none;
+    opacity: 0.8;
+  }
 }

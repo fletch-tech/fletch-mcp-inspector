@@ -1,8 +1,70 @@
 import { defineConfig } from "vitest/config";
+import path from "path";
 import tsconfigPaths from "vite-tsconfig-paths";
 
+const rootDir = path.resolve(__dirname, "..");
+const sdkIndexEntry = path.resolve(rootDir, "../sdk/src/index.ts");
+// Browser-safe entry. shared/xaa.ts re-exports XAA primitives from here (so the
+// client never pulls the node bundle); the server consumes the same file, so
+// vitest must resolve the /browser subpath to source too.
+const sdkBrowserEntry = path.resolve(rootDir, "../sdk/src/browser.ts");
+const sdkOperationsEntry = path.resolve(rootDir, "../sdk/src/operations.ts");
+const sdkSkillReferenceEntry = path.resolve(
+  rootDir,
+  "../sdk/src/skill-reference.ts",
+);
+const sdkModelFactoryEntry = path.resolve(
+  rootDir,
+  "../sdk/src/model-factory.ts",
+);
+const sdkMatchersEntry = path.resolve(rootDir, "../sdk/src/matchers.ts");
+const sdkPredicatesEntry = path.resolve(
+  rootDir,
+  "../sdk/src/predicates/index.ts",
+);
+const sdkHostConfigInternalEntry = path.resolve(
+  rootDir,
+  "../sdk/src/host-config/internal.ts",
+);
+const sdkHostConfigTemplatesEntry = path.resolve(
+  rootDir,
+  "../sdk/src/host-config/templates/index.ts",
+);
+const sdkPlatformEntry = path.resolve(rootDir, "../sdk/src/platform/index.ts");
+const sdkHostCompatEntry = path.resolve(
+  rootDir,
+  "../sdk/src/host-compat/index.ts",
+);
+const sdkPublicApiEntry = path.resolve(
+  rootDir,
+  "../sdk/src/public-api/index.ts",
+);
+// Plugin bundle parser/hashing — the local materializer consumes it server-side.
+const sdkPluginBundleEntry = path.resolve(
+  rootDir,
+  "../sdk/src/plugin-bundle/index.ts",
+);
+
 export default defineConfig({
-  plugins: [tsconfigPaths()],
+  define: {
+    __MCPJAM_SDK_VERSION__: JSON.stringify("test"),
+  },
+  plugins: [
+    tsconfigPaths(),
+    {
+      name: "raw-markdown-for-sdk-tests",
+      transform(source, id) {
+        if (!id.endsWith(".md")) {
+          return null;
+        }
+
+        return {
+          code: `export default ${JSON.stringify(source)};`,
+          map: null,
+        };
+      },
+    },
+  ],
   test: {
     globals: true,
     environment: "node",
@@ -11,6 +73,24 @@ export default defineConfig({
     setupFiles: ["./test/setup.ts"],
     testTimeout: 30000,
     hookTimeout: 30000,
+    server: {
+      deps: {
+        inline: [
+          "@mcpjam/sdk",
+          "@mcpjam/sdk/browser",
+          "@mcpjam/sdk/operations",
+          "@mcpjam/sdk/model-factory",
+          "@mcpjam/sdk/matchers",
+          "@mcpjam/sdk/predicates",
+          "@mcpjam/sdk/host-config/internal",
+          "@mcpjam/sdk/host-config/templates",
+          "@mcpjam/sdk/platform",
+          "@mcpjam/sdk/public-api",
+          "@mcpjam/sdk/host-compat",
+          "@mcpjam/sdk/plugin-bundle",
+        ],
+      },
+    },
     coverage: {
       provider: "v8",
       reporter: ["text", "json", "html"],
@@ -22,5 +102,31 @@ export default defineConfig({
       ],
       exclude: ["**/__tests__/**", "**/*.test.ts"],
     },
+  },
+  resolve: {
+    alias: [
+      {
+        find: "@mcpjam/sdk/skill-reference",
+        replacement: sdkSkillReferenceEntry,
+      },
+      { find: "@mcpjam/sdk/operations", replacement: sdkOperationsEntry },
+      { find: "@mcpjam/sdk/model-factory", replacement: sdkModelFactoryEntry },
+      { find: "@mcpjam/sdk/matchers", replacement: sdkMatchersEntry },
+      { find: "@mcpjam/sdk/predicates", replacement: sdkPredicatesEntry },
+      {
+        find: "@mcpjam/sdk/host-config/internal",
+        replacement: sdkHostConfigInternalEntry,
+      },
+      {
+        find: "@mcpjam/sdk/host-config/templates",
+        replacement: sdkHostConfigTemplatesEntry,
+      },
+      { find: "@mcpjam/sdk/platform", replacement: sdkPlatformEntry },
+      { find: "@mcpjam/sdk/host-compat", replacement: sdkHostCompatEntry },
+      { find: "@mcpjam/sdk/public-api", replacement: sdkPublicApiEntry },
+      { find: "@mcpjam/sdk/plugin-bundle", replacement: sdkPluginBundleEntry },
+      { find: "@mcpjam/sdk/browser", replacement: sdkBrowserEntry },
+      { find: "@mcpjam/sdk", replacement: sdkIndexEntry },
+    ],
   },
 });

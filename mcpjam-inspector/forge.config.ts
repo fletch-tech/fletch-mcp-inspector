@@ -7,8 +7,7 @@ import { MakerDMG } from "@electron-forge/maker-dmg";
 import { VitePlugin } from "@electron-forge/plugin-vite";
 import { FusesPlugin } from "@electron-forge/plugin-fuses";
 import { FuseV1Options, FuseVersion } from "@electron/fuses";
-import { resolve, join } from "path";
-import { cpSync, existsSync } from "fs";
+import { resolve } from "path";
 
 const enableMacSigning = process.platform === "darwin";
 const macSignIdentity = process.env.MAC_CODESIGN_IDENTITY?.trim();
@@ -65,11 +64,25 @@ const config: ForgeConfig = {
     asar: {
       // Unpack native modules so they can be properly signed
       // This prevents the "different Team IDs" error on macOS
-      unpack: "**/*.node",
+      unpack: "*.node",
     },
     appBundleId: "com.mcpjam.inspector",
     appCategoryType: "public.app-category.developer-tools",
     executableName: "mcpjam-inspector",
+    // Writes CFBundleURLTypes into the macOS Info.plist so LaunchServices
+    // knows the bundle owns mcpjam://. macOS only routes a scheme to a
+    // bundle that declares it, and the plist can't be modified at runtime:
+    // the app.setAsDefaultProtocolClient("mcpjam") call in src/main.ts
+    // registers the scheme on Windows (via the registry), while Linux
+    // resolves the handler from the installed .desktop entry. Without this
+    // declaration the browser leg of desktop sign-in has nowhere to hand
+    // the OAuth callback back to.
+    protocols: [
+      {
+        name: "Fletch MCP Studio",
+        schemes: ["mcpjam"],
+      },
+    ],
     icon: "assets/icon",
     extraResource: [
       resolve(__dirname, "dist", "client"),
@@ -78,21 +91,6 @@ const config: ForgeConfig = {
     ],
     osxSign: osxSignOptions,
     osxNotarize: osxNotarizeOptions,
-    // Copy @ngrok native module before signing (afterCopy runs before osxSign)
-    afterCopy: [
-      (buildPath, _electronVersion, _platform, _arch, callback) => {
-        const ngrokSrc = resolve(__dirname, "node_modules", "@ngrok");
-        if (!existsSync(ngrokSrc)) {
-          console.warn("[forge] @ngrok not found, skipping copy");
-          callback();
-          return;
-        }
-        const dest = join(buildPath, "node_modules", "@ngrok");
-        console.log(`[forge] Copying @ngrok to ${dest} (before signing)`);
-        cpSync(ngrokSrc, dest, { recursive: true });
-        callback();
-      },
-    ],
   },
   rebuildConfig: {},
   makers: [

@@ -1,0 +1,252 @@
+export type Environment =
+  | "prod"
+  | "staging"
+  | "preview"
+  | "dev"
+  | "local"
+  | "test";
+
+export type AuthType = "signedIn" | "guest" | "system" | "unknown";
+
+export type ProjectRole =
+  | "owner"
+  | "admin"
+  | "member"
+  | "guest"
+  | "editor"
+  | "chat";
+
+export type AccessLevel = "project_member" | "shared_chat";
+export type Surface = "preview" | "share_link";
+export type ServerTransport = "stdio" | "http";
+
+interface CommonLogContext {
+  event: LogEventName;
+  timestamp: string;
+  environment: Environment;
+  release: string | null;
+  component: string;
+  durationMs?: number;
+
+  authType: AuthType;
+  userId?: string | null;
+  userExternalId?: string | null;
+  guestExternalId?: string | null;
+  emailDomain?: string | null;
+  orgId?: string | null;
+  orgPlan?: string | null;
+  orgSeatQuantity?: number | null;
+  orgCreatedBy?: string | null;
+  projectId?: string | null;
+  projectRole?: ProjectRole | null;
+  accessLevel?: AccessLevel | null;
+  serverId?: string | null;
+  sessionId?: string | null;
+  chatboxId?: string | null;
+  surface?: Surface | null;
+  serverTransport?: ServerTransport | null;
+  statusCode?: number | null;
+}
+
+export interface RequestLogContext extends CommonLogContext {
+  requestId: string;
+  route: string;
+  method: string;
+}
+
+export interface SystemLogContext extends CommonLogContext {
+  requestId: null;
+  route: null;
+  method: null;
+  authType: "system" | "unknown";
+}
+
+export type BaseLogContext = RequestLogContext | SystemLogContext;
+
+export type RequestEventMap = {
+  "http.request.completed": { statusCode: number };
+  /**
+   * `errorCode` is the route's own `ErrorCode` (SERVER_UNREACHABLE, TIMEOUT, …)
+   * whenever one is known, and only falls back to a `classifyError` bucket for
+   * genuinely uncaught throws. `errorMessage` carries the scrubbed text —
+   * without it a 5xx is only ever "something failed", which is what made the
+   * hosted connect 502s undiagnosable.
+   */
+  "http.request.failed": {
+    statusCode: number;
+    errorCode: string;
+    errorMessage?: string;
+  };
+  "http.stream.opened": { statusCode: number };
+  "http.stream.closed": { statusCode: number; durationMs: number };
+  "mcp.oauth.proxy.failed": {
+    targetUrlHost: string;
+    oauthPhase: "metadata" | "proxy" | "token";
+    errorCode: string;
+    statusCode?: number;
+  };
+  "tunnel.created": {
+    tunnelKind: "shared" | "server";
+    tunnelDomain: string;
+    existed: boolean;
+    credentialIdPresent?: boolean;
+  };
+  "tunnel.creation_failed": {
+    tunnelKind: "shared" | "server";
+    errorCode: string;
+    credentialIdPresent?: boolean;
+    tunnelDomain?: string;
+  };
+  "tunnel.record_failed": {
+    tunnelKind: "shared" | "server";
+    tunnelDomain?: string;
+    errorCode: string;
+  };
+  "tunnel.rotated": {
+    tunnelKind: "shared" | "server";
+    tunnelDomain?: string;
+    full?: boolean;
+  };
+  "tunnel.rotation_failed": {
+    tunnelKind: "shared" | "server";
+    errorCode: string;
+    tunnelDomain?: string;
+  };
+  // One event per JSON-RPC request arriving through an active tunnel
+  // (never for local UI calls). `path` is scrubbed of bearer secrets by
+  // the request logger's URL scrubbing before emission.
+  "tunnel.request": {
+    tunnelKind: "shared" | "server";
+    rpcMethod?: string;
+    path: string;
+  };
+  "chat.session.persist.failed": {
+    failureKind: "timeout" | "http_error" | "exception" | "version_conflict";
+    statusCode?: number;
+    sourceType?: "chatbox" | "direct" | "eval" | "swarm";
+    // Product-surface discriminator carried alongside sourceType so PostHog
+    // can pivot persist failures by surface without rejoining to chatSessions.
+    origin?: "playground" | "mcpjam_agent" | "chatbox" | "eval" | "swarm";
+  };
+  "widget.resource.served": {
+    widgetType: "mcp_apps" | "chatgpt_apps";
+    resourceUri: string;
+    cspMode: "permissive" | "widget-declared";
+    mimeTypeValid?: boolean;
+    /**
+     * Whether the inspector injected the OpenAI Apps SDK
+     * `window.openai` shim into the served HTML. Helps audit
+     * which hosts are flipping the compat flag in practice.
+     */
+    injectedOpenAiCompat?: boolean;
+  };
+  "widget.resource.failed": {
+    widgetType: "mcp_apps" | "chatgpt_apps";
+    resourceUri?: string;
+    cspMode?: "permissive" | "widget-declared";
+    errorCode: string;
+  };
+  "mcp.tool.execution.failed": {
+    toolName: string;
+    serverId?: string;
+    errorCode: string;
+  };
+  // Project Computers terminal bridge (routes/web/computer-terminal.ts): the
+  // PTY could not be brought up after a successful token handshake (sandbox
+  // resume failed, envd unreachable, PTY create error, ...).
+  "computer.terminal.pty_open_failed": {
+    computerId: string;
+    errorCode: string;
+  };
+  // Swarm AI generation (routes/web/swarm-generate.ts): the backend
+  // /swarms/* endpoint answered with a server error. The upstream message is
+  // deliberately NOT forwarded to the caller (it carries the deployment URL),
+  // so this event is the only record of what the backend actually said.
+  "swarm.generation.upstream_failed": {
+    statusCode: number;
+    errorCode: string;
+  };
+};
+
+export type SystemEventMap = {
+  "mcp.connection.closed_with_pending_requests": { errorCode: string };
+  /**
+   * Auto-negotiation outcome, one line per connection attempt. Carries the
+   * full dimension set — configured mode + negotiated era + transport +
+   * surface + outcome + failure class — and no request payloads.
+   * Low-cardinality by construction.
+   */
+  "mcp.connection.negotiated": {
+    surface: string;
+    serverId: string;
+    transport: "http" | "stdio";
+    configuredMode: "auto" | "modern-pin" | "legacy";
+    outcome: "connected" | "failed";
+    negotiatedEra?: "legacy" | "modern";
+    negotiatedProtocolVersion?: string;
+    failureClass?: string;
+  };
+  "process.unhandled_rejection": { errorCode: string };
+  // Aggregated PostHog relay proxy counters, one line per flush interval
+  // (see routes/relay.ts). Low-cardinality by construction; never emitted
+  // per-request.
+  "relay.stats": {
+    requests: number;
+    res2xx: number;
+    res3xx: number;
+    res4xx: number;
+    res5xx: number;
+    upstream4xx: number;
+    upstream5xx: number;
+    timeouts: number;
+    upstreamErrors: number;
+    bodyLimitRejects: number;
+    rateLimitRejects: number;
+    latencyP50Ms: number;
+    latencyP95Ms: number;
+  };
+};
+
+export type LogEventName = keyof RequestEventMap | keyof SystemEventMap;
+
+export type RequestEventPayload<E extends keyof RequestEventMap> =
+  RequestLogContext & { event: E } & RequestEventMap[E];
+
+export type SystemEventPayload<E extends keyof SystemEventMap> =
+  SystemLogContext & { event: E } & SystemEventMap[E];
+
+// Resolve ENVIRONMENT per call (no module-level cache) so changes to
+// process.env in tests or after a config reload take effect on the next emit.
+// The "missing in production" warning still fires only once via warnedMissingEnv.
+let warnedMissingEnv = false;
+
+const ALLOWED_ENVIRONMENTS: Environment[] = [
+  "prod",
+  "staging",
+  "preview",
+  "dev",
+  "local",
+  "test",
+];
+
+export function resolveEnvironment(): Environment {
+  const fromEnv = process.env.ENVIRONMENT;
+  if (fromEnv && ALLOWED_ENVIRONMENTS.includes(fromEnv as Environment)) {
+    return fromEnv as Environment;
+  }
+  if (process.env.NODE_ENV === "test") return "test";
+  if (process.env.NODE_ENV === "production") {
+    if (!warnedMissingEnv) {
+      warnedMissingEnv = true;
+      process.stderr.write(
+        "[logging] ENVIRONMENT not set in production; defaulting to 'prod'\n"
+      );
+    }
+    return "prod";
+  }
+  return "dev";
+}
+
+export function resolveRelease(): string | null {
+  return process.env.RAILWAY_GIT_COMMIT_SHA ?? process.env.GIT_SHA ?? null;
+}

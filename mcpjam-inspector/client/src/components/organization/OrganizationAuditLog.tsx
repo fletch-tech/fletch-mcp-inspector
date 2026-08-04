@@ -1,5 +1,5 @@
 import { Download, Loader2, RefreshCw } from "lucide-react";
-import { Button } from "@/components/ui/button";
+import { Button } from "@mcpjam/design-system/button";
 import {
   type AuditEvent,
   useOrganizationAudit,
@@ -78,7 +78,7 @@ function buildCsvRows(events: AuditEvent[]) {
     "target_type",
     "target_id",
     "organization_id",
-    "workspace_id",
+    "project_id",
     "metadata_json",
   ];
 
@@ -90,7 +90,7 @@ function buildCsvRows(events: AuditEvent[]) {
     event.targetType,
     event.targetId,
     event.organizationId ?? "",
-    event.workspaceId ?? "",
+    event.projectId ?? "",
     safeStringify(event.metadata),
   ]);
 

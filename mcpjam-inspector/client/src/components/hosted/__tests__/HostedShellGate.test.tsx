@@ -31,14 +31,29 @@ describe("HostedShellGate", () => {
     );
   });
 
-  it("shows workspace loading copy", () => {
+  it("shows project loading copy", () => {
     render(
-      <HostedShellGate state="workspace-loading">
+      <HostedShellGate state="project-loading">
         <div>App Content</div>
       </HostedShellGate>,
     );
 
-    expect(screen.getByText("Preparing workspace...")).toBeInTheDocument();
+    expect(screen.getByText("Preparing project...")).toBeInTheDocument();
+  });
+
+  it("shows custom project loading copy", () => {
+    render(
+      <HostedShellGate
+        state="project-loading"
+        loadingMessage="Finishing OAuth sign-in for demo-server..."
+      >
+        <div>App Content</div>
+      </HostedShellGate>,
+    );
+
+    expect(
+      screen.getByText("Finishing OAuth sign-in for demo-server..."),
+    ).toBeInTheDocument();
   });
 
   it("shows sign in call-to-action when logged out", () => {
@@ -56,5 +71,21 @@ describe("HostedShellGate", () => {
     expect(screen.getByRole("img", { name: "MCPJam" })).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Sign in" }));
     expect(onSignIn).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows employee-only gate copy when restricted", () => {
+    const onSignOut = vi.fn();
+
+    render(
+      <HostedShellGate state="restricted" onSignOut={onSignOut}>
+        <div>App Content</div>
+      </HostedShellGate>,
+    );
+
+    expect(
+      screen.getByText("This environment is limited to MCPJam employees."),
+    ).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Use another account" }));
+    expect(onSignOut).toHaveBeenCalledTimes(1);
   });
 });

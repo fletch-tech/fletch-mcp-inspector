@@ -1,7 +1,12 @@
 import { authFetch } from "@/lib/session-token";
 import { HOSTED_MODE } from "@/lib/config";
-import { buildHostedServerRequest } from "@/lib/apis/web/context";
+import { buildServerRequest } from "@/lib/apis/web/context";
+import {
+  MCPJAM_AGENT_WIDGET_CONTENT_PATH,
+  MCPJAM_PLATFORM_SERVER_ID,
+} from "@/shared/mcpjam-agent-widgets.js";
 import type { CspMode } from "@/stores/ui-playground-store";
+import type { ResolvedOpenAiAppsCapabilities } from "@/lib/client-styles";
 import type {
   McpUiResourceCsp,
   McpUiResourcePermissions,
@@ -12,13 +17,50 @@ export interface FetchMcpAppsWidgetContentRequest {
   resourceUri: string;
   toolInput: Record<string, unknown> | undefined;
   toolOutput: unknown;
+  /**
+   * Tool response `_meta`. Flows through to
+   * `window.openai.toolResponseMetadata` in the widget. Read from
+   * `rawOutput._meta` at the renderer layer; pass null when absent.
+   */
+  toolResponseMetadata?: Record<string, unknown> | null;
+  /**
+   * Persisted widget state from a saved view or fork. When set, the
+   * compat runtime seeds `window.openai.widgetState` so the widget
+   * boots in the previously-saved state instead of fresh defaults.
+   */
+  initialWidgetState?: unknown;
   toolId: string;
   toolName: string;
   theme: string;
   cspMode: CspMode;
+  /**
+   * Resolved compat-runtime flag — when true the server injects the
+   * OpenAI Apps SDK `window.openai` shim into the widget HTML. Caller
+   * must compute this from the active host config via
+   * `resolveEffectiveCompatRuntime` so the wire body and the renderer's
+   * reload-key state agree on what's about to be rendered.
+   */
+  injectOpenAiCompat: boolean;
+  /**
+   * Resolved per-method `window.openai.*` capability surface. Sent
+   * alongside `injectOpenAiCompat: true` so the server can pass the
+   * full capability record into `injectOpenAICompat` and disabled
+   * methods are omitted from the runtime — widgets feature-detecting on
+   * (e.g.) `window.openai.requestModal` see `undefined` and take their
+   * fallback path. Omit when `injectOpenAiCompat` is false. Capability
+   * resolution stays client-side (the local server doesn't own the
+   * active hostConfig); the server passes the value through verbatim.
+   */
+  openAiCompatCapabilities?: ResolvedOpenAiAppsCapabilities;
   template?: string;
   viewMode?: string;
   viewParams?: Record<string, unknown>;
+  /**
+   * Route through /api/web even on local builds. Set from
+   * `useWebManagedServers()` by chatbox-runtime renderers whose serverId
+   * is a Convex id the local /api/apps pool can't resolve.
+   */
+  forceWebEndpoint?: boolean;
 }
 
 export interface FetchMcpAppsWidgetContentResponse {
@@ -29,18 +71,48 @@ export interface FetchMcpAppsWidgetContentResponse {
   mimeTypeWarning?: string;
   mimeTypeValid?: boolean;
   prefersBorder?: boolean;
+  /**
+   * Server-confirmed compat-runtime flag — echoes what the route
+   * decided after applying its `injectOpenAiCompat === true` gate.
+   * Caller can persist this alongside cached HTML to remove ambiguity
+   * when replaying the snapshot under a different host config.
+   */
+  injectedOpenAiCompat?: boolean;
+  /**
+   * Server-confirmed per-method capability surface — echoes the
+   * resolved capabilities the route used to build the runtime config.
+   * Caller persists this alongside the snapshot HTML so replay can
+   * answer "which `window.openai.*` surface was injected", not just
+   * "shim was injected: yes/no". Absent when the shim wasn't injected
+   * or when the caller didn't supply capabilities (legacy path).
+   */
+  injectedOpenAiCompatCapabilities?: ResolvedOpenAiAppsCapabilities;
 }
 
 export async function fetchMcpAppsWidgetContent(
-  request: FetchMcpAppsWidgetContentRequest,
+  request: FetchMcpAppsWidgetContentRequest
 ): Promise<FetchMcpAppsWidgetContentResponse> {
-  const endpoint = HOSTED_MODE
+  const useWebEndpoint = HOSTED_MODE || request.forceWebEndpoint === true;
+
+  // The MCPJam agent's platform MCP server (mcp.mcpjam.com) is connected
+  // under a synthetic id with no Convex registration, so the general web
+  // endpoint's `buildServerRequest` resolution would throw. The agent's
+  // companion endpoint reads the `ui://` resource from that server instead.
+  const isAgentPlatformServer = request.serverId === MCPJAM_PLATFORM_SERVER_ID;
+
+  // Server-id-first: the synthetic id has exactly one endpoint that can
+  // serve it, regardless of hosted mode — the local endpoint's MCP pool
+  // could never resolve it.
+  const endpoint = isAgentPlatformServer
+    ? MCPJAM_AGENT_WIDGET_CONTENT_PATH
+    : useWebEndpoint
     ? "/api/web/apps/mcp-apps/widget-content"
     : "/api/apps/mcp-apps/widget-content";
 
-  const payload = HOSTED_MODE
-    ? { ...buildHostedServerRequest(request.serverId) }
-    : { serverId: request.serverId };
+  const payload =
+    useWebEndpoint && !isAgentPlatformServer
+      ? { ...buildServerRequest(request.serverId) }
+      : { serverId: request.serverId };
 
   const response = await authFetch(endpoint, {
     method: "POST",
@@ -50,10 +122,14 @@ export async function fetchMcpAppsWidgetContent(
       resourceUri: request.resourceUri,
       toolInput: request.toolInput,
       toolOutput: request.toolOutput,
+      toolResponseMetadata: request.toolResponseMetadata ?? null,
+      initialWidgetState: request.initialWidgetState ?? null,
       toolId: request.toolId,
       toolName: request.toolName,
       theme: request.theme,
       cspMode: request.cspMode,
+      injectOpenAiCompat: request.injectOpenAiCompat,
+      openAiCompatCapabilities: request.openAiCompatCapabilities,
       template: request.template,
       viewMode: request.viewMode,
       viewParams: request.viewParams,
@@ -68,7 +144,7 @@ export async function fetchMcpAppsWidgetContent(
     throw new Error(
       errorData.message ||
         errorData.error ||
-        `Failed to fetch widget: ${response.statusText}`,
+        `Failed to fetch widget: ${response.statusText}`
     );
   }
 

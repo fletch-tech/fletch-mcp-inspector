@@ -10,14 +10,17 @@ vi.mock("lucide-react", () => {
     Check: s,
     ChevronDown: s,
     Database: s,
-    Layers: s,
     Loader2: s,
     Maximize2: s,
     MessageCircle: s,
+    Pencil: s,
     PictureInPicture2: s,
+    Play: s,
+    RotateCcw: s,
     Shield: s,
     ShieldCheck: s,
     ShieldX: s,
+    Terminal: s,
     X: s,
   };
 });
@@ -47,23 +50,29 @@ vi.mock("@/lib/mcp-ui/mcp-apps-utils", () => ({
   UIType: { MCP_APPS: "mcp-apps", OPENAI_SDK: "openai-apps" },
 }));
 
-vi.mock("@/components/ui/tooltip", () => ({
+vi.mock("@mcpjam/design-system/tooltip", () => ({
   Tooltip: ({ children }: any) => <>{children}</>,
   TooltipTrigger: ({ children }: any) => <>{children}</>,
   TooltipContent: ({ children }: any) => <span>{children}</span>,
 }));
 
-vi.mock("@/components/ui/badge", () => ({
+vi.mock("@mcpjam/design-system/badge", () => ({
   Badge: ({ children, ...props }: any) => <span {...props}>{children}</span>,
 }));
 
-vi.mock("../../csp-debug-panel", () => ({
-  CspDebugPanel: () => null,
+vi.mock("../../sandbox-debug-panel", () => ({
+  SandboxDebugPanel: () => null,
 }));
 
 vi.mock("@/components/ui/json-editor", () => ({
   JsonEditor: ({ value }: any) => (
     <pre data-testid="json-editor">{JSON.stringify(value)}</pre>
+  ),
+}));
+
+vi.mock("../text-part", () => ({
+  TextPart: ({ text }: { text: string }) => (
+    <div data-testid="text-part">{text}</div>
   ),
 }));
 
@@ -87,39 +96,103 @@ describe("ToolPart approval expansion", () => {
     window.location.hash = "";
   });
 
-  it("auto-expands once approval is requested after mount", async () => {
+  it("renders the approval pill when approval is requested", async () => {
     const { rerender } = render(
-      <ToolPart part={basePart as any} uiType="mcp-apps" />,
+      <ToolPart part={basePart as any} uiType="mcp-apps" />
     );
 
     expect(getHeaderButton()).toHaveAttribute("aria-expanded", "false");
+    expect(
+      screen.queryByRole("button", { name: /^approve$/i })
+    ).not.toBeInTheDocument();
 
     rerender(
       <ToolPart
         part={{ ...basePart, state: "approval-requested" } as any}
         uiType="mcp-apps"
         approvalId="approval-1"
-      />,
+      />
     );
 
     await waitFor(() => {
-      expect(getHeaderButton()).toHaveAttribute("aria-expanded", "true");
+      expect(
+        screen.getByRole("button", { name: /^approve$/i })
+      ).toBeInTheDocument();
     });
+    expect(screen.getByRole("button", { name: /^deny$/i })).toBeInTheDocument();
   });
 
-  it("collapses after approval resolves", async () => {
+  it("returns to a collapsed card after approval resolves", async () => {
     const user = userEvent.setup();
     const { rerender } = render(
       <ToolPart
         part={{ ...basePart, state: "approval-requested" } as any}
         uiType="mcp-apps"
         approvalId="approval-1"
+      />
+    );
+
+    const approveButton = await screen.findByRole("button", {
+      name: /^approve$/i,
+    });
+    await user.click(approveButton);
+
+    rerender(<ToolPart part={basePart as any} uiType="mcp-apps" />);
+
+    await waitFor(() => {
+      expect(getHeaderButton()).toHaveAttribute("aria-expanded", "false");
+    });
+    expect(
+      screen.queryByRole("button", { name: /^approve$/i })
+    ).not.toBeInTheDocument();
+  });
+
+  it("shows an Edit control when inline edit is allowed", () => {
+    render(<ToolPart part={basePart as any} uiType="mcp-apps" allowInlineEdit />);
+
+    expect(
+      screen.getByRole("button", { name: /edit input and output/i }),
+    ).toBeInTheDocument();
+  });
+
+  it("toggles edit mode via onToggleEdit when the Edit control is clicked", async () => {
+    const user = userEvent.setup();
+    const onToggleEdit = vi.fn();
+
+    render(
+      <ToolPart
+        part={basePart as any}
+        uiType="mcp-apps"
+        allowInlineEdit
+        onToggleEdit={onToggleEdit}
       />,
     );
 
-    await waitFor(() => {
-      expect(getHeaderButton()).toHaveAttribute("aria-expanded", "true");
-    });
+    await user.click(
+      screen.getByRole("button", { name: /edit input and output/i }),
+    );
+
+    expect(onToggleEdit).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps attached readable output collapsed until the header is clicked", async () => {
+    const user = userEvent.setup();
+
+    render(
+      <ToolPart
+        part={
+          {
+            ...basePart,
+            traceDisplayText: "# Excalidraw Element Format",
+            traceDisplayMode: "markdown",
+          } as any
+        }
+        uiType="mcp-apps"
+      />
+    );
+
+    expect(screen.queryByTestId("text-part")).not.toBeInTheDocument();
+    expect(getHeaderButton()).toHaveAttribute("aria-expanded", "false");
 
     const headerButton = getHeaderButton();
     expect(headerButton).toBeTruthy();
@@ -127,76 +200,318 @@ describe("ToolPart approval expansion", () => {
       await user.click(headerButton);
     }
 
-    await user.click(screen.getByRole("button", { name: /^approve$/i }));
+    expect(getHeaderButton()).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByTestId("text-part")).toHaveTextContent(
+      "# Excalidraw Element Format"
+    );
 
-    rerender(<ToolPart part={basePart as any} uiType="mcp-apps" />);
+    if (headerButton) {
+      await user.click(headerButton);
+    }
 
-    await waitFor(() => {
-      expect(getHeaderButton()).toHaveAttribute("aria-expanded", "false");
-    });
+    expect(getHeaderButton()).toHaveAttribute("aria-expanded", "false");
+    expect(screen.queryByTestId("text-part")).not.toBeInTheDocument();
   });
 
-  it("shows one-time save hint before save view is used", () => {
+  it("renders MCP image tool results inline by default", async () => {
+    const user = userEvent.setup();
+    const output = {
+      content: [{ type: "image", data: "aGVsbG8=", mimeType: "image/png" }],
+    };
+
     render(
       <ToolPart
-        part={basePart as any}
+        part={
+          {
+            ...basePart,
+            input: undefined,
+            output,
+          } as any
+        }
         uiType="mcp-apps"
-        onSaveView={() => {}}
-        canSaveView
-      />,
+      />
     );
 
-    expect(screen.getByText("Like how it looks? Save it.")).toBeInTheDocument();
+    const image = await screen.findByRole("img", {
+      name: "Tool result image 1",
+    });
+    expect(image).toHaveAttribute("src", "data:image/png;base64,aGVsbG8=");
+    expect(
+      screen.queryByRole("radio", { name: "Images" })
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("radio", { name: "Raw" })
+    ).not.toBeInTheDocument();
+    expect(screen.queryByTestId("json-editor")).not.toBeInTheDocument();
+
+    const headerButton = getHeaderButton();
+    expect(headerButton).toBeTruthy();
+    if (headerButton) {
+      await user.click(headerButton);
+    }
+
+    expect(screen.getByTestId("json-editor")).toHaveTextContent(
+      JSON.stringify(output)
+    );
   });
 
-  it("marks save button as used and redirects to Views once after first successful save", async () => {
+  it("renders MCP image tool results in the expanded panel when configured", async () => {
+    const user = userEvent.setup();
+    const output = {
+      content: [{ type: "image", data: "aGVsbG8=", mimeType: "image/png" }],
+    };
+
+    render(
+      <ToolPart
+        part={
+          {
+            ...basePart,
+            input: undefined,
+            output,
+          } as any
+        }
+        uiType="mcp-apps"
+        mcpToolResultImageRendering={{ placement: "collapsed" }}
+      />
+    );
+
+    expect(screen.queryByRole("img")).not.toBeInTheDocument();
+
+    const headerButton = getHeaderButton();
+    expect(headerButton).toBeTruthy();
+    if (headerButton) {
+      await user.click(headerButton);
+    }
+
+    const image = await screen.findByRole("img", {
+      name: "Tool result image 1",
+    });
+    expect(image).toHaveAttribute("src", "data:image/png;base64,aGVsbG8=");
+    expect(screen.queryByTestId("json-editor")).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("radio", { name: "Raw" }));
+
+    expect(screen.getByTestId("json-editor")).toHaveTextContent(
+      JSON.stringify(output)
+    );
+  });
+
+  it("renders raw embedded MCP image resources in the expanded panel even when part output is absent", async () => {
+    const user = userEvent.setup();
+    const rawEmbeddedResult = {
+      content: [
+        {
+          type: "resource",
+          resource: {
+            uri: "example://embedded-image.png",
+            blob: "aGVsbG8=",
+            mimeType: "image/png",
+          },
+        },
+      ],
+    };
+
+    render(
+      <ToolPart
+        part={
+          {
+            ...basePart,
+            input: undefined,
+            output: undefined,
+          } as any
+        }
+        rawOutput={rawEmbeddedResult}
+        uiType="mcp-apps"
+        mcpToolResultImageRendering={{ placement: "collapsed" }}
+      />
+    );
+
+    expect(screen.queryByRole("img")).not.toBeInTheDocument();
+
+    const headerButton = getHeaderButton();
+    expect(headerButton).toBeTruthy();
+    if (headerButton) {
+      await user.click(headerButton);
+    }
+
+    const image = await screen.findByRole("img", {
+      name: "Tool result image 1",
+    });
+    expect(image).toHaveAttribute("src", "data:image/png;base64,aGVsbG8=");
+
+    await user.click(screen.getByRole("radio", { name: "Raw" }));
+
+    expect(screen.getByTestId("json-editor")).toHaveTextContent(
+      JSON.stringify(rawEmbeddedResult)
+    );
+  });
+
+  it("keeps MCP image tool results raw when rendering is disabled", async () => {
+    const user = userEvent.setup();
+    const output = {
+      content: [{ type: "image", data: "aGVsbG8=", mimeType: "image/png" }],
+    };
+
+    render(
+      <ToolPart
+        part={
+          {
+            ...basePart,
+            input: undefined,
+            output,
+          } as any
+        }
+        uiType="mcp-apps"
+        mcpToolResultImageRendering={{ placement: "none" }}
+      />
+    );
+
+    expect(screen.queryByRole("img")).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("radio", { name: "Images" })
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("radio", { name: "Raw" })
+    ).not.toBeInTheDocument();
+
+    const headerButton = getHeaderButton();
+    expect(headerButton).toBeTruthy();
+    if (headerButton) {
+      await user.click(headerButton);
+    }
+
+    expect(screen.getByTestId("json-editor")).toHaveTextContent(
+      JSON.stringify(output)
+    );
+  });
+
+  it("does not render generic media when the raw MCP source shape is disabled", async () => {
+    const modelOutput = {
+      type: "content",
+      value: [{ type: "media", data: "aGVsbG8=", mediaType: "image/png" }],
+    };
+    const rawEmbeddedResult = {
+      content: [
+        {
+          type: "resource",
+          resource: {
+            uri: "example://embedded-image.png",
+            blob: "aGVsbG8=",
+            mimeType: "image/png",
+          },
+        },
+      ],
+    };
+
+    render(
+      <ToolPart
+        part={
+          {
+            ...basePart,
+            input: undefined,
+            output: modelOutput,
+          } as any
+        }
+        rawOutput={rawEmbeddedResult}
+        uiType="mcp-apps"
+        mcpToolResultImageRendering={{
+          placement: "inline",
+          directContent: { image: true },
+          embeddedResources: { blob: { image: false } },
+          linkedResources: { blob: { image: true } },
+        }}
+      />
+    );
+
+    await waitFor(() => {
+      expect(screen.queryByRole("img")).not.toBeInTheDocument();
+    });
+  });
+
+  it("does not render model-visible media without a raw MCP source shape", async () => {
+    const modelOutput = {
+      type: "content",
+      value: [{ type: "media", data: "aGVsbG8=", mediaType: "image/png" }],
+    };
+
+    render(
+      <ToolPart
+        part={
+          {
+            ...basePart,
+            input: undefined,
+            output: modelOutput,
+          } as any
+        }
+        uiType="mcp-apps"
+        mcpToolResultImageRendering={{
+          placement: "inline",
+          directContent: { image: true },
+          embeddedResources: { blob: { image: true } },
+          linkedResources: { blob: { image: true } },
+        }}
+      />
+    );
+
+    await waitFor(() => {
+      expect(screen.queryByRole("img")).not.toBeInTheDocument();
+    });
+  });
+
+  it("reuses attached readable output instead of rendering a duplicate result json block", async () => {
     const user = userEvent.setup();
 
-    const onSaveView = vi.fn().mockResolvedValue(undefined);
-    const { rerender } = render(
+    render(
       <ToolPart
-        part={basePart as any}
+        part={
+          {
+            ...basePart,
+            input: { prompt: "read me" },
+            output: { type: "json", value: { ignored: true } },
+            traceDisplayText: "Readable output",
+            traceDisplayMode: "markdown",
+          } as any
+        }
         uiType="mcp-apps"
-        onSaveView={onSaveView}
-        canSaveView
-      />,
+      />
     );
 
-    const saveButton = screen
-      .getAllByRole("button")
-      .find((button) => button.getAttribute("aria-expanded") === null);
-    expect(saveButton).toBeTruthy();
-    if (saveButton) {
-      await user.click(saveButton);
+    const headerButton = getHeaderButton();
+    expect(headerButton).toBeTruthy();
+    if (headerButton) {
+      await user.click(headerButton);
     }
 
-    await waitFor(() => {
-      expect(onSaveView).toHaveBeenCalledTimes(1);
-    });
-    expect(localStorage.getItem("mcpjam-save-view-button-used")).toBe("true");
-    expect(window.location.hash).toBe("#views");
+    expect(screen.getByTestId("text-part")).toHaveTextContent(
+      "Readable output"
+    );
+    expect(screen.getAllByTestId("json-editor")).toHaveLength(1);
+  });
 
-    window.location.hash = "#chat-v2";
-    rerender(
+  it("does not expand attached readable output in minimal mode", async () => {
+    const user = userEvent.setup();
+
+    render(
       <ToolPart
-        part={basePart as any}
+        part={
+          {
+            ...basePart,
+            traceDisplayText: "Readable output",
+            traceDisplayMode: "markdown",
+          } as any
+        }
         uiType="mcp-apps"
-        onSaveView={onSaveView}
-        canSaveView
-      />,
+        minimalMode
+      />
     );
 
-    const saveButtonAgain = screen
-      .getAllByRole("button")
-      .find((button) => button.getAttribute("aria-expanded") === null);
-    expect(saveButtonAgain).toBeTruthy();
-    if (saveButtonAgain) {
-      await user.click(saveButtonAgain);
+    const headerButton = getHeaderButton();
+    expect(headerButton).toBeTruthy();
+    if (headerButton) {
+      await user.click(headerButton);
     }
 
-    await waitFor(() => {
-      expect(onSaveView).toHaveBeenCalledTimes(2);
-    });
-    expect(window.location.hash).toBe("#chat-v2");
+    expect(getHeaderButton()).toHaveAttribute("aria-expanded", "false");
+    expect(screen.queryByTestId("text-part")).not.toBeInTheDocument();
   });
 });

@@ -1,100 +1,51 @@
-import { useMemo, useState } from "react";
-import { X, ChevronDown, ChevronRight, Loader2 } from "lucide-react";
-import { Button } from "@/components/ui/button";
-import { Label } from "@/components/ui/label";
-import { AccuracyChart } from "./accuracy-chart";
-import {
-  ChartContainer,
-  ChartTooltip,
-  ChartTooltipContent,
-} from "@/components/ui/chart";
-import { Bar, BarChart, CartesianGrid, XAxis, YAxis } from "recharts";
+import { useMemo } from "react";
+import { Code2, Loader2, X } from "lucide-react";
+import { Button } from "@mcpjam/design-system/button";
 import { computeIterationResult } from "./pass-criteria";
-import { getIterationBorderColor, formatRunId } from "./helpers";
-import { IterationDetails } from "./iteration-details";
+import { pickLatestCompletedRun } from "./helpers";
+import { useRunInsights } from "./use-run-insights";
+import { findRunInsightForCase } from "./run-insight-helpers";
+import { TestCaseIterationsTable } from "./test-case-iterations-table";
 import type { EvalCase, EvalIteration, EvalSuiteRun } from "./types";
 
 interface TestCaseDetailViewProps {
   testCase: EvalCase;
   iterations: EvalIteration[];
-  runs: EvalSuiteRun[];
   onBack: () => void;
   onViewRun?: (runId: string) => void;
   serverNames?: string[];
+  suiteName?: string;
+  onNavigateToSuite?: () => void;
+  runs?: EvalSuiteRun[];
+  onOpenExportCase?: () => void;
 }
 
 export function TestCaseDetailView({
   testCase,
   iterations,
-  runs,
   onBack,
   onViewRun,
   serverNames = [],
+  suiteName,
+  onNavigateToSuite,
+  runs = [],
+  onOpenExportCase,
 }: TestCaseDetailViewProps) {
-  const [openIterationId, setOpenIterationId] = useState<string | null>(null);
+  const latestCompletedRun = useMemo(
+    () => pickLatestCompletedRun(runs),
+    [runs],
+  );
 
-  // Filter out iterations from inactive runs
-  const activeIterations = useMemo(() => {
-    const inactiveRunIds = new Set(
-      runs.filter((run) => run.isActive === false).map((run) => run._id),
-    );
-    return iterations.filter(
-      (iter) => !iter.suiteRunId || !inactiveRunIds.has(iter.suiteRunId),
-    );
-  }, [iterations, runs]);
+  useRunInsights(latestCompletedRun, { autoRequest: true });
 
-  // Performance trend data
-  const trendData = useMemo(() => {
-    const iterationsByRun = new Map<string, EvalIteration[]>();
-    activeIterations.forEach((iteration) => {
-      if (iteration.suiteRunId) {
-        if (!iterationsByRun.has(iteration.suiteRunId)) {
-          iterationsByRun.set(iteration.suiteRunId, []);
-        }
-        iterationsByRun.get(iteration.suiteRunId)!.push(iteration);
-      }
-    });
-
-    const data: Array<{
-      runId: string;
-      runIdDisplay: string;
-      passRate: number;
-      label: string;
-    }> = [];
-
-    runs.forEach((run) => {
-      // Skip inactive runs
-      if (run.isActive === false) return;
-
-      const runIters = iterationsByRun.get(run._id);
-      if (runIters && runIters.length > 0) {
-        // Only count completed iterations - exclude pending/cancelled
-        const iterationResults = runIters.map((iter) =>
-          computeIterationResult(iter),
-        );
-        const passed = iterationResults.filter((r) => r === "passed").length;
-        const total = iterationResults.filter(
-          (r) => r === "passed" || r === "failed",
-        ).length;
-        const passRate = total > 0 ? Math.round((passed / total) * 100) : 0;
-
-        data.push({
-          runId: run._id,
-          runIdDisplay: run._id.slice(-6),
-          passRate,
-          label: new Date(run.completedAt ?? run.createdAt).toLocaleString(),
-        });
-      }
-    });
-
-    return data.sort((a, b) => {
-      const runA = runs.find((r) => r._id === a.runId);
-      const runB = runs.find((r) => r._id === b.runId);
-      const timeA = runA?.createdAt ?? 0;
-      const timeB = runB?.createdAt ?? 0;
-      return timeA - timeB;
-    });
-  }, [activeIterations, runs]);
+  const latestCaseInsight = useMemo(
+    () =>
+      findRunInsightForCase(latestCompletedRun, {
+        caseKey: testCase.caseKey,
+        testCaseId: testCase._id,
+      }),
+    [latestCompletedRun, testCase.caseKey, testCase._id],
+  );
 
   // Model breakdown
   const modelBreakdown = useMemo(() => {
@@ -109,14 +60,18 @@ export function TestCaseDetailView({
       }
     >();
 
-    activeIterations.forEach((iteration) => {
+    iterations.forEach((iteration) => {
       const snapshot = iteration.testCaseSnapshot;
       if (!snapshot) return;
 
-      // Only count completed iterations - exclude pending/cancelled
+      // Only count terminal pass/fail iterations - exclude pending/cancelled.
       const result = computeIterationResult(iteration);
-      if (result !== "passed" && result !== "failed") {
-        return; // Skip pending/cancelled iterations
+      if (
+        result !== "passed" &&
+        result !== "failed" &&
+        result !== "timed_out"
+      ) {
+        return;
       }
 
       const key = `${snapshot.provider}/${snapshot.model}`;
@@ -150,20 +105,61 @@ export function TestCaseDetailView({
         failed: stats.failed,
       }))
       .sort((a, b) => b.passRate - a.passRate);
-  }, [activeIterations]);
+  }, [iterations]);
 
-  const modelChartConfig = {
-    passRate: {
-      label: "Pass Rate",
-      color: "var(--chart-1)",
-    },
+  // Compute overall stats
+  const overallStats = useMemo(() => {
+    const results = iterations.map((i) => computeIterationResult(i));
+    const passed = results.filter((r) => r === "passed").length;
+    const failed = results.filter(
+      (r) => r === "failed" || r === "timed_out",
+    ).length;
+    const total = passed + failed;
+    const passRate = total > 0 ? Math.round((passed / total) * 100) : 0;
+
+    // Avg duration
+    const completed = iterations.filter(
+      (i) => i.startedAt && i.updatedAt && i.result !== "pending",
+    );
+    const avgDuration =
+      completed.length > 0
+        ? completed.reduce(
+            (sum, i) => sum + ((i.updatedAt ?? 0) - (i.startedAt ?? 0)),
+            0,
+          ) / completed.length
+        : 0;
+
+    return { passed, failed, total, passRate, avgDuration };
+  }, [iterations]);
+
+  const formatDurationHelper = (ms: number) => {
+    if (ms < 1000) return `${Math.round(ms)}ms`;
+    const s = Math.round(ms / 1000);
+    if (s < 60) return `${s}s`;
+    const m = Math.floor(s / 60);
+    const sec = s % 60;
+    return sec ? `${m}m ${sec}s` : `${m}m`;
   };
 
   return (
-    <div className="space-y-4">
-      {/* Header */}
-      <div className="flex items-center justify-between">
+    <div className="space-y-4 overflow-y-auto h-full p-0.5">
+      {/* Breadcrumb + Header */}
+      <div className="flex items-start justify-between gap-2">
         <div>
+          <div className="flex items-center gap-1.5 text-xs text-muted-foreground mb-1">
+            {suiteName && onNavigateToSuite && (
+              <>
+                <button
+                  onClick={onNavigateToSuite}
+                  className="hover:text-foreground hover:underline transition-colors cursor-pointer"
+                >
+                  {suiteName}
+                </button>
+                <span className="text-muted-foreground/50">/</span>
+              </>
+            )}
+            <span className="text-primary font-medium">Test Case</span>
+          </div>
           <h2 className="text-lg font-semibold">
             {testCase.title || "Untitled test case"}
           </h2>
@@ -173,252 +169,123 @@ export function TestCaseDetailView({
             </p>
           )}
         </div>
-        <Button variant="ghost" size="icon" onClick={onBack}>
-          <X className="h-4 w-4" />
-        </Button>
+        <div className="flex shrink-0 items-center gap-2">
+          {onOpenExportCase ? (
+            <Button variant="outline" size="sm" onClick={onOpenExportCase}>
+              <Code2 className="mr-2 h-4 w-4" />
+              Export
+            </Button>
+          ) : null}
+          <Button variant="ghost" size="icon" onClick={onBack}>
+            <X className="h-4 w-4" />
+          </Button>
+        </div>
       </div>
 
-      {/* Charts Side by Side */}
-      <div className="grid gap-4 lg:grid-cols-2">
-        {/* Performance Chart */}
-        {trendData.length > 0 && (
-          <div className="rounded-xl border bg-card text-card-foreground">
-            <div className="px-4 pt-3 pb-2">
-              <div className="text-xs font-medium text-muted-foreground">
-                Performance across runs
-              </div>
-            </div>
-            <div className="px-4 pb-4">
-              <AccuracyChart
-                data={trendData}
-                height="h-32"
-                showLabel={true}
-                onClick={onViewRun}
+      {latestCompletedRun ? (
+        <div className="rounded-lg border bg-card text-card-foreground p-3">
+          <h3 className="text-xs font-semibold text-muted-foreground mb-1.5">
+            Latest run insight
+          </h3>
+          {latestCompletedRun.runInsightsStatus === "pending" ? (
+            <span className="flex items-center gap-2 text-sm text-muted-foreground">
+              <Loader2 className="h-4 w-4 animate-spin shrink-0" />
+              Generating suite run insights…
+            </span>
+          ) : latestCompletedRun.runInsightsStatus === "failed" ? (
+            <p className="text-sm text-muted-foreground leading-relaxed">
+              Run insights did not complete. Open the latest completed run from
+              this suite to retry generation.
+            </p>
+          ) : latestCaseInsight ? (
+            <p className="text-sm leading-relaxed">
+              {latestCaseInsight.summary}
+            </p>
+          ) : (
+            <p className="text-sm text-muted-foreground leading-relaxed">
+              No notable change in the last two runs.
+            </p>
+          )}
+        </div>
+      ) : null}
+
+      {/* Hero Stats */}
+      {overallStats.total > 0 && (
+        <div className="rounded-xl border bg-card text-card-foreground p-4">
+          <div className="flex items-center gap-4">
+            <span className="text-2xl font-bold">{overallStats.passRate}%</span>
+            <span className="text-sm text-muted-foreground">Pass Rate</span>
+            <span className="text-muted-foreground/40">|</span>
+            <span className="text-xs text-muted-foreground">
+              {overallStats.total} iterations
+            </span>
+            <span className="text-muted-foreground/40">|</span>
+            <span className="text-xs text-muted-foreground">
+              Avg {formatDurationHelper(overallStats.avgDuration)}
+            </span>
+          </div>
+          {/* Progress bar */}
+          <div className="mt-2 flex items-center gap-3">
+            <div className="flex-1 h-2 rounded-full bg-muted overflow-hidden flex">
+              <div
+                className="h-full rounded-l-full transition-all"
+                style={{
+                  width: `${(overallStats.passed / overallStats.total) * 100}%`,
+                  backgroundColor: "hsl(142.1 76.2% 36.3%)",
+                }}
+              />
+              <div
+                className="h-full rounded-r-full transition-all"
+                style={{
+                  width: `${(overallStats.failed / overallStats.total) * 100}%`,
+                  backgroundColor: "hsl(0 84.2% 60.2%)",
+                }}
               />
             </div>
+            <span className="text-xs text-muted-foreground shrink-0">
+              {overallStats.passed} passed · {overallStats.failed} failed
+            </span>
           </div>
-        )}
-
-        {/* Model Breakdown */}
-        {modelBreakdown.length > 0 && (
-          <div className="rounded-xl border bg-card text-card-foreground">
-            <div className="px-4 pt-3 pb-2">
-              <div className="text-xs font-medium text-muted-foreground">
-                Performance by model
-              </div>
-            </div>
-            <div className="px-4 pb-4">
-              <ChartContainer
-                config={modelChartConfig}
-                className="aspect-auto h-32 w-full"
-              >
-                <BarChart
-                  data={modelBreakdown}
-                  width={undefined}
-                  height={undefined}
-                >
-                  <CartesianGrid
-                    strokeDasharray="3 3"
-                    vertical={false}
-                    stroke="hsl(var(--muted-foreground) / 0.2)"
-                  />
-                  <XAxis
-                    dataKey="model"
-                    tickLine={false}
-                    axisLine={false}
-                    tickMargin={8}
-                    tick={{ fontSize: 11 }}
-                    interval={0}
-                    height={40}
-                    tickFormatter={(value) => {
-                      const parts = value.split("/");
-                      if (parts.length === 2 && parts[1].length > 15) {
-                        return `${parts[0]}/${parts[1].substring(0, 12)}...`;
-                      }
-                      return value;
+          {/* Inline model breakdown */}
+          {modelBreakdown.length >= 1 && (
+            <div className="flex flex-wrap items-center gap-4 mt-2 pt-2 border-t border-border/50">
+              <span className="text-[10px] text-muted-foreground">
+                By Model:
+              </span>
+              {modelBreakdown.map((model) => (
+                <div key={model.model} className="flex items-center gap-1.5">
+                  <div
+                    className="h-1.5 w-1.5 rounded-full"
+                    style={{
+                      backgroundColor:
+                        model.passRate >= 80
+                          ? "hsl(142.1 76.2% 36.3%)"
+                          : model.passRate >= 50
+                            ? "hsl(45.4 93.4% 47.5%)"
+                            : "hsl(0 84.2% 60.2%)",
                     }}
                   />
-                  <YAxis
-                    domain={[0, 100]}
-                    tickLine={false}
-                    axisLine={false}
-                    tickMargin={8}
-                    tick={{ fontSize: 12 }}
-                    tickFormatter={(value) => `${value}%`}
-                  />
-                  <ChartTooltip
-                    cursor={false}
-                    content={({ active, payload }) => {
-                      if (!active || !payload || payload.length === 0)
-                        return null;
-                      const data = payload[0].payload;
-                      return (
-                        <div className="rounded-lg border bg-background p-2 shadow-sm">
-                          <div className="grid gap-2">
-                            <div className="flex flex-col">
-                              <span className="text-xs font-semibold">
-                                {data.model}
-                              </span>
-                              <span className="text-xs text-muted-foreground mt-0.5">
-                                {data.passed} passed · {data.failed} failed
-                              </span>
-                            </div>
-                            <div className="flex items-center gap-2">
-                              <div
-                                className="h-2 w-2 rounded-full"
-                                style={{
-                                  backgroundColor: "var(--color-passRate)",
-                                }}
-                              />
-                              <span className="text-sm font-semibold">
-                                {data.passRate}%
-                              </span>
-                            </div>
-                          </div>
-                        </div>
-                      );
-                    }}
-                  />
-                  <Bar
-                    dataKey="passRate"
-                    fill="var(--color-passRate)"
-                    radius={[4, 4, 0, 0]}
-                    isAnimationActive={false}
-                    minPointSize={8}
-                  />
-                </BarChart>
-              </ChartContainer>
+                  <span className="text-[11px]">{model.model}</span>
+                  <span className="text-[11px] font-mono font-medium">
+                    {model.passRate}%
+                  </span>
+                  <span className="text-[10px] text-muted-foreground">
+                    ({model.passed}/{model.passed + model.failed})
+                  </span>
+                </div>
+              ))}
             </div>
-          </div>
-        )}
-      </div>
+          )}
+        </div>
+      )}
 
       {/* Iterations List */}
-      <div className="space-y-2">
-        <Label className="text-xs font-medium text-muted-foreground">
-          Iterations
-        </Label>
-        {activeIterations.length === 0 ? (
-          <div className="py-12 text-center text-sm text-muted-foreground">
-            No iterations found for this test.
-          </div>
-        ) : (
-          <div className="rounded-md border bg-card text-card-foreground divide-y overflow-hidden">
-            {activeIterations.map((iteration) => {
-              const snapshot = iteration.testCaseSnapshot;
-              const startedAt = iteration.startedAt ?? iteration.createdAt;
-              const completedAt = iteration.updatedAt ?? iteration.createdAt;
-              const durationMs =
-                startedAt && completedAt
-                  ? Math.max(completedAt - startedAt, 0)
-                  : null;
-              const actualToolCalls = iteration.actualToolCalls || [];
-              const isPending = iteration.result === "pending";
-              const isOpen = openIterationId === iteration._id;
-
-              const formatDuration = (ms: number) => {
-                if (ms < 1000) return `${ms}ms`;
-                const seconds = Math.round(ms / 1000);
-                if (seconds < 60) return `${seconds}s`;
-                const minutes = Math.floor(seconds / 60);
-                const secs = seconds % 60;
-                return secs ? `${minutes}m ${secs}s` : `${minutes}m`;
-              };
-
-              return (
-                <div
-                  key={iteration._id}
-                  className={`relative ${isPending ? "opacity-60" : ""}`}
-                >
-                  <div
-                    className={`absolute left-0 top-0 h-full w-1 ${getIterationBorderColor(iteration.result)}`}
-                  />
-                  <button
-                    onClick={() =>
-                      setOpenIterationId(isOpen ? null : iteration._id)
-                    }
-                    className="flex w-full items-center justify-between gap-3 px-3 py-2 text-left transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/60 cursor-pointer hover:bg-muted/50"
-                  >
-                    <div className="flex min-w-0 flex-1 items-center gap-3 pl-2">
-                      <div className="text-muted-foreground shrink-0">
-                        {isOpen ? (
-                          <ChevronDown className="h-3.5 w-3.5" />
-                        ) : (
-                          <ChevronRight className="h-3.5 w-3.5" />
-                        )}
-                      </div>
-                      <div className="flex min-w-0 flex-1 items-center gap-2">
-                        <span className="text-xs font-medium capitalize">
-                          {iteration.result}
-                        </span>
-                      </div>
-                    </div>
-                    <div className="flex items-center gap-4 text-xs text-muted-foreground shrink-0">
-                      <div className="min-w-[120px] text-left truncate">
-                        <span className="font-mono text-xs">
-                          {snapshot
-                            ? `${snapshot.provider}/${snapshot.model}`
-                            : "—"}
-                        </span>
-                      </div>
-                      <div className="min-w-[50px] text-center">
-                        <span className="font-mono">
-                          {isPending ? "—" : actualToolCalls.length}
-                        </span>
-                      </div>
-                      <div className="min-w-[60px] text-center">
-                        <span className="font-mono">
-                          {isPending
-                            ? "—"
-                            : Number(
-                                iteration.tokensUsed || 0,
-                              ).toLocaleString()}
-                        </span>
-                      </div>
-                      <div className="font-mono min-w-[40px] text-right">
-                        {isPending
-                          ? "—"
-                          : durationMs !== null
-                            ? formatDuration(durationMs)
-                            : "—"}
-                      </div>
-                      {iteration.suiteRunId && onViewRun && !isPending && (
-                        <div className="min-w-[100px]">
-                          <Button
-                            variant="ghost"
-                            size="sm"
-                            className="h-5 text-[11px] px-2"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              onViewRun(iteration.suiteRunId!);
-                            }}
-                          >
-                            Run {formatRunId(iteration.suiteRunId)}
-                          </Button>
-                        </div>
-                      )}
-                      {isPending && (
-                        <div className="w-3.5 flex items-center justify-center">
-                          <Loader2 className="h-3.5 w-3.5 animate-spin text-warning" />
-                        </div>
-                      )}
-                    </div>
-                  </button>
-                  {isOpen && (
-                    <div className="border-t bg-muted/20 px-4 pb-4 pt-3 pl-8">
-                      <IterationDetails
-                        iteration={iteration}
-                        testCase={testCase}
-                        serverNames={serverNames}
-                      />
-                    </div>
-                  )}
-                </div>
-              );
-            })}
-          </div>
-        )}
-      </div>
+      <TestCaseIterationsTable
+        testCase={testCase}
+        iterations={iterations}
+        onViewRun={onViewRun}
+        serverNames={serverNames}
+      />
     </div>
   );
 }

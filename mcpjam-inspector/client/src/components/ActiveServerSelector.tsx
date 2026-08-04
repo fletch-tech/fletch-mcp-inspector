@@ -3,12 +3,13 @@ import { ServerWithName } from "@/hooks/use-app-state";
 import { cn } from "@/lib/utils";
 import { AddServerModal } from "./connection/AddServerModal";
 import { ServerFormData } from "@/shared/types.js";
-import { Check, ChevronLeft, ChevronRight, RefreshCw } from "lucide-react";
-import { usePostHog } from "posthog-js/react";
-import { detectEnvironment, detectPlatform } from "@/lib/PosthogUtils";
-import { hasOAuthConfig } from "@/lib/oauth/mcp-oauth";
-import { ConfirmChatResetDialog } from "./chat-v2/chat-input/dialogs/confirm-chat-reset-dialog";
+import { Check, ChevronLeft, ChevronRight, RefreshCw, X } from "lucide-react";
+import { track } from "@/lib/analytics";
 import { HOSTED_MODE } from "@/lib/config";
+import {
+  isOAuthDebuggerHeaderServer,
+  isXaaDebuggerHeaderServer,
+} from "@/lib/debugger-header-servers";
 
 const HOSTED_HTTPS_REQUIRED_HINT =
   "Hosted mode requires HTTPS server URLs. Edit this server to use https://.";
@@ -32,14 +33,56 @@ export interface ActiveServerSelectorProps {
   isMultiSelectEnabled: boolean;
   onServerChange: (server: string) => void;
   onMultiServerToggle: (server: string) => void;
+  /**
+   * Bulk-replace the multi-server selection. Wired in for the Playground
+   * tab's host snapshot — picking a named host should toggle on the host's
+   * required + optional servers in one shot, not per-server. Optional on
+   * the shared interface so single-select callers don't need it.
+   */
+  onSelectMultipleServers?: (serverNames: string[]) => void;
   onConnect: (formData: ServerFormData) => void;
+  /**
+   * Override the "Add Server" click. When provided, the button calls this
+   * instead of opening the generic Add Server modal — used by the XAA / OAuth
+   * debuggers to open their own purpose-built "configure server" modals.
+   */
+  onAddServerRequested?: () => void;
   onReconnect?: (serverName: string) => Promise<void>;
+  /** Disconnect a connected server (Playground toggle off = unplug). */
+  onDisconnect?: (serverName: string) => void;
+  /**
+   * Hide a server from THIS header only (OAuth / XAA debugger). View-only: the
+   * server config, tokens, and Convex row are untouched — it's dropped from this
+   * tab's chip strip until un-hidden. When provided, each chip renders an "x".
+   */
+  onHideServer?: (serverName: string) => void;
+  /** Server names hidden from this header; filtered out of the rendered list. */
+  hiddenServers?: Set<string>;
   showOnlyOAuthServers?: boolean; // Only show servers that use OAuth
+  /**
+   * When `showOnlyOAuthServers` is on, also admit Cross-App Access (XAA)
+   * servers (useXaa, useOAuth left false). Scoped to the XAA tab so XAA servers
+   * don't leak into the OAuth-flow tab's list.
+   */
+  includeXaaServers?: boolean;
   showOnlyServersWithViews?: boolean; // Only show servers that have saved views
+  /** Auto-select when the current selection is hidden by filters. `true`
+   * replaces an invalid selection with the most recently connected eligible
+   * server. `"when-empty"` only fills a blank selection ("none") and never
+   * replaces an existing one — the debugger tabs use this so their target
+   * (which live auth requests are fired at) can't change without an explicit
+   * click. */
+  autoSelectFilteredServer?: boolean | "when-empty";
   serversWithViews?: Set<string>; // Set of server names that have saved views
-  hasMessages?: boolean;
+  hasMessages?: boolean; // Reserved for callers that still compute this
   className?: string;
 }
+
+/** Props supplied by the shell; `className` is set in PlaygroundMain. */
+export type PlaygroundServerSelectorProps = Omit<
+  ActiveServerSelectorProps,
+  "hasMessages" | "className"
+>;
 
 function getStatusColor(status: string): string {
   switch (status) {
@@ -79,91 +122,87 @@ export function ActiveServerSelector({
   onServerChange,
   onMultiServerToggle,
   onConnect,
+  onAddServerRequested,
   onReconnect,
+  onHideServer,
+  hiddenServers,
   showOnlyOAuthServers = false,
+  includeXaaServers = false,
   showOnlyServersWithViews = false,
+  autoSelectFilteredServer = true,
   serversWithViews,
-  hasMessages = false,
   className,
 }: ActiveServerSelectorProps) {
   const [isAddModalOpen, setIsAddModalOpen] = useState(false);
-  const [showConfirmDialog, setShowConfirmDialog] = useState(false);
-  const [pendingServer, setPendingServer] = useState<string | null>(null);
   const [canScrollLeft, setCanScrollLeft] = useState(false);
   const [canScrollRight, setCanScrollRight] = useState(false);
   const scrollRef = useRef<HTMLDivElement | null>(null);
-  const posthog = usePostHog();
-
-  // Helper function to check if a server uses OAuth
-  const isOAuthServer = (server: ServerWithName): boolean => {
-    const isHttpServer = "url" in server.config;
-    if (!isHttpServer) return false;
-
-    // Check if server has OAuth tokens, OAuth config in localStorage, or is in oauth-flow state
-    return !!(
-      server.oauthTokens ||
-      hasOAuthConfig(server.name) ||
-      server.connectionStatus === "oauth-flow"
-    );
-  };
+  const hasNoServersWithViews =
+    showOnlyServersWithViews && (serversWithViews?.size ?? 0) === 0;
 
   const servers = Object.entries(serverConfigs).filter(([name, server]) => {
-    if (showOnlyOAuthServers && !isOAuthServer(server)) return false;
+    // View-only dismissals from this header (OAuth / XAA debugger x button).
+    if (hiddenServers?.has(name)) return false;
     if (
-      showOnlyServersWithViews &&
-      serversWithViews &&
-      !serversWithViews.has(name)
+      showOnlyOAuthServers &&
+      !isOAuthDebuggerHeaderServer(server) &&
+      !(includeXaaServers && isXaaDebuggerHeaderServer(server))
     )
       return false;
+    if (showOnlyServersWithViews && !serversWithViews?.has(name)) return false;
     return true;
   });
 
   // Auto-select first available server if current selection is not in the list
   useEffect(() => {
-    if (isMultiSelectEnabled) return; // Don't auto-select in multi-select mode
+    if (
+      !autoSelectFilteredServer ||
+      isMultiSelectEnabled ||
+      hasNoServersWithViews
+    ) {
+      return;
+    }
 
     const serverNames = servers.map(([name]) => name);
     const isCurrentSelectionValid = serverNames.includes(selectedServer);
+    const hasExplicitSelection =
+      Boolean(selectedServer) && selectedServer !== "none";
 
-    if (!isCurrentSelectionValid && serverNames.length > 0) {
-      onServerChange(serverNames[0]);
+    // "when-empty" fills a blank selection but never replaces one the user
+    // already made — an invalid selection stays put (the tab renders its own
+    // "not testable" state) instead of being silently swapped for a server
+    // the user never clicked.
+    if (autoSelectFilteredServer === "when-empty" && hasExplicitSelection) {
+      return;
     }
-  }, [servers.length, selectedServer, isMultiSelectEnabled, onServerChange]);
+
+    if (!isCurrentSelectionValid && servers.length > 0) {
+      // Pick the most recently connected server instead of the first by insertion order
+      const sorted = [...servers].sort(
+        ([, a], [, b]) =>
+          new Date(b.lastConnectionTime).getTime() -
+          new Date(a.lastConnectionTime).getTime(),
+      );
+      onServerChange(sorted[0][0]);
+    } else if (!isCurrentSelectionValid && selectedServer !== "none") {
+      // No available servers and selection is stale — clear it
+      onServerChange("none");
+    }
+  }, [
+    servers.length,
+    selectedServer,
+    isMultiSelectEnabled,
+    onServerChange,
+    hasNoServersWithViews,
+    autoSelectFilteredServer,
+  ]);
 
   const handleServerClick = (name: string) => {
     if (isMultiSelectEnabled) {
-      if (hasMessages) {
-        setPendingServer(name);
-        setShowConfirmDialog(true);
-        return;
-      }
       onMultiServerToggle(name);
-    } else {
-      const isDifferentServer = selectedServer !== name;
-      if (isDifferentServer && hasMessages) {
-        setPendingServer(name);
-        setShowConfirmDialog(true);
-        return;
-      }
-      onServerChange(name);
+      return;
     }
-  };
-
-  const handleConfirmChange = () => {
-    if (pendingServer) {
-      if (isMultiSelectEnabled) {
-        onMultiServerToggle(pendingServer);
-      } else {
-        onServerChange(pendingServer);
-      }
-      setPendingServer(null);
-    }
-    setShowConfirmDialog(false);
-  };
-
-  const handleCancelChange = () => {
-    setPendingServer(null);
-    setShowConfirmDialog(false);
+    onServerChange(name);
   };
 
   useEffect(() => {
@@ -205,6 +244,10 @@ export function ActiveServerSelector({
     });
   };
 
+  if (hasNoServersWithViews) {
+    return null;
+  }
+
   return (
     <div className={cn("relative h-full w-full min-w-0", className)}>
       <div
@@ -226,10 +269,12 @@ export function ActiveServerSelector({
               <button
                 key={name}
                 onClick={(e) => {
-                  // Check if click originated from reconnect button
-                  // Using Element to cover SVG elements too
+                  // Ignore clicks from the inline action buttons (reconnect /
+                  // hide). Using Element to cover SVG elements too.
                   if (
-                    (e.target as Element).closest("[data-reconnect-button]")
+                    (e.target as Element).closest(
+                      "[data-reconnect-button],[data-hide-button]",
+                    )
                   ) {
                     return;
                   }
@@ -299,6 +344,30 @@ export function ActiveServerSelector({
                     <RefreshCw className="w-3 h-3" />
                   </div>
                 )}
+                {onHideServer && (
+                  <div
+                    role="button"
+                    tabIndex={0}
+                    data-hide-button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      e.nativeEvent.stopImmediatePropagation();
+                      e.preventDefault();
+                      onHideServer(name);
+                    }}
+                    className={cn(
+                      "p-1 rounded-md transition-colors text-muted-foreground",
+                      "hover:bg-destructive/10 hover:text-destructive",
+                      // Right-align the action cluster when there's no
+                      // reconnect button to carry the ml-auto.
+                      onReconnect ? "" : "ml-auto",
+                    )}
+                    title="Hide from this tab"
+                    aria-label={`Hide ${name} from this header`}
+                  >
+                    <X className="w-3 h-3" />
+                  </div>
+                )}
               </button>
             );
           })}
@@ -306,6 +375,10 @@ export function ActiveServerSelector({
           {/* Add Server Button */}
           <button
             onClick={() => {
+              if (onAddServerRequested) {
+                onAddServerRequested();
+                return;
+              }
               setIsAddModalOpen(true);
             }}
             className={cn(
@@ -326,20 +399,11 @@ export function ActiveServerSelector({
           isOpen={isAddModalOpen}
           onClose={() => setIsAddModalOpen(false)}
           onSubmit={(formData) => {
-            posthog.capture("connecting_server", {
+            track("connecting_server", {
               location: "active_server_selector",
-              platform: detectPlatform(),
-              environment: detectEnvironment(),
             });
             onConnect(formData);
           }}
-        />
-
-        <ConfirmChatResetDialog
-          open={showConfirmDialog}
-          onConfirm={handleConfirmChange}
-          onCancel={handleCancelChange}
-          message="Changing server selection will cause the chat to reset. This action cannot be undone."
         />
 
         {canScrollLeft && (

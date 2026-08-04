@@ -9,9 +9,41 @@
 import { useCallback, useEffect, useState } from "react";
 import type { FormField } from "@/lib/tool-form";
 import { buildParametersFromFields } from "@/lib/tool-form";
-import { executeToolApi } from "@/lib/apis/mcp-tools-api";
-import { usePostHog } from "posthog-js/react";
-import { detectEnvironment, detectPlatform } from "@/lib/PosthogUtils";
+import {
+  executeToolApi,
+  type ToolExecutionResponse,
+} from "@/lib/apis/mcp-tools-api";
+import { readResource } from "@/lib/apis/mcp-resources-api";
+import {
+  driveScopeStepUpFromChallenge,
+  resetScopeStepUp,
+} from "@/lib/scope-step-up";
+import {
+  isActionableStepUpChallenge,
+  parseInsufficientScopeChallenge,
+} from "@/lib/apis/insufficient-scope";
+import {
+  claimPendingDirectScopeStepUpReplay,
+  clearPendingDirectScopeStepUpReplay,
+  savePendingDirectScopeStepUpReplay,
+} from "@/lib/scope-step-up-replay";
+import { useOptionalSharedAppState } from "@/state/app-state-context";
+import {
+  mcpCallToolResultToModelOutput,
+  mcpCallToolResultToModelOutputWithLinkedResources,
+  type McpModelVisibleToolResultPolicy,
+} from "@mcpjam/sdk/browser";
+import { track } from "@/lib/analytics";
+import {
+  recordAppToolInvocation,
+  useAppToolsRegistry,
+} from "@/components/chat-v2/thread/mcp-apps/app-tools-registry";
+import { useTrafficLogStore } from "@/stores/traffic-log-store";
+
+// Matches `app_<8 hex chars>` aliases minted by the app-tools registry.
+// Kept local to avoid widening the registry's public surface; the registry
+// owns the canonical pattern (`ALIAS_REGEX`) and exports it via `__internal`.
+const APP_TOOL_ALIAS_REGEX = /^app_[a-z0-9]{8}$/i;
 
 // Result metadata type for tool responses
 interface ToolResponseMeta {
@@ -23,7 +55,9 @@ export interface PendingExecution {
   toolName: string;
   params: Record<string, unknown>;
   result: unknown;
+  modelOutput?: unknown;
   toolMeta: Record<string, unknown> | undefined;
+  toolCallId?: string;
 }
 
 export interface UseToolExecutionOptions {
@@ -35,13 +69,90 @@ export interface UseToolExecutionOptions {
   setExecutionError: (error: string | null) => void;
   setToolOutput: (output: unknown) => void;
   setToolResponseMetadata: (meta: Record<string, unknown> | null) => void;
+  modelVisibleMcpToolResults?: McpModelVisibleToolResultPolicy["modelVisibleMcpToolResults"];
+}
+
+/**
+ * Explicit reference to the playground's selected tool. Server tools are
+ * keyed by their MCP name; app-provided tools (SEP-1865) are keyed by the
+ * opaque `app_<hash>` alias the registry minted for them. Routing branches
+ * on `kind` so server execution never accidentally calls the MCP server
+ * with a synthetic alias.
+ */
+export type SelectedToolRef =
+  | { kind: "server"; name: string }
+  | { kind: "app"; alias: string };
+
+/**
+ * Classify a flat tool handle (server name or app alias) by consulting the
+ * app-tools registry. Used by the App Builder execution path so the same
+ * `selectedTool: string` slot can address both worlds without ambiguity.
+ *
+ * Read via `getState()` — callers are dispatch sites that just need the
+ * current classification once, not a reactive subscription.
+ */
+export function classifySelectedTool(
+  name: string | null
+): SelectedToolRef | null {
+  if (!name) return null;
+  const aliasEntry = useAppToolsRegistry.getState().aliases.get(name);
+  if (aliasEntry) return { kind: "app", alias: name };
+  // Treat alias-shaped handles as app even when the registry has forgotten
+  // them — the executor surfaces a clean "no longer available" error rather
+  // than routing the synthetic name to the MCP server (which would 404).
+  if (APP_TOOL_ALIAS_REGEX.test(name)) return { kind: "app", alias: name };
+  return { kind: "server", name };
 }
 
 export interface UseToolExecutionReturn {
   pendingExecution: PendingExecution | null;
   clearPendingExecution: () => void;
-  executeTool: () => Promise<void>;
+  executeTool: (
+    options?: ExecuteToolInvocationOptions
+  ) => Promise<ExecuteToolInvocationResult>;
+  injectToolResult: (
+    options: InjectToolResultOptions
+  ) => Promise<CompletedToolInvocationResult>;
 }
+
+export interface ExecuteToolInvocationOptions {
+  toolName?: string;
+  parameters?: Record<string, unknown>;
+  formFields?: FormField[];
+  /**
+   * Override the hook-init `serverName` for this call. Used by the Playground
+   * multi-server tools pane to route execution to the correct server when the
+   * user selects a tool from a non-primary server.
+   */
+  serverName?: string;
+  /** Internal: the one post-OAuth replay must never start another redirect. */
+  scopeStepUpReplay?: boolean;
+}
+
+export interface InjectToolResultOptions {
+  toolName: string;
+  parameters: Record<string, unknown>;
+  result: unknown;
+  toolCallId?: string;
+}
+
+export type CompletedToolInvocationResult = {
+  ok: true;
+  toolName: string;
+  parameters: Record<string, unknown>;
+  result: unknown;
+  response: { status: "completed"; result: unknown; durationMs?: number };
+};
+
+export type ExecuteToolInvocationResult =
+  | CompletedToolInvocationResult
+  | {
+      ok: false;
+      toolName?: string;
+      parameters?: Record<string, unknown>;
+      error: string;
+      response?: ToolExecutionResponse;
+    };
 
 /**
  * Safely extracts metadata from tool result.
@@ -58,6 +169,51 @@ function extractMetadata(result: unknown): ToolResponseMeta | undefined {
   return meta as ToolResponseMeta;
 }
 
+function resolveDirectModelOutputForToolResult(
+  result: unknown,
+  policy: McpModelVisibleToolResultPolicy
+): unknown | undefined {
+  try {
+    return mcpCallToolResultToModelOutput(result as never, policy);
+  } catch {
+    return undefined;
+  }
+}
+
+async function resolveModelOutputForToolResult(
+  result: unknown,
+  serverId: string | undefined,
+  policy: McpModelVisibleToolResultPolicy
+): Promise<unknown | undefined> {
+  if (serverId) {
+    let linkedReadFailed = false;
+    try {
+      const modelOutput =
+        await mcpCallToolResultToModelOutputWithLinkedResources(
+          result as never,
+          {
+            ...policy,
+            readResource: async ({ uri }) => {
+              try {
+                return await readResource(serverId, uri);
+              } catch (error) {
+                linkedReadFailed = true;
+                throw error;
+              }
+            },
+          }
+        );
+      return linkedReadFailed
+        ? resolveDirectModelOutputForToolResult(result, policy)
+        : modelOutput;
+    } catch {
+      return resolveDirectModelOutputForToolResult(result, policy);
+    }
+  }
+
+  return resolveDirectModelOutputForToolResult(result, policy);
+}
+
 export function useToolExecution({
   serverName,
   selectedTool,
@@ -67,9 +223,8 @@ export function useToolExecution({
   setExecutionError,
   setToolOutput,
   setToolResponseMetadata,
+  modelVisibleMcpToolResults,
 }: UseToolExecutionOptions): UseToolExecutionReturn {
-  const posthog = usePostHog();
-
   // Pending execution to inject into chat thread
   const [pendingExecution, setPendingExecution] =
     useState<PendingExecution | null>(null);
@@ -79,43 +234,70 @@ export function useToolExecution({
     setPendingExecution(null);
   }, []);
 
-  // Execute tool and set up pending injection
-  const executeTool = useCallback(async () => {
-    if (!selectedTool || !serverName) return;
+  // SEP-2350 step-up. Resolve the live server entry (non-throwing: the hook is
+  // exercised in tests without an AppStateProvider) so the orchestrator can read
+  // its stored issuer + originally-granted scopes on a `403 insufficient_scope`.
+  const sharedAppState = useOptionalSharedAppState();
+  const resetStepUpOnSuccess = useCallback(
+    (name: string | undefined, toolName: string) => {
+      resetScopeStepUp(name ? sharedAppState?.servers[name] : undefined, {
+        method: "tools/call",
+        operation: toolName,
+      });
+    },
+    [sharedAppState],
+  );
 
-    setIsExecuting(true);
-    setExecutionError(null);
-
-    try {
-      const params = buildParametersFromFields(formFields);
-      const response = await executeToolApi(serverName, selectedTool, params);
-
-      if ("error" in response) {
-        // Log tool execution failure
-        posthog.capture("app_builder_tool_executed", {
-          location: "app_builder_tab",
-          platform: detectPlatform(),
-          environment: detectEnvironment(),
-          toolName: selectedTool,
-          success: false,
-          errorType: "api_error",
+  const driveStepUpFromResponse = useCallback(
+    (
+      name: string | undefined,
+      toolName: string,
+      parameters: Record<string, unknown>,
+      response: ToolExecutionResponse,
+    ) => {
+      const challenge = parseInsufficientScopeChallenge(
+        (response as { insufficientScope?: unknown }).insufficientScope,
+      );
+      const replayServer = name ? sharedAppState?.servers[name] : undefined;
+      if (
+        name &&
+        isActionableStepUpChallenge(challenge)
+      ) {
+        savePendingDirectScopeStepUpReplay({
+          operation: {
+            resourceUrl: String(
+              (replayServer?.config as any)?.url ?? name,
+            ),
+            method: "tools/call",
+            operation: toolName,
+          },
+          descriptor: {
+            kind: "tool",
+            surface: "playground",
+            serverName: name,
+            toolName,
+            parameters,
+          },
         });
-
-        setExecutionError(response.error);
-        setIsExecuting(false);
-        return;
       }
+      driveScopeStepUpFromChallenge(
+        replayServer,
+        challenge,
+        { method: "tools/call", operation: toolName },
+      );
+    },
+    [sharedAppState],
+  );
 
-      if (response.status === "elicitation_required") {
-        setExecutionError(
-          "Tool requires elicitation, which is not supported in the UI Playground yet.",
-        );
-        setIsExecuting(false);
-        return;
-      }
-
-      const result = response.result;
-
+  const storeCompletedToolResult = useCallback(
+    (
+      effectiveToolName: string,
+      params: Record<string, unknown>,
+      result: unknown,
+      toolCallId?: string,
+      serverId?: string,
+      modelOutput?: unknown
+    ) => {
       // Store raw output for inspector
       setToolOutput(result);
 
@@ -123,61 +305,263 @@ export function useToolExecution({
       const resultMeta = extractMetadata(result);
       setToolResponseMetadata(resultMeta || null);
 
-      const definitionMeta = selectedTool
-        ? toolsMetadata[selectedTool]
-        : undefined;
+      const definitionMeta = toolsMetadata[effectiveToolName];
       const mergedMeta =
-        definitionMeta || resultMeta
+        definitionMeta || resultMeta || serverId
           ? {
               ...(definitionMeta ?? {}),
               ...(resultMeta ?? {}),
+              ...(serverId ? { _serverId: serverId } : {}),
             }
           : undefined;
 
       // Set pending execution for chat thread to inject
       setPendingExecution({
-        toolName: selectedTool,
+        toolName: effectiveToolName,
         params,
         result,
+        ...(modelOutput ? { modelOutput } : {}),
         toolMeta: mergedMeta,
+        ...(toolCallId ? { toolCallId } : {}),
       });
+    },
+    [setToolOutput, setToolResponseMetadata, toolsMetadata]
+  );
 
-      // Log successful tool execution
-      posthog.capture("app_builder_tool_executed", {
-        location: "app_builder_tab",
-        platform: detectPlatform(),
-        environment: detectEnvironment(),
-        toolName: selectedTool,
-        success: true,
-      });
-    } catch (err) {
-      console.error("Tool execution error:", err);
-      const errorMessage =
-        err instanceof Error ? err.message : "Tool execution failed";
+  const executeTool = useCallback(
+    async (
+      options?: ExecuteToolInvocationOptions
+    ): Promise<ExecuteToolInvocationResult> => {
+      const effectiveToolName = options?.toolName ?? selectedTool;
+      const effectiveFormFields = options?.formFields ?? formFields;
+      const effectiveServerName = options?.serverName ?? serverName;
+      const params =
+        options?.parameters ?? buildParametersFromFields(effectiveFormFields);
 
-      posthog.capture("app_builder_tool_executed", {
-        location: "app_builder_tab",
-        platform: detectPlatform(),
-        environment: detectEnvironment(),
-        toolName: selectedTool,
-        success: false,
-        errorType: "exception",
-      });
+      if (!effectiveToolName) {
+        return {
+          ok: false,
+          error: "A tool selection is required.",
+        };
+      }
 
-      setExecutionError(errorMessage);
-    } finally {
-      setIsExecuting(false);
-    }
-  }, [
-    selectedTool,
-    toolsMetadata,
-    serverName,
-    formFields,
-    setIsExecuting,
-    setExecutionError,
-    setToolOutput,
-    setToolResponseMetadata,
-  ]);
+      // App-tool routing: when the selected handle is a registry alias, the
+      // playground must dispatch into the live MCP App iframe via
+      // `AppBridge.callTool` and NOT call the MCP server with the synthetic
+      // `app_<hash>` alias. The alias is a model/server-orchestration name
+      // only — the iframe knows the tool by its raw advertised name. See
+      // SEP-1865 and `app-tools-registry.ts` for the contract.
+      const selectedRef = classifySelectedTool(effectiveToolName);
+      if (selectedRef?.kind === "app") {
+        return executeAppTool({
+          alias: selectedRef.alias,
+          params,
+          setExecutionError,
+          setIsExecuting,
+          storeCompletedToolResult,
+          modelVisibleMcpToolResults,
+        });
+      }
+
+      if (!effectiveServerName) {
+        return {
+          ok: false,
+          error: "A connected server and tool selection are required.",
+        };
+      }
+
+      setIsExecuting(true);
+      setExecutionError(null);
+
+      try {
+        const response = await executeToolApi(
+          effectiveServerName,
+          effectiveToolName,
+          params
+        );
+
+        if ("error" in response) {
+          // Log tool execution failure
+          track("app_builder_tool_executed", {
+            location: "app_builder_tab",
+            toolName: effectiveToolName,
+            source: "server",
+            success: false,
+            errorType: "api_error",
+          });
+
+          setExecutionError(response.error);
+          // SEP-2350: on a `403 insufficient_scope`, drive the union-scope
+          // step-up re-authorization for this server.
+          if (!options?.scopeStepUpReplay) {
+            driveStepUpFromResponse(
+              effectiveServerName,
+              effectiveToolName,
+              params,
+              response,
+            );
+          }
+          return {
+            ok: false,
+            toolName: effectiveToolName,
+            parameters: params,
+            error: response.error,
+            response,
+          };
+        }
+
+        if (response.status === "elicitation_required") {
+          const error =
+            "Tool requires elicitation, which is not supported in the UI Playground yet.";
+          setExecutionError(error);
+          return {
+            ok: false,
+            toolName: effectiveToolName,
+            parameters: params,
+            error,
+            response,
+          };
+        }
+
+        if (response.status === "task_created") {
+          const error =
+            "Task-based tool execution is not supported in the UI Playground yet.";
+          setExecutionError(error);
+          return {
+            ok: false,
+            toolName: effectiveToolName,
+            parameters: params,
+            error,
+            response,
+          };
+        }
+
+        const result = response.result;
+        const modelOutput = await resolveModelOutputForToolResult(
+          result,
+          effectiveServerName,
+          { modelVisibleMcpToolResults }
+        );
+        storeCompletedToolResult(
+          effectiveToolName,
+          params,
+          result,
+          undefined,
+          effectiveServerName,
+          modelOutput
+        );
+
+        // Log successful tool execution
+        track("app_builder_tool_executed", {
+          location: "app_builder_tab",
+          toolName: effectiveToolName,
+          source: "server",
+          success: true,
+        });
+
+        // SEP-2350: a successful call clears the bounded step-up counter.
+        resetStepUpOnSuccess(effectiveServerName, effectiveToolName);
+
+        return {
+          ok: true,
+          toolName: effectiveToolName,
+          parameters: params,
+          result,
+          response,
+        };
+      } catch (err) {
+        console.error("Tool execution error:", err);
+        const errorMessage =
+          err instanceof Error ? err.message : "Tool execution failed";
+
+        track("app_builder_tool_executed", {
+          location: "app_builder_tab",
+          toolName: effectiveToolName,
+          source: "server",
+          success: false,
+          errorType: "exception",
+        });
+
+        setExecutionError(errorMessage);
+        return {
+          ok: false,
+          toolName: effectiveToolName,
+          parameters: params,
+          error: errorMessage,
+        };
+      } finally {
+        setIsExecuting(false);
+      }
+    },
+    [
+      formFields,
+      selectedTool,
+      serverName,
+      setExecutionError,
+      setIsExecuting,
+      storeCompletedToolResult,
+      modelVisibleMcpToolResults,
+      driveStepUpFromResponse,
+      resetStepUpOnSuccess,
+    ]
+  );
+
+  useEffect(() => {
+    if (!serverName) return;
+    const liveServer = sharedAppState?.servers[serverName];
+    if (liveServer?.connectionStatus !== "connected") return;
+    const pending = claimPendingDirectScopeStepUpReplay({
+      serverName,
+      surface: "playground",
+    });
+    if (!pending || pending.descriptor.kind !== "tool") return;
+    const descriptor = pending.descriptor;
+    void executeTool({
+      serverName: descriptor.serverName,
+      toolName: descriptor.toolName,
+      parameters: descriptor.parameters,
+      scopeStepUpReplay: true,
+    }).finally(() => {
+      clearPendingDirectScopeStepUpReplay();
+    });
+  }, [executeTool, serverName, sharedAppState]);
+
+  const injectToolResult = useCallback(
+    async ({
+      toolName,
+      parameters,
+      result,
+      toolCallId,
+    }: InjectToolResultOptions): Promise<CompletedToolInvocationResult> => {
+      setExecutionError(null);
+      const modelOutput = await resolveModelOutputForToolResult(
+        result,
+        undefined,
+        { modelVisibleMcpToolResults }
+      );
+      storeCompletedToolResult(
+        toolName,
+        parameters,
+        result,
+        toolCallId,
+        undefined,
+        modelOutput
+      );
+
+      return {
+        ok: true,
+        toolName,
+        parameters,
+        result,
+        response: { status: "completed", result },
+      };
+    },
+    [
+      setExecutionError,
+      storeCompletedToolResult,
+      modelVisibleMcpToolResults,
+    ]
+  );
 
   // Keyboard shortcut for execute (Cmd/Ctrl + Enter)
   useEffect(() => {
@@ -185,7 +569,7 @@ export function useToolExecution({
       const isExecuteShortcut = (e.metaKey || e.ctrlKey) && e.key === "Enter";
       if (isExecuteShortcut && selectedTool) {
         e.preventDefault();
-        executeTool();
+        void executeTool();
       }
     };
     window.addEventListener("keydown", handleKeyDown);
@@ -196,5 +580,162 @@ export function useToolExecution({
     pendingExecution,
     clearPendingExecution,
     executeTool,
+    injectToolResult,
   };
+}
+
+interface ExecuteAppToolArgs {
+  alias: string;
+  params: Record<string, unknown>;
+  setExecutionError: (error: string | null) => void;
+  setIsExecuting: (executing: boolean) => void;
+  storeCompletedToolResult: (
+    effectiveToolName: string,
+    params: Record<string, unknown>,
+    result: unknown,
+    toolCallId?: string,
+    serverId?: string,
+    modelOutput?: unknown
+  ) => void;
+  modelVisibleMcpToolResults?: McpModelVisibleToolResultPolicy["modelVisibleMcpToolResults"];
+}
+
+/**
+ * Dispatch a playground-issued tool call into the live MCP App iframe.
+ *
+ * Mirrors the chat-path dispatch in `use-chat-session.ts`: register an
+ * `AbortController` against the bridge's pending set BEFORE awaiting so a
+ * mid-flight iframe teardown rejects the await instead of hanging the UI,
+ * and call back through the registry's pending bookkeeping in `finally`.
+ *
+ * The alias is the model/server-orchestration handle; the iframe knows
+ * the tool by its `rawName`, so dispatch always uses `entry.rawName`.
+ */
+async function executeAppTool({
+  alias,
+  params,
+  setExecutionError,
+  setIsExecuting,
+  storeCompletedToolResult,
+  modelVisibleMcpToolResults,
+}: ExecuteAppToolArgs): Promise<ExecuteToolInvocationResult> {
+  const registry = useAppToolsRegistry.getState();
+  const entry = registry.resolve(alias);
+  // Tag posthog with the raw advertised name when we have it; aliases are
+  // intentionally opaque and unhelpful for product analytics.
+  const reportedName = entry?.rawName ?? alias;
+
+  if (!entry) {
+    const message =
+      "App tool is no longer available — the widget was closed or replaced.";
+    setExecutionError(message);
+    track("app_builder_tool_executed", {
+      location: "app_builder_tab",
+      toolName: reportedName,
+      source: "app",
+      success: false,
+      errorType: "stale_app_alias",
+    });
+    return {
+      ok: false,
+      toolName: alias,
+      parameters: params,
+      error: message,
+    };
+  }
+
+  setIsExecuting(true);
+  setExecutionError(null);
+
+  const controller = new AbortController();
+  registry.registerPendingCall(entry.instance.bridgeId, controller);
+
+  try {
+    const call = entry.bridge.callTool({
+      name: entry.rawName,
+      arguments: params,
+    });
+    const raw = await new Promise<
+      Awaited<ReturnType<typeof entry.bridge.callTool>>
+    >((resolve, reject) => {
+      const onAbort = () =>
+        reject(new Error("App iframe was torn down mid-dispatch"));
+      if (controller.signal.aborted) {
+        onAbort();
+        return;
+      }
+      controller.signal.addEventListener("abort", onAbort, { once: true });
+      call.then(resolve, reject);
+    });
+
+    const modelOutput = await resolveModelOutputForToolResult(
+      raw,
+      entry.instance.serverId,
+      { modelVisibleMcpToolResults }
+    );
+
+    // Store the full untouched CallToolResult — the playground inspector
+    // should be able to see `structuredContent`/`_meta` the chat path
+    // intentionally strips before handing back to the model.
+    storeCompletedToolResult(
+      entry.rawName,
+      params,
+      raw,
+      undefined,
+      entry.instance.serverId,
+      modelOutput
+    );
+
+    recordAppToolInvocation(
+      {
+        alias,
+        rawName: entry.rawName,
+        appName: entry.instance.appName,
+        serverId: entry.instance.serverId,
+        parentToolCallId: entry.instance.parentToolCallId,
+        bridgeId: entry.instance.bridgeId,
+        input: params,
+        raw,
+      },
+      useTrafficLogStore.getState().addLog
+    );
+
+    track("app_builder_tool_executed", {
+      location: "app_builder_tab",
+      toolName: reportedName,
+      source: "app",
+      success: true,
+    });
+
+    return {
+      ok: true,
+      toolName: entry.rawName,
+      parameters: params,
+      result: raw,
+      response: { status: "completed", result: raw },
+    };
+  } catch (err) {
+    console.error("App tool execution error:", err);
+    const message =
+      err instanceof Error ? err.message : "App tool execution failed";
+    setExecutionError(message);
+
+    track("app_builder_tool_executed", {
+      location: "app_builder_tab",
+      toolName: reportedName,
+      source: "app",
+      success: false,
+      errorType: "exception",
+    });
+
+    return {
+      ok: false,
+      toolName: entry.rawName,
+      parameters: params,
+      error: message,
+    };
+  } finally {
+    registry.unregisterPendingCall(entry.instance.bridgeId, controller);
+    setIsExecuting(false);
+  }
 }

@@ -1,32 +1,289 @@
-import { useAction } from "convex/react";
-import { useEffect, useState } from "react";
+import { useAction, useQuery } from "convex/react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { EvalIteration, EvalCase } from "./types";
+import {
+  JudgeVerdictPanel,
+  type JudgeCase,
+} from "./goal-completion-presentation";
+import { evaluateToolCalls } from "@/shared/eval-matching";
+import { ToolCallDiff } from "./tool-call-diff";
+import {
+  PredicatesList,
+  parseIterationPredicates,
+} from "./predicates-list";
 import { TraceViewer } from "./trace-viewer";
-import { MessageSquare, Code2, ChevronDown, ChevronRight } from "lucide-react";
-import { ToolServerMap, listTools } from "@/lib/apis/mcp-tools-api";
+import {
+  gateMcpToolResultImageRenderingByModelVisibility,
+  type HostConfigDtoV2,
+} from "@/lib/client-config-v2";
+import {
+  TraceViewModeTabs,
+  type TraceViewMode,
+} from "./trace-view-mode-tabs";
+import { PreviewHeaderSlot } from "./preview/preview-header-slot";
+import { BrowserArtifactsView } from "./browser-artifacts-view";
+import {
+  MessageSquare,
+  Code2,
+  ChevronDown,
+  ChevronRight,
+  WifiOff,
+  AlertCircle,
+  Loader2,
+} from "lucide-react";
+import {
+  ToolServerMap,
+  listTools,
+  type ListToolsResultWithMetadata,
+} from "@/lib/apis/mcp-tools-api";
 import { JsonEditor } from "@/components/ui/json-editor";
 import {
   Collapsible,
   CollapsibleContent,
   CollapsibleTrigger,
-} from "@/components/ui/collapsible";
+} from "@mcpjam/design-system/collapsible";
+import {
+  getModelById,
+  type ModelDefinition,
+  type ModelProvider,
+} from "@/shared/types";
+import { cn } from "@/lib/utils";
+import { formatConvexBlobLoadError } from "@/lib/convex-action-error";
+import { Alert, AlertDescription, AlertTitle } from "@mcpjam/design-system/alert";
+import { Button } from "@mcpjam/design-system/button";
+import {
+  isModelFree,
+  normalizeSteps,
+  promptTurnsToSteps,
+  resolveDisplayExpectedToolCalls,
+  type TestStep,
+} from "@/shared/steps";
+import {
+  parseStepStatusById,
+  type StepReplayMetadata,
+} from "@/shared/eval-step-replay";
+
+const TOOL_ARGUMENT_BLOCK_THRESHOLD = 120;
+const TOOL_CALLS_SUMMARY_MAX_LEN = 160;
+const EMPTY_SERVER_NAMES: string[] = [];
+
+function formatToolCallsSummary(
+  expected: Array<{ toolName: string }>,
+  actual: Array<{ toolName: string }>,
+  maxLen = TOOL_CALLS_SUMMARY_MAX_LEN,
+): string {
+  const expPart =
+    expected.length === 0 ? "—" : expected.map((t) => t.toolName).join(", ");
+  const actPart =
+    actual.length === 0 ? "—" : actual.map((t) => t.toolName).join(", ");
+  const s = `Expected: ${expPart} · Actual: ${actPart}`;
+  if (s.length <= maxLen) return s;
+  return `${s.slice(0, maxLen - 1)}…`;
+}
+const KNOWN_MODEL_PROVIDERS: ModelProvider[] = [
+  "anthropic",
+  "azure",
+  "bedrock",
+  "openai",
+  "ollama",
+  "deepseek",
+  "google",
+  "meta",
+  "xai",
+  "mistral",
+  "moonshotai",
+  "openrouter",
+  "z-ai",
+  "minimax",
+  "qwen",
+  "custom",
+];
+
+function tryParseStructuredArgumentString(value: string): unknown | null {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return null;
+  }
+
+  const firstCharacter = trimmed[0];
+  if (firstCharacter !== "{" && firstCharacter !== "[") {
+    return null;
+  }
+
+  try {
+    const parsed = JSON.parse(trimmed);
+    if (parsed !== null && typeof parsed === "object") {
+      return parsed;
+    }
+  } catch {
+    return null;
+  }
+
+  return null;
+}
+
+function stringifyToolArgumentValue(value: unknown): string {
+  if (typeof value === "string") {
+    return value;
+  }
+  if (
+    typeof value === "number" ||
+    typeof value === "boolean" ||
+    typeof value === "bigint"
+  ) {
+    return String(value);
+  }
+  if (value === null) {
+    return "null";
+  }
+  if (value === undefined) {
+    return "undefined";
+  }
+
+  try {
+    return JSON.stringify(value) ?? String(value);
+  } catch {
+    return String(value);
+  }
+}
+
+export function resolveFormattedArgumentValue(
+  value: unknown,
+):
+  | { kind: "structured"; value: unknown }
+  | { kind: "text"; value: string; renderAsBlock: boolean } {
+  if (value !== null && typeof value === "object") {
+    return { kind: "structured", value };
+  }
+
+  if (typeof value === "string") {
+    const parsedStructuredValue = tryParseStructuredArgumentString(value);
+    if (parsedStructuredValue !== null) {
+      return { kind: "structured", value: parsedStructuredValue };
+    }
+  }
+
+  const textValue = stringifyToolArgumentValue(value);
+  return {
+    kind: "text",
+    value: textValue,
+    renderAsBlock:
+      textValue.length > TOOL_ARGUMENT_BLOCK_THRESHOLD ||
+      textValue.includes("\n"),
+  };
+}
+
+function normalizeModelProvider(provider?: string): ModelProvider {
+  return KNOWN_MODEL_PROVIDERS.includes(provider as ModelProvider)
+    ? (provider as ModelProvider)
+    : "custom";
+}
+
+function resolveTraceModel(
+  iteration: EvalIteration,
+  testCase: EvalCase | null,
+): ModelDefinition {
+  const snapshotProvider = iteration.testCaseSnapshot?.provider;
+  const snapshotModel = iteration.testCaseSnapshot?.model;
+  const fallbackProvider = testCase?.models[0]?.provider;
+  const fallbackModel = testCase?.models[0]?.model;
+
+  const provider = snapshotProvider || fallbackProvider || "openai";
+  const model = snapshotModel || fallbackModel || "unknown-model";
+  const providerModelId =
+    model.startsWith(`${provider}/`) || !provider
+      ? model
+      : `${provider}/${model}`;
+
+  return (
+    getModelById(providerModelId) ??
+    getModelById(model) ?? {
+      id: providerModelId,
+      name: model.includes("/") ? model.split("/").slice(1).join("/") : model,
+      provider: normalizeModelProvider(provider),
+    }
+  );
+}
+
+function TraceBlobLoadErrorPanel({
+  error,
+  layoutMode,
+  onRetry,
+  isDetailsOpen,
+  onDetailsOpenChange,
+}: {
+  error: string;
+  layoutMode: "compact" | "full";
+  onRetry: () => void;
+  isDetailsOpen: boolean;
+  onDetailsOpenChange: (open: boolean) => void;
+}) {
+  const info = formatConvexBlobLoadError(error);
+  const Icon = info.kind === "transient" ? WifiOff : AlertCircle;
+  return (
+    <div
+      className={cn("space-y-3", layoutMode === "full" && "max-w-md")}
+      data-testid="iteration-trace-load-error"
+    >
+      <Alert variant={info.alertVariant}>
+        <Icon />
+        <AlertTitle>{info.title}</AlertTitle>
+        <AlertDescription className="space-y-3">
+          <p>{info.description}</p>
+          <Button type="button" variant="secondary" size="sm" onClick={onRetry}>
+            Try again
+          </Button>
+        </AlertDescription>
+      </Alert>
+      <Collapsible open={isDetailsOpen} onOpenChange={onDetailsOpenChange}>
+        <CollapsibleTrigger
+          type="button"
+          className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground transition-colors"
+        >
+          <span>Technical details</span>
+          {isDetailsOpen ? (
+            <ChevronDown className="h-3 w-3" />
+          ) : (
+            <ChevronRight className="h-3 w-3" />
+          )}
+        </CollapsibleTrigger>
+        <CollapsibleContent className="mt-2">
+          <pre className="text-xs font-mono text-muted-foreground whitespace-pre-wrap overflow-x-auto rounded border border-border/40 bg-muted/30 p-2">
+            {error}
+          </pre>
+        </CollapsibleContent>
+      </Collapsible>
+    </div>
+  );
+}
 
 export function IterationDetails({
   iteration,
   testCase,
-  serverNames = [],
+  serverNames = EMPTY_SERVER_NAMES,
+  layoutMode = "compact",
+  caseInsightSlot,
+  judgeCase = null,
 }: {
   iteration: EvalIteration;
   testCase: EvalCase | null;
   serverNames?: string[];
+  layoutMode?: "compact" | "full";
+  /** Run-level case insight caption; shown under the trace toolbar or at top when no trace blob. */
+  caseInsightSlot?: ReactNode;
+  /** Advisory judge verdict for this case+run; surfaced on the Results tab. */
+  judgeCase?: JudgeCase | null;
 }) {
   const getBlob = useAction(
     "testSuites:getTestIterationBlob" as any,
-  ) as unknown as (args: { blobId: string }) => Promise<any>;
+  ) as unknown as (args: { iterationId: string }) => Promise<any>;
 
   const [blob, setBlob] = useState<any>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [blobRetryTick, setBlobRetryTick] = useState(0);
+  const [isBlobErrorDetailsOpen, setIsBlobErrorDetailsOpen] = useState(false);
+  const prevBlobIdRef = useRef<string | undefined>(undefined);
   const [toolViewMode, setToolViewMode] = useState<"formatted" | "raw">(
     "formatted",
   );
@@ -34,23 +291,81 @@ export function IterationDetails({
     Record<string, Record<string, any>>
   >({});
   const [toolServerMap, setToolServerMap] = useState<ToolServerMap>({});
+  const [connectedServerIds, setConnectedServerIds] = useState<string[]>([]);
+
+  // Suite-level image-render policy. Mirrors how the chat surfaces derive it
+  // from the active host config (App.tsx / ChatTabV2): read the suite's host
+  // config and gate the policy by model visibility, then hand it to the trace
+  // `Thread`. Without this, eval result traces always fall back to the default
+  // "inline" placement and ignore the suite's collapse/hide setting.
+  const suiteHostConfigDto = useQuery(
+    "hostConfigsV2:getSuiteConfig" as any,
+    testCase?.testSuiteId
+      ? ({ suiteId: testCase.testSuiteId } as any)
+      : "skip",
+  ) as HostConfigDtoV2 | null | undefined;
+  const mcpToolResultImageRendering = useMemo(
+    () =>
+      gateMcpToolResultImageRenderingByModelVisibility(
+        suiteHostConfigDto?.mcpToolResultImageRendering,
+        suiteHostConfigDto?.modelVisibleMcpToolResults,
+      ),
+    [
+      suiteHostConfigDto?.mcpToolResultImageRendering,
+      suiteHostConfigDto?.modelVisibleMcpToolResults,
+    ],
+  );
   const [toolsWithSchema, setToolsWithSchema] = useState<
     Record<string, { name: string; inputSchema?: any }>
   >({});
+  const [toolCallsSectionOpen, setToolCallsSectionOpen] = useState(() =>
+    layoutMode === "full" ? iteration.result !== "passed" : true,
+  );
+  type PreviewTraceMode = TraceViewMode | "browser" | "steps";
+  const [previewTraceMode, setPreviewTraceMode] =
+    useState<PreviewTraceMode>("chat");
+
+  // The authored steps this run executed (from its snapshot), so the replay can
+  // offer the same step-aligned "Steps" tab the live preview does. Falls back to
+  // the legacy promptTurns shape for pre-migration snapshots.
+  const snapshotSteps = useMemo<TestStep[]>(() => {
+    const steps = iteration.testCaseSnapshot?.steps;
+    if (Array.isArray(steps) && steps.length > 0) return normalizeSteps(steps);
+    return promptTurnsToSteps(
+      Array.isArray(iteration.testCaseSnapshot?.promptTurns)
+        ? iteration.testCaseSnapshot.promptTurns
+        : [],
+    );
+  }, [iteration.testCaseSnapshot]);
+  const hasSteps = snapshotSteps.length > 0;
+
+  // Source-aware trace identity. New iterations carry `chatSessionId`
+  // (unified path); legacy iterations carry `blob`. The hook gates on
+  // either being present and re-runs when either changes.
+  const traceSourceKey = iteration.blob ?? iteration.chatSessionId;
 
   useEffect(() => {
     let cancelled = false;
     async function run() {
-      if (!iteration.blob) {
+      if (!traceSourceKey) {
+        prevBlobIdRef.current = undefined;
         setBlob(null);
         setLoading(false);
         setError(null);
         return;
       }
+      if (prevBlobIdRef.current !== traceSourceKey) {
+        prevBlobIdRef.current = traceSourceKey;
+        setIsBlobErrorDetailsOpen(false);
+      }
       setLoading(true);
       setError(null);
       try {
-        const data = await getBlob({ blobId: iteration.blob });
+        // Backend `getTestIterationBlob` is source-aware: it returns the
+        // chatSessions transcript when `iteration.chatSessionId` is set,
+        // otherwise reads from `iteration.blob`. Both paths return the
+        // same envelope shape to `TraceViewer`.
+        const data = await getBlob({ iterationId: iteration._id });
         if (!cancelled) setBlob(data);
       } catch (e: any) {
         if (!cancelled) {
@@ -65,75 +380,136 @@ export function IterationDetails({
     return () => {
       cancelled = true;
     };
-  }, [iteration.blob, getBlob]);
+  }, [traceSourceKey, getBlob, blobRetryTick]);
 
   useEffect(() => {
-    const fetchToolsMetadata = async () => {
-      if (serverNames.length === 0) {
-        setToolsMetadata({});
-        setToolServerMap({});
-        setToolsWithSchema({});
-        return;
-      }
-      try {
-        // Fetch tools with their inputSchema for type display
-        // This makes only ONE call per server instead of two
-        const toolsMap: Record<string, { name: string; inputSchema?: any }> =
-          {};
-        const metadata: Record<string, Record<string, any>> = {};
-        const toolServerMap: ToolServerMap = {};
+    if (layoutMode !== "full") return;
+    setToolCallsSectionOpen(iteration.result !== "passed");
+    // Step-aligned cases (any interact/assert step) open on the Steps replay —
+    // the 1:1 mirror of the authored steps — matching the live preview default;
+    // pure prompt+grade cases keep Chat.
+    setPreviewTraceMode(
+      snapshotSteps.some((s) => s.kind === "interact" || s.kind === "assert")
+        ? "steps"
+        : "chat",
+    );
+  }, [layoutMode, iteration._id, iteration.result, snapshotSteps]);
 
-        await Promise.all(
-          serverNames.map(async (serverId) => {
-            try {
-              const result = await listTools({ serverId: serverId });
+  useEffect(() => {
+    let cancelled = false;
 
-              // Extract tools with schemas
-              if (result.tools) {
-                for (const tool of result.tools) {
-                  toolsMap[tool.name] = {
+    if (serverNames.length === 0) {
+      setToolsMetadata({});
+      setToolServerMap({});
+      setToolsWithSchema({});
+      setConnectedServerIds([]);
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    setToolsMetadata({});
+    setToolServerMap({});
+    setToolsWithSchema({});
+    setConnectedServerIds([]);
+
+    serverNames.forEach((serverId) => {
+      void listTools({ serverId })
+        .then(
+          (result: ListToolsResultWithMetadata) => {
+            if (cancelled) return;
+
+            setConnectedServerIds((prev) =>
+              prev.includes(serverId) ? prev : [...prev, serverId],
+            );
+
+            if (result.tools?.length) {
+              setToolsWithSchema((prev) => {
+                const next = { ...prev };
+                for (const tool of result.tools ?? []) {
+                  next[tool.name] = {
                     name: tool.name,
                     inputSchema: tool.inputSchema,
                   };
-                  toolServerMap[tool.name] = serverId;
                 }
-              }
+                return next;
+              });
 
-              // Extract metadata
-              const toolsMetadata = result.toolsMetadata ?? {};
-              for (const [toolName, meta] of Object.entries(toolsMetadata)) {
-                metadata[toolName] = meta as Record<string, unknown>;
-              }
-            } catch (error) {
-              // Silently fail for disconnected servers
-              console.warn(
-                `Failed to fetch tools for server ${serverId}:`,
-                error,
-              );
+              setToolServerMap((prev: ToolServerMap) => {
+                const next = { ...prev };
+                for (const tool of result.tools ?? []) {
+                  next[tool.name] = serverId;
+                }
+                return next;
+              });
             }
-          }),
-        );
 
-        setToolsWithSchema(toolsMap);
-        setToolsMetadata(metadata);
-        setToolServerMap(toolServerMap);
-      } catch (error) {
-        // Silently fail if servers aren't connected
-        // This is expected in evals where servers may not be running
-        setToolsMetadata({});
-        setToolServerMap({});
-        setToolsWithSchema({});
-      }
+            if (result.toolsMetadata) {
+              setToolsMetadata((prev) => ({
+                ...prev,
+                ...Object.fromEntries(
+                  Object.entries(result.toolsMetadata ?? {}).map(
+                    ([toolName, meta]) => [
+                      toolName,
+                      meta as Record<string, unknown>,
+                    ],
+                  ),
+                ),
+              }));
+            }
+          },
+        )
+        .catch((loadError: unknown) => {
+          if (cancelled) return;
+
+          console.warn(
+            `Failed to fetch tools for server ${serverId}:`,
+            loadError,
+          );
+        });
+    });
+
+    return () => {
+      cancelled = true;
     };
-    fetchToolsMetadata();
   }, [serverNames]);
 
-  // Use snapshot values first (reflects what was actually tested, including unsaved edits)
-  const expectedToolCalls =
-    iteration.testCaseSnapshot?.expectedToolCalls ||
-    testCase?.expectedToolCalls ||
-    [];
+  const traceModel = useMemo(
+    () => resolveTraceModel(iteration, testCase),
+    [iteration, testCase],
+  );
+
+  const estimatedDurationMs = useMemo(
+    () =>
+      Math.max(
+        iteration.updatedAt - (iteration.startedAt ?? iteration.createdAt),
+        0,
+      ),
+    [iteration.updatedAt, iteration.startedAt, iteration.createdAt],
+  );
+  const traceStartedAtMs = iteration.startedAt ?? iteration.createdAt;
+  const traceEndedAtMs = iteration.updatedAt;
+
+  // Aggregate expected tools across turns for display (snapshot wins over draft case).
+  const expectedToolCalls = resolveDisplayExpectedToolCalls(
+    iteration.testCaseSnapshot,
+    testCase,
+  );
   const actualToolCalls = iteration.actualToolCalls || [];
+  const hasEvalToolCalls =
+    expectedToolCalls.length > 0 || actualToolCalls.length > 0;
+  const hasBrowserArtifacts = useMemo(() => {
+    if (!blob || Array.isArray(blob) || typeof blob !== "object") {
+      return false;
+    }
+    const observations = (blob as { widgetRenderObservations?: unknown })
+      .widgetRenderObservations;
+    const videoUrl = (blob as { videoUrl?: unknown }).videoUrl;
+    return (
+      (Array.isArray(observations) && observations.length > 0) ||
+      (typeof videoUrl === "string" && videoUrl.length > 0)
+    );
+  }, [blob]);
 
   // Helper to format type information
   const formatType = (type: any): string => {
@@ -160,12 +536,17 @@ export function IterationDetails({
       return <span className="text-muted-foreground italic">No arguments</span>;
     }
     return (
-      <div className="space-y-1">
+      <div className="space-y-2">
         {entries.map(([key, value]) => {
           const argSchema = toolName ? getArgumentSchema(toolName, key) : null;
+          const formattedValue = resolveFormattedArgumentValue(value);
+
           return (
-            <div key={key} className="flex items-start gap-2">
-              <div className="flex items-center gap-1.5">
+            <div
+              key={key}
+              className="rounded-md border border-border/20 bg-background/40 px-2 py-1.5"
+            >
+              <div className="flex flex-wrap items-center gap-1.5">
                 <span className="font-medium text-foreground">{key}:</span>
                 {argSchema?.type && (
                   <span className="text-[10px] font-normal text-muted-foreground bg-background/50 px-1.5 py-0.5 rounded border border-border/40">
@@ -173,14 +554,65 @@ export function IterationDetails({
                   </span>
                 )}
               </div>
-              <span className="font-mono text-muted-foreground">
-                {typeof value === "object"
-                  ? JSON.stringify(value)
-                  : String(value)}
-              </span>
+
+              {formattedValue.kind === "structured" ? (
+                <div className="mt-2 overflow-hidden rounded-md border border-border/30 bg-background/80">
+                  <JsonEditor
+                    value={formattedValue.value}
+                    viewOnly
+                    collapsible
+                    defaultExpandDepth={1}
+                    collapseStringsAfterLength={160}
+                    expandJsonStrings
+                    className="max-h-72"
+                  />
+                </div>
+              ) : formattedValue.renderAsBlock ? (
+                <div className="mt-2 overflow-hidden rounded-md border border-border/30 bg-background/80">
+                  <JsonEditor
+                    value={formattedValue.value}
+                    viewOnly
+                    collapsible
+                    defaultExpandDepth={1}
+                    collapseStringsAfterLength={160}
+                    expandJsonStrings
+                    className="max-h-72"
+                  />
+                </div>
+              ) : (
+                <div className="mt-1 min-w-0 break-words font-mono text-[11px] leading-relaxed text-muted-foreground">
+                  {formattedValue.value}
+                </div>
+              )}
             </div>
           );
         })}
+      </div>
+    );
+  };
+
+  const renderRawToolCalls = (
+    toolCalls: Array<{ toolName: string; arguments: Record<string, any> }>,
+    emptyMessage: string,
+  ) => {
+    if (toolCalls.length === 0) {
+      return (
+        <div className="text-xs text-muted-foreground italic">
+          {emptyMessage}
+        </div>
+      );
+    }
+
+    return (
+      <div className="overflow-hidden rounded-md border border-border/30 bg-background/50">
+        <JsonEditor
+          value={toolCalls}
+          viewOnly
+          collapsible
+          defaultExpandDepth={2}
+          collapseStringsAfterLength={160}
+          className="min-h-[160px] max-h-72"
+        />
       </div>
     );
   };
@@ -198,8 +630,415 @@ export function IterationDetails({
   const errorDetailsJson = parseErrorDetails(iteration.errorDetails);
   const [isErrorDetailsOpen, setIsErrorDetailsOpen] = useState(false);
 
+  const hasToolCalls =
+    expectedToolCalls.length > 0 || actualToolCalls.length > 0;
+  const hasTrace = Boolean(iteration.blob || iteration.chatSessionId);
+  const traceFirst = layoutMode === "full" && hasTrace;
+  const previewTraceToolbar =
+    layoutMode === "full" && hasTrace && !loading && !error ? (
+      <PreviewHeaderSlot>
+        <TraceViewModeTabs
+          mode={
+            previewTraceMode === "browser" || previewTraceMode === "steps"
+              ? "timeline"
+              : previewTraceMode
+          }
+          onModeChange={setPreviewTraceMode}
+          showToolsTab={hasEvalToolCalls}
+          showBrowserTab={hasBrowserArtifacts}
+          browserActive={previewTraceMode === "browser"}
+          onSelectBrowser={() => setPreviewTraceMode("browser")}
+          showStepsTab={hasSteps}
+          stepsActive={previewTraceMode === "steps"}
+          onSelectSteps={() => setPreviewTraceMode("steps")}
+          appearance="segment"
+          className="w-full"
+        />
+      </PreviewHeaderSlot>
+    ) : null;
+  const toolCallsSummary = formatToolCallsSummary(
+    expectedToolCalls,
+    actualToolCalls,
+  );
+
+  /**
+   * Categorized diff rendered above the raw Expected/Actual grids. We only
+   * render the component when it would have something to say (mismatches /
+   * extras / out-of-order) — `ToolCallDiff` itself returns null otherwise.
+   */
+  const toolCallDiffResult = useMemo(
+    () =>
+      evaluateToolCalls(expectedToolCalls, actualToolCalls, {
+        isNegativeTest: iteration.testCaseSnapshot?.isNegativeTest,
+      }),
+    [
+      expectedToolCalls,
+      actualToolCalls,
+      iteration.testCaseSnapshot?.isNegativeTest,
+    ],
+  );
+
+  const toolCallsGrids =
+    toolViewMode === "raw" ? (
+      <div className="grid gap-3 md:grid-cols-2">
+        <div className="rounded-md border border-border/40 bg-muted/10 p-3 space-y-2">
+          <div className="text-xs font-medium text-muted-foreground uppercase">
+            Expected
+          </div>
+          {renderRawToolCalls(expectedToolCalls, "No expected tool calls")}
+        </div>
+        <div className="rounded-md border border-border/40 bg-muted/10 p-3 space-y-2">
+          <div className="text-xs font-medium text-muted-foreground uppercase">
+            Actual
+          </div>
+          {renderRawToolCalls(actualToolCalls, "No tool calls made")}
+        </div>
+      </div>
+    ) : (
+      <div className="grid gap-2 md:grid-cols-2">
+        <div className="rounded-md border border-border/40 bg-muted/10 p-2 space-y-2">
+          <div className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide">
+            Expected
+          </div>
+          {expectedToolCalls.length === 0 ? (
+            <div className="text-xs text-muted-foreground italic">
+              No expected tool calls
+            </div>
+          ) : (
+            <div className="space-y-1.5">
+              {expectedToolCalls.map((tool, idx) => (
+                <div
+                  key={`expected-${idx}`}
+                  className="rounded border border-border/30 bg-background/50 p-1.5 space-y-1"
+                >
+                  <div className="font-mono text-xs font-medium">
+                    {tool.toolName}
+                  </div>
+                  {Object.keys(tool.arguments || {}).length > 0 && (
+                    <div className="text-xs bg-muted/30 rounded p-1.5">
+                      {renderArguments(tool.arguments || {}, tool.toolName)}
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+        <div className="rounded-md border border-border/40 bg-muted/10 p-2 space-y-2">
+          <div className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide">
+            Actual
+          </div>
+          {actualToolCalls.length === 0 ? (
+            <div className="text-xs text-muted-foreground italic">
+              No tool calls made
+            </div>
+          ) : (
+            <div className="space-y-1.5">
+              {actualToolCalls.map((tool, idx) => (
+                <div
+                  key={`actual-${idx}`}
+                  className="rounded border border-border/30 bg-background/50 p-1.5 space-y-1"
+                >
+                  <div className="font-mono text-xs font-medium">
+                    {tool.toolName}
+                  </div>
+                  {Object.keys(tool.arguments || {}).length > 0 && (
+                    <div className="text-xs bg-muted/30 rounded p-1.5">
+                      {renderArguments(tool.arguments || {}, tool.toolName)}
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+    );
+
+  const formattedRawToggle = (
+    <div className="flex items-center gap-1 rounded-md border border-border/40 bg-background p-0.5">
+      <button
+        type="button"
+        onClick={() => setToolViewMode("formatted")}
+        className={`inline-flex items-center gap-1.5 rounded px-2 py-1 text-xs transition-colors ${
+          toolViewMode === "formatted"
+            ? "bg-primary/10 text-foreground font-medium"
+            : "text-muted-foreground hover:text-foreground"
+        }`}
+        title="Formatted view"
+      >
+        <MessageSquare className="h-3 w-3" />
+        Formatted
+      </button>
+      <button
+        type="button"
+        onClick={() => setToolViewMode("raw")}
+        className={`inline-flex items-center gap-1.5 rounded px-2 py-1 text-xs transition-colors ${
+          toolViewMode === "raw"
+            ? "bg-primary/10 text-foreground font-medium"
+            : "text-muted-foreground hover:text-foreground"
+        }`}
+        title="Raw JSON view"
+      >
+        <Code2 className="h-3 w-3" />
+        Raw
+      </button>
+    </div>
+  );
+
+  const toolCallsSection =
+    hasToolCalls && !hasTrace ? (
+      layoutMode === "full" ? (
+        <Collapsible
+          open={toolCallsSectionOpen}
+          onOpenChange={setToolCallsSectionOpen}
+        >
+          <div className="space-y-2" data-testid="iteration-tool-calls-section">
+            <div className="flex min-w-0 items-center justify-between gap-2 border-b border-border/40 pb-2">
+              <CollapsibleTrigger
+                type="button"
+                className="flex min-w-0 flex-1 items-center gap-1.5 rounded-md py-1 text-left transition-colors hover:bg-muted/50 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/60"
+              >
+                {toolCallsSectionOpen ? (
+                  <ChevronDown className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                ) : (
+                  <ChevronRight className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                )}
+                <span className="shrink-0 text-xs font-semibold">
+                  Tool Calls
+                </span>
+                {!toolCallsSectionOpen && (
+                  <span
+                    className="min-w-0 truncate text-xs text-muted-foreground"
+                    title={toolCallsSummary}
+                  >
+                    {toolCallsSummary}
+                  </span>
+                )}
+              </CollapsibleTrigger>
+              {toolCallsSectionOpen ? formattedRawToggle : null}
+            </div>
+            <CollapsibleContent>
+              <div
+                className="space-y-2"
+                data-testid="iteration-tool-calls-grid"
+              >
+                <ToolCallDiff
+                  result={toolCallDiffResult}
+                  expectedToolCalls={expectedToolCalls}
+                  actualToolCalls={actualToolCalls}
+                />
+                {toolCallsGrids}
+              </div>
+            </CollapsibleContent>
+          </div>
+        </Collapsible>
+      ) : (
+        <div className="space-y-2" data-testid="iteration-tool-calls-section">
+          <div className="flex items-center justify-between border-b border-border/40 pb-2">
+            <div className="text-xs font-semibold">Tool Calls</div>
+            {formattedRawToggle}
+          </div>
+          <div data-testid="iteration-tool-calls-grid">
+            <ToolCallDiff
+              result={toolCallDiffResult}
+              expectedToolCalls={expectedToolCalls}
+              actualToolCalls={actualToolCalls}
+            />
+            {toolCallsGrids}
+          </div>
+        </div>
+      )
+    ) : null;
+
+  const predicates = useMemo(
+    () => parseIterationPredicates(iteration.metadata),
+    [iteration.metadata],
+  );
+  // Persisted per-step verdicts (`metadata.stepResults`), keyed by stepId — the
+  // completed-run analogue of the live step_status stream. Feeds the Steps tab so
+  // each assert/interact shows its own PASS/FAIL inline, which is why the gate
+  // footer below no longer repeats the step-scoped checks.
+  const stepStatusById = useMemo(
+    () =>
+      parseStepStatusById(
+        iteration.metadata as StepReplayMetadata | undefined,
+      ),
+    [iteration.metadata],
+  );
+  // A snapshot is a render check ("probe") when its steps are model-free (no
+  // `prompt` step). Probes get an artifacts-first layout with NO Steps tab, so
+  // the gate stays their canonical checks display (see below); every other case
+  // surfaces step verdicts inline on the Steps tab.
+  const isProbe = isModelFree(snapshotSteps);
+  // For the non-probe layout, only CASE-LEVEL (unscoped) predicates belong in the
+  // gate footer: every step-scoped check (toolCalledWith / widgetRendered / …)
+  // corresponds to an authored `assert` step and now renders its verdict inline
+  // on the Steps tab. So the footer carries just the global gates that have no
+  // per-step home, and disappears entirely when every check is step-scoped.
+  // Probes keep the FULL gate (no Steps tab to absorb the step-scoped rows).
+  const gateRows = useMemo(() => {
+    if (!predicates) return null;
+    return isProbe ? predicates : predicates.filter((p) => !p.scope);
+  }, [predicates, isProbe]);
+  // Per-widget render observations off the trace blob, so a `widgetRendered`
+  // (and friends) check can show the rendered widget inline as its evidence.
+  // Absent until the blob loads — the gate renders fine without it.
+  const blobObservations = useMemo<
+    import("@/shared/eval-trace").EvalTraceWidgetRenderObservationView[]
+  >(() => {
+    if (!blob || Array.isArray(blob) || typeof blob !== "object") return [];
+    const raw = (blob as { widgetRenderObservations?: unknown })
+      .widgetRenderObservations;
+    return Array.isArray(raw) ? raw : [];
+  }, [blob]);
+  const predicatesSection =
+    gateRows && gateRows.length > 0 ? (
+      <div className="space-y-2" data-testid="iteration-predicates-section">
+        <div className="flex items-center justify-between border-b border-border/40 pb-2">
+          <div className="text-xs font-semibold">
+            {isProbe ? "Predicate Gate" : "Global Gates"}
+          </div>
+        </div>
+        <PredicatesList predicates={gateRows} observations={blobObservations} />
+      </div>
+    ) : null;
+
+  // Widget probes get an artifacts-first layout: checks + the rendered widget.
+  // Tool-call diff (expected vs actual is meaningless for a pinned call) and the
+  // full trace viewer (no LLM conversation) are hidden. `isProbe` is computed
+  // above (next to the gate, which depends on it).
+  // Pure render checks hide the trace viewer (no LLM conversation), so they get
+  // a dedicated "Widget Render" section here. Every other case (prompt/hybrid)
+  // already surfaces the same observations via the trace viewer's Browser tab,
+  // so no separate section is added for them — see the layout below.
+  const probeObservations = useMemo<
+    import("@/shared/eval-trace").EvalTraceWidgetRenderObservationView[]
+  >(() => {
+    if (!isProbe || !blob || Array.isArray(blob) || typeof blob !== "object") {
+      return [];
+    }
+    const raw = (blob as { widgetRenderObservations?: unknown })
+      .widgetRenderObservations;
+    return Array.isArray(raw) ? raw : [];
+  }, [isProbe, blob]);
+  const probeArtifactsSection = isProbe ? (
+    <div className="space-y-2" data-testid="iteration-probe-artifacts-section">
+      <div className="flex items-center justify-between border-b border-border/40 pb-2">
+        <div className="text-xs font-semibold">Widget Render</div>
+      </div>
+      {loading ? (
+        <div className="flex items-center justify-center py-8">
+          <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
+        </div>
+      ) : error ? (
+        <TraceBlobLoadErrorPanel
+          error={error}
+          layoutMode={layoutMode}
+          onRetry={() => setBlobRetryTick((n) => n + 1)}
+          isDetailsOpen={isBlobErrorDetailsOpen}
+          onDetailsOpenChange={setIsBlobErrorDetailsOpen}
+        />
+      ) : probeObservations.length > 0 ? (
+        <BrowserArtifactsView observations={probeObservations} />
+      ) : (
+        <p className="text-xs italic text-muted-foreground">
+          No render observation recorded for this iteration.
+        </p>
+      )}
+    </div>
+  ) : null;
+
+  const traceSection = hasTrace ? (
+    <div
+      className={cn(
+        "flex flex-col",
+        layoutMode === "full" && "min-h-0 flex-1",
+        layoutMode === "full" ? "gap-1" : "gap-1.5",
+      )}
+      data-testid="iteration-trace-section"
+    >
+      {layoutMode !== "full" ? (
+        <div className="text-xs font-semibold">Trace</div>
+      ) : null}
+      <div
+        className={cn(
+          layoutMode === "compact" && "rounded-md bg-muted/20 p-3",
+          layoutMode === "full" &&
+            hasTrace &&
+            !error &&
+            "flex min-h-0 flex-1 flex-col",
+          layoutMode === "full" &&
+            error &&
+            !loading &&
+            "min-h-[320px] flex flex-col justify-center",
+        )}
+      >
+        {loading ? (
+          <div className="flex items-center justify-center py-8">
+            <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
+          </div>
+        ) : error ? (
+          <TraceBlobLoadErrorPanel
+            error={error}
+            layoutMode={layoutMode}
+            onRetry={() => setBlobRetryTick((n) => n + 1)}
+            isDetailsOpen={isBlobErrorDetailsOpen}
+            onDetailsOpenChange={setIsBlobErrorDetailsOpen}
+          />
+        ) : (
+          <TraceViewer
+              trace={blob}
+              mcpToolResultImageRendering={mcpToolResultImageRendering}
+              model={traceModel}
+              toolsMetadata={toolsMetadata}
+              toolServerMap={toolServerMap}
+              connectedServerIds={connectedServerIds}
+              traceStartedAtMs={traceStartedAtMs}
+              traceEndedAtMs={traceEndedAtMs}
+              estimatedDurationMs={estimatedDurationMs}
+              traceInsight={caseInsightSlot}
+              chromeDensity={layoutMode === "full" ? "compact" : "default"}
+              fillContent={layoutMode === "full"}
+              hideToolbar={layoutMode === "full"}
+              forcedViewMode={
+                layoutMode === "full" ? previewTraceMode : undefined
+              }
+              steps={snapshotSteps}
+              stepStatusById={
+                stepStatusById.size > 0 ? stepStatusById : undefined
+              }
+              iterationResult={iteration.result}
+              expectedToolCalls={expectedToolCalls}
+              actualToolCalls={actualToolCalls}
+            />
+        )}
+      </div>
+    </div>
+  ) : null;
+
+  const caseInsightFallback =
+    caseInsightSlot && !hasTrace ? (
+      <div className="min-w-0" data-testid="iteration-case-insight-fallback">
+        {caseInsightSlot}
+      </div>
+    ) : null;
   return (
-    <div className="space-y-4 py-2">
+    <div
+      className={cn(
+        "flex flex-col",
+        layoutMode === "full" && "min-h-0 flex-1",
+        layoutMode === "full" ? "gap-3" : "gap-4 py-2",
+      )}
+    >
+      {previewTraceToolbar}
+      {/* Advisory judge verdict — pinned under the tab row so it's visible on
+          every tab (Steps/Chat/Results/Trace/App/Raw), not buried in one. */}
+      {layoutMode === "full" && judgeCase ? (
+        <div className="shrink-0 px-3">
+          <JudgeVerdictPanel judgeCase={judgeCase} />
+        </div>
+      ) : null}
       {/* Error Display */}
       {iteration.error && (
         <div className="rounded-md border border-destructive/50 bg-destructive/10 p-3 space-y-2">
@@ -243,170 +1082,25 @@ export function IterationDetails({
         </div>
       )}
 
-      {/* Tool Calls Comparison & Status */}
-      {(expectedToolCalls.length > 0 || actualToolCalls.length > 0) && (
-        <div className="space-y-2">
-          <div className="flex items-center justify-between border-b border-border/40 pb-2">
-            <div className="text-xs font-semibold">Tool Calls</div>
-            <div className="flex items-center gap-1 rounded-md border border-border/40 bg-background p-0.5">
-              <button
-                type="button"
-                onClick={() => setToolViewMode("formatted")}
-                className={`inline-flex items-center gap-1.5 rounded px-2 py-1 text-xs transition-colors ${
-                  toolViewMode === "formatted"
-                    ? "bg-primary/10 text-foreground font-medium"
-                    : "text-muted-foreground hover:text-foreground"
-                }`}
-                title="Formatted view"
-              >
-                <MessageSquare className="h-3 w-3" />
-                Formatted
-              </button>
-              <button
-                type="button"
-                onClick={() => setToolViewMode("raw")}
-                className={`inline-flex items-center gap-1.5 rounded px-2 py-1 text-xs transition-colors ${
-                  toolViewMode === "raw"
-                    ? "bg-primary/10 text-foreground font-medium"
-                    : "text-muted-foreground hover:text-foreground"
-                }`}
-                title="Raw JSON view"
-              >
-                <Code2 className="h-3 w-3" />
-                Raw
-              </button>
-            </div>
-          </div>
+      {caseInsightFallback}
 
-          {toolViewMode === "raw" ? (
-            <div className="grid gap-3 md:grid-cols-2">
-              {/* Expected */}
-              <div className="rounded-md border border-border/40 bg-muted/10 p-3 space-y-2">
-                <div className="text-xs font-medium text-muted-foreground uppercase">
-                  Expected
-                </div>
-                {expectedToolCalls.length === 0 ? (
-                  <div className="text-xs text-muted-foreground italic">
-                    No expected tool calls
-                  </div>
-                ) : (
-                  <pre className="text-xs font-mono bg-background/50 rounded p-2 overflow-x-auto">
-                    {JSON.stringify(expectedToolCalls, null, 2)}
-                  </pre>
-                )}
-              </div>
-
-              {/* Actual */}
-              <div className="rounded-md border border-border/40 bg-muted/10 p-3 space-y-2">
-                <div className="text-xs font-medium text-muted-foreground uppercase">
-                  Actual
-                </div>
-                {actualToolCalls.length === 0 ? (
-                  <div className="text-xs text-muted-foreground italic">
-                    No tool calls made
-                  </div>
-                ) : (
-                  <pre className="text-xs font-mono bg-background/50 rounded p-2 overflow-x-auto">
-                    {JSON.stringify(actualToolCalls, null, 2)}
-                  </pre>
-                )}
-              </div>
-            </div>
-          ) : (
-            <div className="grid gap-2 md:grid-cols-2">
-              {/* Expected */}
-              <div className="rounded-md border border-border/40 bg-muted/10 p-2 space-y-2">
-                <div className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide">
-                  Expected
-                </div>
-                {expectedToolCalls.length === 0 ? (
-                  <div className="text-xs text-muted-foreground italic">
-                    No expected tool calls
-                  </div>
-                ) : (
-                  <div className="space-y-1.5">
-                    {expectedToolCalls.map((tool, idx) => (
-                      <div
-                        key={`expected-${idx}`}
-                        className="rounded border border-border/30 bg-background/50 p-1.5 space-y-1"
-                      >
-                        <div className="font-mono text-xs font-medium">
-                          {tool.toolName}
-                        </div>
-                        {Object.keys(tool.arguments || {}).length > 0 && (
-                          <div className="text-xs bg-muted/30 rounded p-1.5">
-                            {renderArguments(
-                              tool.arguments || {},
-                              tool.toolName,
-                            )}
-                          </div>
-                        )}
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-
-              {/* Actual */}
-              <div className="rounded-md border border-border/40 bg-muted/10 p-2 space-y-2">
-                <div className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide">
-                  Actual
-                </div>
-                {actualToolCalls.length === 0 ? (
-                  <div className="text-xs text-muted-foreground italic">
-                    No tool calls made
-                  </div>
-                ) : (
-                  <div className="space-y-1.5">
-                    {actualToolCalls.map((tool, idx) => (
-                      <div
-                        key={`actual-${idx}`}
-                        className="rounded border border-border/30 bg-background/50 p-1.5 space-y-1"
-                      >
-                        <div className="font-mono text-xs font-medium">
-                          {tool.toolName}
-                        </div>
-                        {Object.keys(tool.arguments || {}).length > 0 && (
-                          <div className="text-xs bg-muted/30 rounded p-1.5">
-                            {renderArguments(
-                              tool.arguments || {},
-                              tool.toolName,
-                            )}
-                          </div>
-                        )}
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-            </div>
-          )}
-        </div>
-      )}
-
-      {/* Trace */}
-      {iteration.blob && (
-        <div className="space-y-1.5">
-          <div className="text-xs font-semibold">Trace</div>
-          <div className="rounded-md bg-muted/20 p-3 max-h-[480px] overflow-y-auto">
-            {loading ? (
-              <div className="text-xs text-muted-foreground">Loading trace</div>
-            ) : error ? (
-              <div className="text-xs text-destructive">{error}</div>
-            ) : (
-              <TraceViewer
-                trace={blob}
-                modelProvider={
-                  testCase?.models[0]?.provider ||
-                  iteration.testCaseSnapshot?.provider ||
-                  "openai"
-                }
-                toolsMetadata={toolsMetadata}
-                toolServerMap={toolServerMap}
-              />
-            )}
-          </div>
-        </div>
+      {isProbe ? (
+        <>
+          {predicatesSection}
+          {probeArtifactsSection}
+        </>
+      ) : traceFirst ? (
+        <>
+          {traceSection}
+          {toolCallsSection}
+          {predicatesSection}
+        </>
+      ) : (
+        <>
+          {toolCallsSection}
+          {predicatesSection}
+          {traceSection}
+        </>
       )}
     </div>
   );

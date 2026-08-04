@@ -1,0 +1,322 @@
+import { request as httpRequest } from "node:http";
+import { request as httpsRequest } from "node:https";
+import type { IncomingHttpHeaders } from "node:http";
+import type {
+  MCPCheckId,
+  MCPCheckResult,
+  RawHttpCheckContext,
+} from "../types.js";
+import { CHECK_ERAS } from "../types.js";
+import {
+  eraSkipMessage,
+  failedResult,
+  notApplicableResult,
+  passedResult,
+} from "./helpers.js";
+
+const LOCALHOST_SECURITY_CHECK_IDS = [
+  "localhost-host-rebinding-rejected",
+  "localhost-host-valid-accepted",
+] as const;
+
+type RawHttpResponse = {
+  statusCode: number;
+  headers: IncomingHttpHeaders;
+  body: unknown;
+};
+
+// Exported so `tests/conformance-catalog.test.ts` can assert the browser-safe
+// catalog still matches these canonical strings.
+export const SECURITY_CHECK_METADATA = {
+  "localhost-host-rebinding-rejected": {
+    id: "localhost-host-rebinding-rejected",
+    category: "security",
+    title: "Reject Evil Host Header",
+    description:
+      "Local servers reject initialize requests with a non-localhost Host/Origin header.",
+  },
+  "localhost-host-valid-accepted": {
+    id: "localhost-host-valid-accepted",
+    category: "security",
+    title: "Accept Valid Local Host Header",
+    description:
+      "Local servers accept initialize requests with a valid localhost Host/Origin header.",
+  },
+} as const satisfies Record<
+  Extract<
+    MCPCheckId,
+    "localhost-host-rebinding-rejected" | "localhost-host-valid-accepted"
+  >,
+  Pick<MCPCheckResult, "id" | "category" | "title" | "description">
+>;
+
+function isLocalhostUrl(serverUrl: string): boolean {
+  const hostname = new URL(serverUrl).hostname.toLowerCase();
+  return (
+    hostname === "localhost" ||
+    hostname === "127.0.0.1" ||
+    hostname === "::1" ||
+    hostname === "[::1]"
+  );
+}
+
+function getHostFromUrl(serverUrl: string): string {
+  return new URL(serverUrl).host;
+}
+
+function parseResponseBody(text: string): unknown {
+  if (!text) {
+    return undefined;
+  }
+
+  try {
+    return JSON.parse(text);
+  } catch {
+    return text;
+  }
+}
+
+async function sendRequest(
+  serverUrl: string,
+  headers: Record<string, string>,
+  timeoutMs: number,
+  protocolVersion: string,
+): Promise<RawHttpResponse> {
+  const target = new URL(serverUrl);
+  const requestImpl = target.protocol === "https:" ? httpsRequest : httpRequest;
+  const body = JSON.stringify({
+    jsonrpc: "2.0",
+    id: 1,
+    method: "initialize",
+    params: {
+      protocolVersion,
+      capabilities: {},
+      clientInfo: {
+        name: "mcpjam-sdk-conformance",
+        version: "1.0.0",
+      },
+    },
+  });
+
+  return await new Promise<RawHttpResponse>((resolve, reject) => {
+    const req = requestImpl(
+      {
+        protocol: target.protocol,
+        hostname: target.hostname,
+        port: target.port,
+        path: `${target.pathname}${target.search}`,
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "application/json, text/event-stream",
+          "Content-Length": String(Buffer.byteLength(body)),
+          ...headers,
+        },
+      },
+      (res) => {
+        const chunks: Buffer[] = [];
+        res.on("data", (chunk) => {
+          chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+        });
+        res.on("end", () => {
+          resolve({
+            statusCode: res.statusCode ?? 0,
+            headers: res.headers,
+            body: parseResponseBody(Buffer.concat(chunks).toString("utf8")),
+          });
+        });
+      },
+    );
+
+    req.setTimeout(timeoutMs, () => {
+      req.destroy(new Error(`Request timed out after ${timeoutMs}ms`));
+    });
+    req.on("error", reject);
+    req.write(body);
+    req.end();
+  });
+}
+
+function buildBaseHeaders(ctx: RawHttpCheckContext): Record<string, string> {
+  return {
+    ...(ctx.config.customHeaders ?? {}),
+    ...(ctx.config.accessToken
+      ? { Authorization: `Bearer ${ctx.config.accessToken}` }
+      : {}),
+  };
+}
+
+export async function runSecurityChecks(
+  ctx: RawHttpCheckContext,
+  selectedCheckIds: Set<MCPCheckId>,
+): Promise<MCPCheckResult[]> {
+  const results: MCPCheckResult[] = [];
+
+  if (
+    !selectedCheckIds.has("localhost-host-rebinding-rejected") &&
+    !selectedCheckIds.has("localhost-host-valid-accepted")
+  ) {
+    return results;
+  }
+
+  // Era gate (CHECK_ERAS is the single source of truth): the raw host-header
+  // probes are legacy-only, so on a modern run they surface as skips — never
+  // as a false failure — before any HTTP is attempted.
+  const applicable = new Set<MCPCheckId>();
+  for (const id of LOCALHOST_SECURITY_CHECK_IDS) {
+    if (!selectedCheckIds.has(id)) {
+      continue;
+    }
+    if (CHECK_ERAS[id].includes(ctx.config.era)) {
+      applicable.add(id);
+    } else {
+      results.push(
+        notApplicableResult(
+          SECURITY_CHECK_METADATA[id],
+          eraSkipMessage(ctx.config.era, ctx.config.protocolVersion),
+        ),
+      );
+    }
+  }
+
+  if (applicable.size === 0) {
+    return results;
+  }
+
+  const protocolVersion = ctx.config.protocolVersion ?? "2025-11-25";
+
+  if (!isLocalhostUrl(ctx.serverUrl)) {
+    for (const id of LOCALHOST_SECURITY_CHECK_IDS) {
+      if (applicable.has(id)) {
+        results.push(
+          notApplicableResult(
+            SECURITY_CHECK_METADATA[id],
+            "Security host-header checks only apply to localhost servers",
+            {
+              serverUrl: ctx.serverUrl,
+            },
+          ),
+        );
+      }
+    }
+
+    return results;
+  }
+
+  const baseHeaders = buildBaseHeaders(ctx);
+  const validHost = getHostFromUrl(ctx.serverUrl);
+
+  if (applicable.has("localhost-host-rebinding-rejected")) {
+    const startedAt = Date.now();
+    try {
+      const response = await sendRequest(
+        ctx.serverUrl,
+        {
+          ...baseHeaders,
+          Host: "evil.example.com",
+          Origin: "http://evil.example.com",
+        },
+        ctx.config.checkTimeout,
+        protocolVersion,
+      );
+      // 2025-11-25 sharpened the requirement (changelog PR #1439): "If the
+      // Origin header is present and invalid, servers MUST respond with HTTP
+      // 403 Forbidden." The earlier revisions state the validation MUST but
+      // name no status, so any 4xx satisfies them.
+      //
+      // Gated on an EXPLICIT pin, not on the resolved version: `protocolVersion`
+      // falls back to 2025-11-25 to have something to put on the wire, and
+      // letting that fallback also decide the assertion would newly fail an
+      // unpinned run against a server that answers 400 — a run that asserted
+      // nothing about which revision it was judging.
+      const requires403 =
+        ctx.config.protocolVersion !== undefined &&
+        ctx.config.protocolVersion >= "2025-11-25";
+      const rejected = requires403
+        ? response.statusCode === 403
+        : response.statusCode >= 400 && response.statusCode < 500;
+      results.push(
+        rejected
+          ? passedResult(
+              SECURITY_CHECK_METADATA["localhost-host-rebinding-rejected"],
+              Date.now() - startedAt,
+              {
+                statusCode: response.statusCode,
+                body: response.body as Record<string, unknown> | string | undefined,
+              },
+            )
+          : failedResult(
+              SECURITY_CHECK_METADATA["localhost-host-rebinding-rejected"],
+              Date.now() - startedAt,
+              requires403
+                ? `Expected HTTP 403 Forbidden for an invalid Origin header (required since 2025-11-25), got ${response.statusCode}`
+                : `Expected a 4xx response for invalid Host/Origin headers, got ${response.statusCode}`,
+              {
+                statusCode: response.statusCode,
+                body: response.body as Record<string, unknown> | string | undefined,
+              },
+            ),
+      );
+    } catch (error) {
+      results.push(
+        failedResult(
+          SECURITY_CHECK_METADATA["localhost-host-rebinding-rejected"],
+          Date.now() - startedAt,
+          error instanceof Error ? error.message : String(error),
+          undefined,
+          error,
+        ),
+      );
+    }
+  }
+
+  if (applicable.has("localhost-host-valid-accepted")) {
+    const startedAt = Date.now();
+    try {
+      const response = await sendRequest(
+        ctx.serverUrl,
+        {
+          ...baseHeaders,
+          Host: validHost,
+          Origin: `http://${validHost}`,
+        },
+        ctx.config.checkTimeout,
+        protocolVersion,
+      );
+      const accepted =
+        response.statusCode >= 200 && response.statusCode < 300;
+      results.push(
+        accepted
+          ? passedResult(
+              SECURITY_CHECK_METADATA["localhost-host-valid-accepted"],
+              Date.now() - startedAt,
+              {
+                statusCode: response.statusCode,
+                body: response.body as Record<string, unknown> | string | undefined,
+              },
+            )
+          : failedResult(
+              SECURITY_CHECK_METADATA["localhost-host-valid-accepted"],
+              Date.now() - startedAt,
+              `Expected a 2xx response for valid localhost headers, got ${response.statusCode}`,
+              {
+                statusCode: response.statusCode,
+                body: response.body as Record<string, unknown> | string | undefined,
+              },
+            ),
+      );
+    } catch (error) {
+      results.push(
+        failedResult(
+          SECURITY_CHECK_METADATA["localhost-host-valid-accepted"],
+          Date.now() - startedAt,
+          error instanceof Error ? error.message : String(error),
+          undefined,
+          error,
+        ),
+      );
+    }
+  }
+
+  return results;
+}

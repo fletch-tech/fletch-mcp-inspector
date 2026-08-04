@@ -1,30 +1,35 @@
-import type { Tool } from "@modelcontextprotocol/sdk/types.js";
+import type { Tool } from "@modelcontextprotocol/client";
 import { RefreshCw, Play, Clock, PanelLeftClose, Save } from "lucide-react";
 import {
   Accordion,
   AccordionItem,
   AccordionTrigger,
   AccordionContent,
-} from "../ui/accordion";
-import { type RefObject, useMemo, useState, useEffect } from "react";
-import { Button } from "../ui/button";
-import { ScrollArea } from "../ui/scroll-area";
+} from "@mcpjam/design-system/accordion";
+import { type RefObject, useState, useEffect } from "react";
+import { Button } from "@mcpjam/design-system/button";
+import { ScrollArea } from "@mcpjam/design-system/scroll-area";
 import { SearchInput } from "../ui/search-input";
-import { Input } from "../ui/input";
-import { ToolItem } from "./ToolItem";
+import { Input } from "@mcpjam/design-system/input";
+import { ToolItem, type ToolQualityInfo } from "./ToolItem";
 import { SavedRequestItem } from "./SavedRequestItem";
 import type { SavedRequest } from "@/lib/types/request-types";
-import { detectEnvironment, detectPlatform } from "@/lib/PosthogUtils";
-import { usePostHog } from "posthog-js/react";
+import { track } from "@/lib/analytics";
 import { SelectedToolHeader } from "../ui-playground/SelectedToolHeader";
 import { ParametersForm } from "../ui-playground/ParametersForm";
 import { SchemaViewer } from "@/components/ui/schema-viewer";
 import type { FormField } from "@/lib/tool-form";
+import {
+  CacheProvenanceBadge,
+  type ServedFromCache,
+} from "@/components/ui/cache-provenance-badge";
 
 interface ToolsSidebarProps {
   activeTab: "tools" | "saved";
   onChangeTab: (tab: "tools" | "saved") => void;
   tools: Record<string, Tool>;
+  /** Per-tool quality findings keyed by tool name (optional). */
+  toolQuality?: Map<string, ToolQualityInfo>;
   toolNames: string[];
   filteredToolNames: string[];
   selectedToolName?: string;
@@ -32,6 +37,8 @@ interface ToolsSidebarProps {
   searchQuery: string;
   onSearchQueryChange: (q: string) => void;
   onRefresh: () => void;
+  /** SEP-2549 provenance for the most recent fetch — present ONLY on a hit. */
+  servedFromCache?: ServedFromCache;
   onSelectTool: (name: string) => void;
   savedRequests: SavedRequest[];
   highlightedRequestId: string | null;
@@ -43,6 +50,7 @@ interface ToolsSidebarProps {
   sentinelRef: RefObject<HTMLDivElement | null>;
   loadingMore: boolean;
   cursor: string;
+  serverConnected?: boolean;
   // Parameters form props (for full-page replacement pattern)
   formFields?: FormField[];
   onFieldChange?: (name: string, value: unknown) => void;
@@ -55,8 +63,25 @@ interface ToolsSidebarProps {
   onExecuteAsTaskChange?: (value: boolean) => void;
   taskRequired?: boolean;
   taskTtl?: number;
+  /** Which tasks wire the connection speaks; drives the task affordance. */
+  taskWire?: "none" | "legacy" | "extension";
   onTaskTtlChange?: (value: number) => void;
   serverSupportsTaskToolCalls?: boolean;
+  /**
+   * The host's task policy is `off`. Kept SEPARATE from
+   * `serverSupportsTaskToolCalls`, which stays truthful about the server, so
+   * the panel can say "this server supports tasks; this host disabled them"
+   * rather than pretending the capability isn't there.
+   */
+  tasksDisabledByHost?: boolean;
+  /**
+   * Execution is blocked for the SELECTED tool (e.g. it requires task
+   * execution while the host disabled tasks). Affordance only — the owning
+   * tab guards `executeTool` itself, so this just keeps the buttons honest.
+   */
+  executeDisabled?: boolean;
+  /** Human-readable reason shown when `executeDisabled` is set. */
+  executeDisabledReason?: string;
   // Collapsible sidebar
   onClose?: () => void;
 }
@@ -65,6 +90,7 @@ export function ToolsSidebar({
   activeTab,
   onChangeTab,
   tools,
+  toolQuality,
   toolNames,
   filteredToolNames,
   selectedToolName,
@@ -72,6 +98,7 @@ export function ToolsSidebar({
   searchQuery,
   onSearchQueryChange,
   onRefresh,
+  servedFromCache,
   onSelectTool,
   savedRequests,
   highlightedRequestId,
@@ -83,6 +110,7 @@ export function ToolsSidebar({
   sentinelRef,
   loadingMore,
   cursor,
+  serverConnected = true,
   // Parameters form props
   formFields,
   onFieldChange,
@@ -95,11 +123,14 @@ export function ToolsSidebar({
   onExecuteAsTaskChange,
   taskRequired,
   taskTtl,
+  taskWire,
   onTaskTtlChange,
   serverSupportsTaskToolCalls,
+  tasksDisabledByHost,
+  executeDisabled,
+  executeDisabledReason,
   onClose,
 }: ToolsSidebarProps) {
-  const posthog = usePostHog();
   const selectedTool = selectedToolName ? tools[selectedToolName] : null;
 
   const hasParameters = formFields && formFields.length > 0;
@@ -108,15 +139,14 @@ export function ToolsSidebar({
   useEffect(() => {
     setOpenSections(hasParameters ? ["parameters"] : ["description"]);
   }, [selectedToolName, hasParameters]);
-  const canExecute = !!selectedToolName && !!onExecute;
+  const canExecute =
+    serverConnected && !!selectedToolName && !!onExecute && !executeDisabled;
   const canSave = !!selectedToolName && !!onSave;
 
   const handleExecute = () => {
-    if (!onExecute) return;
-    posthog.capture("execute_tool", {
+    if (!onExecute || executeDisabled) return;
+    track("execute_tool", {
       location: "tools_sidebar",
-      platform: detectPlatform(),
-      environment: detectEnvironment(),
       as_task: executeAsTask ?? false,
     });
     onExecute();
@@ -124,19 +154,15 @@ export function ToolsSidebar({
 
   const handleSave = () => {
     if (!onSave) return;
-    posthog.capture("save_tool_button_clicked", {
+    track("save_tool_button_clicked", {
       location: "tools_sidebar",
-      platform: detectPlatform(),
-      environment: detectEnvironment(),
     });
     onSave();
   };
 
   const handleRefresh = () => {
-    posthog.capture("refresh_tools_clicked", {
+    track("refresh_tools_clicked", {
       location: "tools_sidebar",
-      platform: detectPlatform(),
-      environment: detectEnvironment(),
     });
     onRefresh();
   };
@@ -194,7 +220,7 @@ export function ToolsSidebar({
               onClick={handleRefresh}
               variant="ghost"
               size="sm"
-              disabled={fetchingTools}
+              disabled={fetchingTools || !serverConnected}
               className="h-7 w-7 p-0"
               title="Refresh tools"
             >
@@ -221,6 +247,7 @@ export function ToolsSidebar({
             disabled={loading || !canExecute}
             size="sm"
             className="h-8 px-3 text-xs ml-auto"
+            title={executeDisabled ? executeDisabledReason : undefined}
           >
             {loading ? (
               <RefreshCw className="h-3 w-3 animate-spin" />
@@ -241,7 +268,10 @@ export function ToolsSidebar({
           <SelectedToolHeader
             toolName={selectedToolName}
             onExpand={() => onSelectTool("")}
-            onClear={() => onSelectTool("")}
+            toolSwitchList={{
+              names: toolNames,
+              onSelect: (name) => onSelectTool(name),
+            }}
           />
 
           <div className="flex-1 overflow-hidden">
@@ -302,9 +332,43 @@ export function ToolsSidebar({
               </Accordion>
 
               {/* Task execution options */}
-              {serverSupportsTaskToolCalls && (
+              {serverSupportsTaskToolCalls && tasksDisabledByHost && (
+                <div className="px-3 py-3 border-t border-border space-y-1.5">
+                  <span className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
+                    <Clock className="h-3 w-3" />
+                    <span>
+                      This server supports tasks, but this host has task
+                      execution turned off.
+                    </span>
+                  </span>
+                  {executeDisabled && executeDisabledReason && (
+                    // The required case: the selected tool can ONLY run as a
+                    // task, so with tasks off it cannot run at all.
+                    <span className="flex items-center gap-1.5 text-[11px] text-amber-600 dark:text-amber-400">
+                      <Clock className="h-3 w-3" />
+                      <span>{executeDisabledReason}</span>
+                    </span>
+                  )}
+                </div>
+              )}
+              {serverSupportsTaskToolCalls && !tasksDisabledByHost && (
                 <div className="px-3 py-3 border-t border-border">
-                  {taskRequired ? (
+                  {taskWire === "extension" ? (
+                    // The extension has no client-side TTL or opt-in: the
+                    // client only declares that a task response is acceptable.
+                    <label className="flex items-center gap-1.5 text-[11px] text-muted-foreground cursor-pointer hover:text-foreground transition-colors">
+                      <input
+                        type="checkbox"
+                        checked={executeAsTask ?? false}
+                        onChange={(e) =>
+                          onExecuteAsTaskChange?.(e.target.checked)
+                        }
+                        className="w-3.5 h-3.5 rounded border-border accent-primary cursor-pointer"
+                      />
+                      <Clock className="h-3 w-3" />
+                      <span>Allow task response</span>
+                    </label>
+                  ) : taskRequired ? (
                     <div className="flex items-center gap-2">
                       <span className="flex items-center gap-1.5 text-[11px] text-amber-600 dark:text-amber-400">
                         <Clock className="h-3 w-3" />
@@ -380,6 +444,11 @@ export function ToolsSidebar({
                   : "Search saved requests..."
               }
             />
+            {activeTab === "tools" && servedFromCache && (
+              <div className="mt-1.5">
+                <CacheProvenanceBadge servedFromCache={servedFromCache} />
+              </div>
+            )}
           </div>
 
           {/* List content */}
@@ -403,7 +472,9 @@ export function ToolsSidebar({
                     <div className="text-center py-8">
                       <p className="text-sm text-muted-foreground">
                         {tools && toolNames.length === 0
-                          ? "No tools were found. Try refreshing. Make sure you selected the correct server and the server is running."
+                          ? serverConnected
+                            ? "No tools were found. Try refreshing. Make sure you selected the correct server and the server is running."
+                            : "Connect this server to load tools."
                           : "No tools match your search."}
                       </p>
                     </div>
@@ -419,6 +490,7 @@ export function ToolsSidebar({
                               name={name}
                               isSelected={selectedToolName === name}
                               onClick={() => onSelectTool(name)}
+                              quality={toolQuality?.get(name)}
                             />
                           ))}
                       </div>

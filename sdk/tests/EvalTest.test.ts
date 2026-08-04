@@ -1,6 +1,6 @@
 import { EvalTest } from "../src/EvalTest";
 import { PromptResult } from "../src/PromptResult";
-import type { TestAgent } from "../src/TestAgent";
+import type { HostRunner } from "../src/HostRunner";
 
 // Mock PromptResult factory
 function createMockPromptResult(options: {
@@ -34,15 +34,15 @@ function createMockPromptResult(options: {
   });
 }
 
-// Create a mock TestAgent with prompt history tracking
+// Create a mock HostRunner with prompt history tracking
 function createMockAgent(
-  promptFn: (message: string) => Promise<PromptResult>
-): TestAgent {
-  const createAgent = (): TestAgent => {
+  promptFn: (message: string, options?: any) => Promise<PromptResult>
+): HostRunner {
+  const createAgent = (): HostRunner => {
     let promptHistory: PromptResult[] = [];
     return {
-      prompt: async (message: string) => {
-        const result = await promptFn(message);
+      run: async (message: string, options?: any) => {
+        const result = await promptFn(message, options);
         promptHistory.push(result);
         return result;
       },
@@ -51,7 +51,7 @@ function createMockAgent(
       },
       getPromptHistory: () => [...promptHistory],
       withOptions: () => createAgent(),
-    } as unknown as TestAgent;
+    } as unknown as HostRunner;
   };
   return createAgent();
 }
@@ -62,7 +62,7 @@ describe("EvalTest", () => {
       const test = new EvalTest({
         name: "test-name",
         test: async (agent) => {
-          await agent.prompt("Test prompt");
+          await agent.run("Test prompt");
           return true;
         },
       });
@@ -70,8 +70,8 @@ describe("EvalTest", () => {
     });
 
     it("should store config", () => {
-      const testFn = async (agent: TestAgent) => {
-        const r = await agent.prompt("Test prompt");
+      const testFn = async (agent: HostRunner) => {
+        const r = await agent.run("Test prompt");
         return r.hasToolCall("add");
       };
       const config = {
@@ -80,6 +80,33 @@ describe("EvalTest", () => {
       };
       const test = new EvalTest(config);
       expect(test.getConfig()).toEqual(config);
+    });
+
+    it("should store expectedToolCalls in config", () => {
+      const expected = [
+        { toolName: "add", arguments: { a: 1, b: 2 } },
+        { toolName: "format" },
+      ];
+      const test = new EvalTest({
+        name: "with-expected",
+        test: async (agent) => {
+          await agent.run("Test");
+          return true;
+        },
+        expectedToolCalls: expected,
+      });
+      expect(test.getConfig().expectedToolCalls).toEqual(expected);
+    });
+
+    it("should have undefined expectedToolCalls when not provided", () => {
+      const test = new EvalTest({
+        name: "without-expected",
+        test: async (agent) => {
+          await agent.run("Test");
+          return true;
+        },
+      });
+      expect(test.getConfig().expectedToolCalls).toBeUndefined();
     });
 
     it("should throw if no test function provided", () => {
@@ -103,7 +130,7 @@ describe("EvalTest", () => {
       const test = new EvalTest({
         name: "addition",
         test: async (agent) => {
-          const r = await agent.prompt("Add 2 and 3");
+          const r = await agent.run("Add 2 and 3");
           return r.hasToolCall("add");
         },
       });
@@ -125,7 +152,7 @@ describe("EvalTest", () => {
       const test = new EvalTest({
         name: "test",
         test: async (agent) => {
-          const r = await agent.prompt("Add and multiply");
+          const r = await agent.run("Add and multiply");
           // Check if add was called (should pass even with extra tools)
           return r.hasToolCall("add");
         },
@@ -144,7 +171,7 @@ describe("EvalTest", () => {
       const test1 = new EvalTest({
         name: "wrong-order",
         test: async (agent) => {
-          const r = await agent.prompt("Test");
+          const r = await agent.run("Test");
           const tools = r.toolsCalled();
           return tools[0] === "multiply" && tools[1] === "add";
         },
@@ -156,7 +183,7 @@ describe("EvalTest", () => {
       const test2 = new EvalTest({
         name: "correct-order",
         test: async (agent) => {
-          const r = await agent.prompt("Test");
+          const r = await agent.run("Test");
           const tools = r.toolsCalled();
           return tools[0] === "add" && tools[1] === "multiply";
         },
@@ -173,7 +200,7 @@ describe("EvalTest", () => {
       const test = new EvalTest({
         name: "any-tool",
         test: async (agent) => {
-          const r = await agent.prompt("Test");
+          const r = await agent.run("Test");
           const tools = r.toolsCalled();
           return ["subtract", "add", "multiply"].some((t) => tools.includes(t));
         },
@@ -191,7 +218,7 @@ describe("EvalTest", () => {
       const test = new EvalTest({
         name: "no-tools",
         test: async (agent) => {
-          const r = await agent.prompt("Just respond");
+          const r = await agent.run("Just respond");
           return r.toolsCalled().length === 0;
         },
       });
@@ -211,7 +238,7 @@ describe("EvalTest", () => {
       const test = new EvalTest({
         name: "custom-test",
         test: async (agent) => {
-          const r = await agent.prompt("Test");
+          const r = await agent.run("Test");
           return r.text.includes("42");
         },
       });
@@ -228,7 +255,7 @@ describe("EvalTest", () => {
       const test = new EvalTest({
         name: "async-test",
         test: async (agent) => {
-          const r = await agent.prompt("Test");
+          const r = await agent.run("Test");
           await new Promise((resolve) => setTimeout(resolve, 1));
           return r.text.length > 0;
         },
@@ -246,7 +273,7 @@ describe("EvalTest", () => {
       const test = new EvalTest({
         name: "with-error",
         test: async (agent) => {
-          const r = await agent.prompt("Test");
+          const r = await agent.run("Test");
           return !r.hasError();
         },
       });
@@ -265,7 +292,7 @@ describe("EvalTest", () => {
       const test = new EvalTest({
         name: "conversation",
         test: async (agent) => {
-          const r1 = await agent.prompt("Search for X");
+          const r1 = await agent.run("Search for X");
           return r1.toolsCalled().includes("search");
         },
       });
@@ -286,7 +313,7 @@ describe("EvalTest", () => {
       const test = new EvalTest({
         name: "failing-test",
         test: async (agent) => {
-          const r1 = await agent.prompt("Search");
+          const r1 = await agent.run("Search");
           return r1.toolsCalled().includes("search"); // Will fail
         },
       });
@@ -312,7 +339,7 @@ describe("EvalTest", () => {
       const test = new EvalTest({
         name: "concurrency-test",
         test: async (agent) => {
-          await agent.prompt("Test");
+          await agent.run("Test");
           return true;
         },
       });
@@ -340,7 +367,7 @@ describe("EvalTest", () => {
       const test = new EvalTest({
         name: "default-concurrency",
         test: async (agent) => {
-          await agent.prompt("Test");
+          await agent.run("Test");
           return true;
         },
       });
@@ -366,7 +393,7 @@ describe("EvalTest", () => {
       const test = new EvalTest({
         name: "retry-test",
         test: async (agent) => {
-          await agent.prompt("Test");
+          await agent.run("Test");
           return true;
         },
       });
@@ -392,7 +419,7 @@ describe("EvalTest", () => {
       const test = new EvalTest({
         name: "exhausted-retries",
         test: async (agent) => {
-          await agent.prompt("Test");
+          await agent.run("Test");
           return true;
         },
       });
@@ -422,7 +449,7 @@ describe("EvalTest", () => {
       const test = new EvalTest({
         name: "retry-count-test",
         test: async (agent) => {
-          await agent.prompt("Test");
+          await agent.run("Test");
           return true;
         },
       });
@@ -440,14 +467,14 @@ describe("EvalTest", () => {
   describe("timeout handling", () => {
     it("should timeout after timeoutMs", async () => {
       const agent = createMockAgent(async () => {
-        await new Promise((resolve) => setTimeout(resolve, 200));
+        await new Promise((resolve) => setTimeout(resolve, 2000));
         return createMockPromptResult({});
       });
 
       const test = new EvalTest({
         name: "timeout-test",
         test: async (agent) => {
-          await agent.prompt("Test");
+          await agent.run("Test");
           return true;
         },
       });
@@ -471,7 +498,7 @@ describe("EvalTest", () => {
       const test = new EvalTest({
         name: "default-timeout",
         test: async (agent) => {
-          await agent.prompt("Test");
+          await agent.run("Test");
           return true;
         },
       });
@@ -479,6 +506,153 @@ describe("EvalTest", () => {
       const result = await test.run(agent, { iterations: 1 });
       expect(result.successes).toBe(1);
     });
+
+    it("should pass if a timed-out prompt captured the expected tool call", async () => {
+      const agent = createMockAgent(async (message, options) => {
+        await new Promise<void>((resolve) => {
+          options?.abortSignal?.addEventListener("abort", () => resolve(), {
+            once: true,
+          });
+        });
+
+        return createMockPromptResult({
+          prompt: message,
+          toolsCalled: ["add"],
+          tokens: 0,
+          error: "Operation timed out after 50ms",
+        });
+      });
+
+      const test = new EvalTest({
+        name: "timeout-partial-pass",
+        test: async (agent) => {
+          const result = await agent.run("Add 2 and 3");
+          return result.hasToolCall("add");
+        },
+      });
+
+      const result = await test.run(agent, {
+        iterations: 1,
+        timeoutMs: 50,
+        concurrency: 1,
+      });
+
+      expect(result.successes).toBe(1);
+      expect(result.failures).toBe(0);
+      expect(result.iterationDetails[0].passed).toBe(true);
+      expect(result.iterationDetails[0].error).toBeUndefined();
+      expect(result.iterationDetails[0].prompts).toHaveLength(1);
+      expect(result.iterationDetails[0].prompts?.[0].hasToolCall("add")).toBe(
+        true
+      );
+      expect(result.iterationDetails[0].prompts?.[0].hasError()).toBe(true);
+    });
+
+    it("should preserve earlier prompts and metrics when a later prompt times out", async () => {
+      let promptCount = 0;
+      const agent = createMockAgent(async (message, options) => {
+        promptCount++;
+
+        if (promptCount === 1) {
+          return createMockPromptResult({
+            prompt: message,
+            toolsCalled: ["lookup"],
+            tokens: 50,
+            latency: { e2eMs: 20, llmMs: 15, mcpMs: 5 },
+          });
+        }
+
+        await new Promise<void>((resolve) => {
+          options?.abortSignal?.addEventListener("abort", () => resolve(), {
+            once: true,
+          });
+        });
+
+        return createMockPromptResult({
+          prompt: message,
+          toolsCalled: ["add"],
+          tokens: 0,
+          latency: { e2eMs: 50, llmMs: 10, mcpMs: 40 },
+          error: "Operation timed out after 50ms",
+        });
+      });
+
+      const test = new EvalTest({
+        name: "multi-turn-timeout",
+        test: async (agent) => {
+          const first = await agent.run("First");
+          const second = await agent.run("Second");
+          return first.hasToolCall("lookup") && second.hasToolCall("add");
+        },
+      });
+
+      const result = await test.run(agent, {
+        iterations: 1,
+        timeoutMs: 50,
+        concurrency: 1,
+      });
+
+      expect(result.successes).toBe(1);
+      expect(result.iterationDetails[0].prompts).toHaveLength(2);
+      expect(
+        result.iterationDetails[0].prompts?.map((prompt) => prompt.getPrompt())
+      ).toEqual(["First", "Second"]);
+      expect(result.iterationDetails[0].tokens).toEqual({
+        total: 50,
+        input: 25,
+        output: 25,
+      });
+      expect(result.iterationDetails[0].latencies).toEqual([
+        { e2eMs: 20, llmMs: 15, mcpMs: 5 },
+        { e2eMs: 50, llmMs: 10, mcpMs: 40 },
+      ]);
+    });
+
+    it("should fail after the hard-timeout grace if a prompt ignores abort but preserve captured history", async () => {
+      const createHungAgent = (): HostRunner => {
+        let promptHistory: PromptResult[] = [];
+
+        return {
+          run: async (message: string) => {
+            promptHistory.push(
+              createMockPromptResult({
+                prompt: message,
+                toolsCalled: ["add"],
+                tokens: 0,
+              })
+            );
+
+            return await new Promise<PromptResult>(() => {});
+          },
+          resetPromptHistory: () => {
+            promptHistory = [];
+          },
+          getPromptHistory: () => [...promptHistory],
+          withOptions: () => createHungAgent(),
+        } as unknown as HostRunner;
+      };
+
+      const test = new EvalTest({
+        name: "hung-timeout",
+        test: async (agent) => {
+          const result = await agent.run("Add 2 and 3");
+          return result.hasToolCall("add");
+        },
+      });
+
+      const result = await test.run(createHungAgent(), {
+        iterations: 1,
+        timeoutMs: 25,
+        concurrency: 1,
+      });
+
+      expect(result.failures).toBe(1);
+      expect(result.iterationDetails[0].error).toContain("timed out");
+      expect(result.iterationDetails[0].prompts).toHaveLength(1);
+      expect(result.iterationDetails[0].prompts?.[0].hasToolCall("add")).toBe(
+        true
+      );
+    }, 5000);
   });
 
   describe("progress callback", () => {
@@ -492,7 +666,7 @@ describe("EvalTest", () => {
       const test = new EvalTest({
         name: "progress-test",
         test: async (agent) => {
-          await agent.prompt("Test");
+          await agent.run("Test");
           return true;
         },
       });
@@ -529,7 +703,7 @@ describe("EvalTest", () => {
       const test = new EvalTest({
         name: "latency-test",
         test: async (agent) => {
-          await agent.prompt("Test");
+          await agent.run("Test");
           return true;
         },
       });
@@ -555,8 +729,8 @@ describe("EvalTest", () => {
       const test = new EvalTest({
         name: "multi-turn-latency",
         test: async (agent) => {
-          await agent.prompt("First");
-          await agent.prompt("Second");
+          await agent.run("First");
+          await agent.run("Second");
           return true;
         },
       });
@@ -582,7 +756,7 @@ describe("EvalTest", () => {
       const test = new EvalTest({
         name: "token-test",
         test: async (agent) => {
-          await agent.prompt("Test");
+          await agent.run("Test");
           return true;
         },
       });
@@ -609,8 +783,8 @@ describe("EvalTest", () => {
       const test = new EvalTest({
         name: "multi-turn-tokens",
         test: async (agent) => {
-          await agent.prompt("First");
-          await agent.prompt("Second");
+          await agent.run("First");
+          await agent.run("Second");
           return true;
         },
       });
@@ -643,7 +817,7 @@ describe("EvalTest", () => {
       const test = new EvalTest({
         name: "accuracy-test",
         test: async (agent) => {
-          const r = await agent.prompt("Test");
+          const r = await agent.run("Test");
           return r.hasToolCall("add");
         },
       });
@@ -660,7 +834,7 @@ describe("EvalTest", () => {
       const test = new EvalTest({
         name: "no-run",
         test: async (agent) => {
-          await agent.prompt("Test");
+          await agent.run("Test");
           return true;
         },
       });
@@ -690,7 +864,7 @@ describe("EvalTest", () => {
       const test = new EvalTest({
         name: "fpr-test",
         test: async (agent) => {
-          const r = await agent.prompt("Test");
+          const r = await agent.run("Test");
           return r.hasToolCall("add"); // Will all fail
         },
       });
@@ -708,7 +882,7 @@ describe("EvalTest", () => {
       const test = new EvalTest({
         name: "avg-tokens",
         test: async (agent) => {
-          await agent.prompt("Test");
+          await agent.run("Test");
           return true;
         },
       });
@@ -724,7 +898,7 @@ describe("EvalTest", () => {
       const test = new EvalTest({
         name: "no-results",
         test: async (agent) => {
-          await agent.prompt("Test");
+          await agent.run("Test");
           return true;
         },
       });
@@ -739,7 +913,7 @@ describe("EvalTest", () => {
       const test = new EvalTest({
         name: "with-results",
         test: async (agent) => {
-          await agent.prompt("Test");
+          await agent.run("Test");
           return true;
         },
       });
@@ -758,7 +932,7 @@ describe("EvalTest", () => {
       const test = new EvalTest({
         name: "no-run",
         test: async (agent) => {
-          await agent.prompt("Test");
+          await agent.run("Test");
           return true;
         },
       });
@@ -771,7 +945,7 @@ describe("EvalTest", () => {
       const test = new EvalTest({
         name: "no-run",
         test: async (agent) => {
-          await agent.prompt("Test");
+          await agent.run("Test");
           return true;
         },
       });
@@ -784,7 +958,7 @@ describe("EvalTest", () => {
       const test = new EvalTest({
         name: "no-run",
         test: async (agent) => {
-          await agent.prompt("Test");
+          await agent.run("Test");
           return true;
         },
       });
@@ -801,7 +975,7 @@ describe("EvalTest", () => {
       const test = new EvalTest({
         name: "all-iterations",
         test: async (agent) => {
-          await agent.prompt("Test");
+          await agent.run("Test");
           return true;
         },
       });
@@ -824,7 +998,7 @@ describe("EvalTest", () => {
       const test = new EvalTest({
         name: "failed-iterations",
         test: async (agent) => {
-          const r = await agent.prompt("Test");
+          const r = await agent.run("Test");
           return r.hasToolCall("add");
         },
       });
@@ -848,7 +1022,7 @@ describe("EvalTest", () => {
       const test = new EvalTest({
         name: "successful-iterations",
         test: async (agent) => {
-          const r = await agent.prompt("Test");
+          const r = await agent.run("Test");
           return r.hasToolCall("add");
         },
       });
@@ -868,7 +1042,7 @@ describe("EvalTest", () => {
       const test = new EvalTest({
         name: "copy-test",
         test: async (agent) => {
-          await agent.prompt("Test");
+          await agent.run("Test");
           return true;
         },
       });

@@ -1,15 +1,7 @@
-import {
-  useState,
-  useEffect,
-  useCallback,
-  useMemo,
-  useRef,
-} from "react";
-import type { CustomProvider } from "@mcpjam/sdk";
-import { useAuth } from "@/lib/auth/jwt-auth-context";
-import { scopedLocalStorageKey } from "@/lib/hosted-user-storage";
+import { useState, useEffect, useCallback } from "react";
+import type { CustomProvider } from "@mcpjam/sdk/browser";
 
-const STORAGE_KEY_BASE = "mcp-inspector-custom-providers";
+const STORAGE_KEY = "mcp-inspector-custom-providers";
 
 export interface UseCustomProvidersReturn {
   customProviders: CustomProvider[];
@@ -20,46 +12,38 @@ export interface UseCustomProvidersReturn {
 }
 
 export function useCustomProviders(): UseCustomProvidersReturn {
-  const { user } = useAuth();
-  const storageKey = useMemo(
-    () => scopedLocalStorageKey(STORAGE_KEY_BASE, user?.id ?? null),
-    [user?.id],
-  );
-
   const [customProviders, setCustomProviders] = useState<CustomProvider[]>([]);
-  const isRestoringRef = useRef(false);
+  const [isInitialized, setIsInitialized] = useState(false);
 
+  // Load from localStorage on mount
   useEffect(() => {
-    if (typeof window === "undefined") return;
-    isRestoringRef.current = true;
-    try {
-      const stored = localStorage.getItem(storageKey);
-      if (stored) {
-        const parsed = JSON.parse(stored) as CustomProvider[];
-        setCustomProviders(Array.isArray(parsed) ? parsed : []);
-      } else {
-        setCustomProviders([]);
+    if (typeof window !== "undefined") {
+      try {
+        const stored = localStorage.getItem(STORAGE_KEY);
+        if (stored) {
+          const parsed = JSON.parse(stored) as CustomProvider[];
+          setCustomProviders(parsed);
+        }
+      } catch (error) {
+        console.warn(
+          "Failed to load custom providers from localStorage:",
+          error,
+        );
       }
-    } catch (error) {
-      console.warn(
-        "Failed to load custom providers from localStorage:",
-        error,
-      );
-      setCustomProviders([]);
+      setIsInitialized(true);
     }
-    queueMicrotask(() => {
-      isRestoringRef.current = false;
-    });
-  }, [storageKey]);
+  }, []);
 
+  // Save to localStorage whenever providers change
   useEffect(() => {
-    if (typeof window === "undefined" || isRestoringRef.current) return;
-    try {
-      localStorage.setItem(storageKey, JSON.stringify(customProviders));
-    } catch (error) {
-      console.warn("Failed to save custom providers to localStorage:", error);
+    if (isInitialized && typeof window !== "undefined") {
+      try {
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(customProviders));
+      } catch (error) {
+        console.warn("Failed to save custom providers to localStorage:", error);
+      }
     }
-  }, [customProviders, storageKey]);
+  }, [customProviders, isInitialized]);
 
   const addCustomProvider = useCallback((provider: CustomProvider) => {
     setCustomProviders((prev) => [...prev, provider]);

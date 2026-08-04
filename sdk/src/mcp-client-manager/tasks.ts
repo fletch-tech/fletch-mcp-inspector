@@ -2,76 +2,25 @@
  * MCP Tasks support (experimental feature - spec 2025-11-25)
  */
 
-import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import type { ServerCapabilities } from "@modelcontextprotocol/sdk/types.js";
-import { z } from "zod";
+import type { ServerCapabilities } from "@modelcontextprotocol/client";
 import type {
   MCPTask,
   MCPListTasksResult,
   ClientRequestOptions,
 } from "./types.js";
-
-// ============================================================================
-// Zod Schemas
-// ============================================================================
+import type { ManagedMcpClient } from "./managed-mcp-client.js";
+import { z } from "zod";
 
 /**
- * Task object schema
+ * The 2025-11-25 in-core `tasks/*` methods are not spec methods in beta.4's
+ * method-dispatch map, so the generic `request()` refuses them ("not a spec
+ * method"). They must ride the explicit-schema seam; the payloads are then
+ * shape-checked by the callers/routes.
  */
-export const TaskSchema = z.object({
-  taskId: z.string(),
-  status: z.enum([
-    "working",
-    "input_required",
-    "completed",
-    "failed",
-    "cancelled",
-  ]),
-  statusMessage: z.string().optional(),
-  createdAt: z.string(),
-  lastUpdatedAt: z.string(),
-  ttl: z.number().nullable(),
-  pollInterval: z.number().optional(),
-});
+const LEGACY_TASKS_RESULT_SCHEMA = z.looseObject({});
 
-/**
- * List tasks result schema
- */
-export const ListTasksResultSchema = z.object({
-  tasks: z.array(TaskSchema),
-  nextCursor: z.string().optional(),
-});
-
-/**
- * Task status notification schema
- * Per spec, notification includes the full Task object
- */
-export const TaskStatusNotificationSchema = z.object({
-  method: z.literal("notifications/tasks/status"),
-  params: z
-    .object({
-      taskId: z.string(),
-      status: z.enum([
-        "working",
-        "input_required",
-        "completed",
-        "failed",
-        "cancelled",
-      ]),
-      statusMessage: z.string().optional(),
-      createdAt: z.string(),
-      lastUpdatedAt: z.string(),
-      ttl: z.number().nullable(),
-      pollInterval: z.number().optional(),
-    })
-    .optional(),
-});
-
-/**
- * Generic result schema for tasks/result
- * Per MCP spec: "tasks/result returns exactly what the underlying request would have returned"
- */
-export const TaskResultSchema = z.unknown();
+export const TaskStatusNotificationMethod =
+  "notifications/tasks/status" as const;
 
 // ============================================================================
 // Task Operations
@@ -86,18 +35,18 @@ export const TaskResultSchema = z.unknown();
  * @returns List of tasks
  */
 export async function listTasks(
-  client: Client,
+  client: ManagedMcpClient,
   cursor?: string,
   options?: ClientRequestOptions
 ): Promise<MCPListTasksResult> {
-  return client.request(
+  return client.requestWithSchema(
     {
       method: "tasks/list",
       params: cursor ? { cursor } : {},
     },
-    ListTasksResultSchema,
+    LEGACY_TASKS_RESULT_SCHEMA,
     options
-  );
+  ) as Promise<MCPListTasksResult>;
 }
 
 /**
@@ -109,18 +58,18 @@ export async function listTasks(
  * @returns The task object
  */
 export async function getTask(
-  client: Client,
+  client: ManagedMcpClient,
   taskId: string,
   options?: ClientRequestOptions
 ): Promise<MCPTask> {
-  return client.request(
+  return client.requestWithSchema(
     {
       method: "tasks/get",
       params: { taskId },
     },
-    TaskSchema,
+    LEGACY_TASKS_RESULT_SCHEMA,
     options
-  );
+  ) as Promise<MCPTask>;
 }
 
 /**
@@ -133,18 +82,18 @@ export async function getTask(
  * @returns The task result (type depends on original request)
  */
 export async function getTaskResult(
-  client: Client,
+  client: ManagedMcpClient,
   taskId: string,
   options?: ClientRequestOptions
 ): Promise<unknown> {
-  return client.request(
+  return client.requestWithSchema(
     {
       method: "tasks/result",
       params: { taskId },
     },
-    TaskResultSchema,
+    LEGACY_TASKS_RESULT_SCHEMA,
     options
-  );
+  ) as Promise<unknown>;
 }
 
 /**
@@ -156,18 +105,18 @@ export async function getTaskResult(
  * @returns The updated task object
  */
 export async function cancelTask(
-  client: Client,
+  client: ManagedMcpClient,
   taskId: string,
   options?: ClientRequestOptions
 ): Promise<MCPTask> {
-  return client.request(
+  return client.requestWithSchema(
     {
       method: "tasks/cancel",
       params: { taskId },
     },
-    TaskSchema,
+    LEGACY_TASKS_RESULT_SCHEMA,
     options
-  );
+  ) as Promise<MCPTask>;
 }
 
 // ============================================================================

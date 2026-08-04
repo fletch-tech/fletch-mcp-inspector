@@ -1,10 +1,10 @@
-import { OAuthClientProvider } from "@modelcontextprotocol/sdk/client/auth.js";
 import {
-  OAuthClientInformation,
-  OAuthTokens,
-  OAuthClientMetadata,
-  OAuthMetadata,
-} from "@modelcontextprotocol/sdk/shared/auth.js";
+  type OAuthClientInformation,
+  type OAuthClientMetadata,
+  type OAuthClientProvider,
+  type OAuthMetadata,
+  type OAuthTokens,
+} from "@mcpjam/sdk/browser";
 
 /**
  * Debug OAuth provider that uses sessionStorage and debug redirect URLs
@@ -32,6 +32,7 @@ export class DebugMCPOAuthClientProvider implements OAuthClientProvider {
       response_types: ["code"],
       client_name: "MCPJam",
       client_uri: "https://github.com/mcpjam/inspector",
+      logo_uri: "https://www.mcpjam.com/mcp_jam_2row.png",
     };
   }
 
@@ -63,7 +64,7 @@ export class DebugMCPOAuthClientProvider implements OAuthClientProvider {
     sessionStorage.setItem(key, JSON.stringify(tokens));
   }
 
-  redirectToAuthorization(authorizationUrl: URL): void {
+  redirectToAuthorization(_authorizationUrl: URL): void {
     // For debugging, we'll show the URL instead of redirecting
     // In a real debug environment, we might want to copy to clipboard or show in UI
   }
