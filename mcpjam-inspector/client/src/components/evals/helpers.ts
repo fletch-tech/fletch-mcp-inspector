@@ -78,12 +78,13 @@ function hostAttachmentRunPlan(
   fallbackServerIds: string[],
   useAttachmentServerIds = true,
 ): SuiteHostRunPlan {
+  const resolved = attachment.resolvedServerNames ?? [];
   return {
     namedHostId: attachment.namedHostId,
     hostName: attachment.hostName ?? "host",
     serverIds:
-      useAttachmentServerIds && attachment.resolvedServerNames.length > 0
-        ? attachment.resolvedServerNames
+      useAttachmentServerIds && resolved.length > 0
+        ? resolved
         : fallbackServerIds,
   };
 }

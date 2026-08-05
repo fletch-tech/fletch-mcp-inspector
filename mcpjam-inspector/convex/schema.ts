@@ -96,6 +96,48 @@ export default defineSchema({
     updatedAt: v.number(),
   }).index("by_project", ["projectId"]),
 
+  // Named server groups for eval suites / swarms (serverAttachments:*).
+  serverAttachments: defineTable({
+    projectId: v.string(),
+    name: v.string(),
+    serverIds: v.array(v.string()),
+    createdBy: v.optional(v.id("users")),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  })
+    .index("by_project", ["projectId"])
+    .index("by_project_name", ["projectId", "name"]),
+
+  // Minimal eval suite / case persistence for the Excalidraw quickstart.
+  evalSuites: defineTable({
+    projectId: v.string(),
+    name: v.string(),
+    description: v.optional(v.string()),
+    environment: v.any(),
+    tags: v.optional(v.array(v.string())),
+    serverAttachmentId: v.optional(v.string()),
+    hostAttachments: v.optional(v.any()),
+    createdBy: v.optional(v.id("users")),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  }).index("by_project", ["projectId"]),
+
+  evalTestCases: defineTable({
+    suiteId: v.string(),
+    title: v.string(),
+    query: v.optional(v.string()),
+    models: v.optional(v.any()),
+    expectedToolCalls: v.optional(v.any()),
+    runs: v.optional(v.number()),
+    isNegativeTest: v.optional(v.boolean()),
+    scenario: v.optional(v.string()),
+    expectedOutput: v.optional(v.string()),
+    steps: v.optional(v.any()),
+    createdBy: v.optional(v.id("users")),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  }).index("by_suite", ["suiteId"]),
+
   productUpdateDismissals: defineTable({
     userId: v.id("users"),
     slug: v.string(),
