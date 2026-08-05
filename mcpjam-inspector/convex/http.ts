@@ -1,6 +1,6 @@
 import { httpRouter } from "convex/server";
 import { httpAction } from "./_generated/server";
-import { webAuthorize } from "./webAuthorize";
+import { webAuthorize, webAuthorizeBatchLocal } from "./webAuthorize";
 import { streamHttp } from "./stream";
 
 const http = httpRouter();
@@ -11,7 +11,7 @@ http.route({
   method: "GET",
   handler: httpAction(async () => {
     return new Response(
-      "Convex HTTP actions OK. POST /web/authorize (hosted auth), POST /stream (LLM proxy).",
+      "Convex HTTP actions OK. POST /web/authorize, POST /web/authorize-batch-local, POST /stream.",
       { status: 200, headers: { "Content-Type": "text/plain; charset=utf-8" } },
     );
   }),
@@ -21,6 +21,12 @@ http.route({
   path: "/web/authorize",
   method: "POST",
   handler: webAuthorize,
+});
+
+http.route({
+  path: "/web/authorize-batch-local",
+  method: "POST",
+  handler: webAuthorizeBatchLocal,
 });
 
 /** POST /stream — LLM proxy for hosted chat (see convex/stream.ts). */

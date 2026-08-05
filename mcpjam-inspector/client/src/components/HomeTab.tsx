@@ -298,7 +298,7 @@ export function HomeTab({
     }
     return (
       <div className="flex h-full flex-col items-center justify-center gap-4 bg-background p-8 text-center">
-        <p className="text-lg font-medium">Welcome to MCPJam</p>
+        <p className="text-lg font-medium">Welcome to Fletch MCP Studio</p>
         <p className="max-w-sm text-sm text-muted-foreground">
           Join or create an organization to see your team&apos;s activity,
           connected servers, and projects in one place.

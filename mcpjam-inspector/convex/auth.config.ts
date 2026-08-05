@@ -1,9 +1,13 @@
 /// <reference types="node" />
 
 /**
- * Accept JWTs from the main application (Cognito or any RS256/HS256 issuer).
+ * Accept JWTs from the main application (Cognito or any RS256 issuer).
  * Required Convex env vars: JWT_ISSUER, JWT_JWKS_URL (or AWS_REGION + USER_POOL_ID).
  * Optional: JWT_AUDIENCE → maps to applicationID so Convex checks the `aud` claim.
+ *
+ * Cognito ID tokens have `aud` = app client id. Access tokens often omit `aud`
+ * (they use `client_id` instead); if you pass access tokens, leave JWT_AUDIENCE
+ * unset so applicationID is omitted.
  */
 
 function normalizeIssuer(domain: string): string {
@@ -34,14 +38,18 @@ if (!issuerEnv) {
 
 const issuer = normalizeIssuer(issuerEnv);
 const jwksUrl = getJwksUrl();
+const audience = process.env.JWT_AUDIENCE?.trim();
+
+const cognitoProvider = {
+  type: "customJwt" as const,
+  issuer,
+  algorithm: "RS256" as const,
+  jwks: jwksUrl,
+  // Cognito ID tokens: aud === app client id. Omit when unset so access
+  // tokens without `aud` can still match on issuer alone.
+  ...(audience ? { applicationID: audience } : {}),
+};
 
 export default {
-  providers: [
-    {
-      type: "customJwt" as const,
-      issuer,
-      algorithm: "RS256" as const,
-      jwks: jwksUrl,
-    },
-  ],
+  providers: [cognitoProvider],
 };

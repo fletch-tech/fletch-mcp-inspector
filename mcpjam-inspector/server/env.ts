@@ -60,6 +60,51 @@ export function resolveInspectorEnvDir(serverDir: string): string {
   return process.cwd();
 }
 
+/**
+ * Self-hosted / Fletch: derive CONVEX_HTTP_URL when only site or self-hosted
+ * backend URLs are configured.
+ *
+ * Local docker-compose exposes:
+ *   - 3210 backend (client WebSocket / CONVEX_SELF_HOSTED_URL / VITE_CONVEX_URL)
+ *   - 3211 site proxy (HTTP actions → CONVEX_HTTP_URL)
+ */
+function applySelfHostedConvexHttpUrlFallback(): void {
+  if (process.env.CONVEX_HTTP_URL?.trim()) return;
+
+  const siteOrigin = process.env.CONVEX_SITE_ORIGIN?.trim();
+  if (siteOrigin) {
+    process.env.CONVEX_HTTP_URL = siteOrigin;
+    return;
+  }
+
+  const selfHosted =
+    process.env.CONVEX_SELF_HOSTED_URL?.trim() ||
+    process.env.CONVEX_URL?.trim() ||
+    process.env.VITE_CONVEX_URL?.trim();
+  if (!selfHosted) return;
+
+  try {
+    const url = new URL(selfHosted);
+    // Local self-hosted: map backend :3210 → site :3211
+    if (
+      (url.hostname === "127.0.0.1" || url.hostname === "localhost") &&
+      url.port === "3210"
+    ) {
+      url.port = "3211";
+      process.env.CONVEX_HTTP_URL = url.origin;
+      return;
+    }
+    // Public self-hosted often serves HTTP actions under /http on the same host
+    if (!url.pathname || url.pathname === "/") {
+      process.env.CONVEX_HTTP_URL = `${url.origin}/http`;
+      return;
+    }
+    process.env.CONVEX_HTTP_URL = selfHosted.replace(/\/+$/, "");
+  } catch {
+    process.env.CONVEX_HTTP_URL = selfHosted.replace(/\/+$/, "");
+  }
+}
+
 export function loadInspectorEnv(serverDir: string): LoadedInspectorEnv {
   const mode = getInspectorEnvMode();
   const envDir = resolveInspectorEnvDir(serverDir);
@@ -73,9 +118,11 @@ export function loadInspectorEnv(serverDir: string): LoadedInspectorEnv {
     loadedFiles.push(envPath);
   }
 
+  applySelfHostedConvexHttpUrlFallback();
+
   if (!process.env.CONVEX_HTTP_URL) {
     throw new Error(
-      `CONVEX_HTTP_URL is required but not set. Loaded from: ${loadedFiles.join(", ") || "(none)"}`,
+      `CONVEX_HTTP_URL is required but not set. For self-hosted Convex set CONVEX_HTTP_URL (site/HTTP actions, often :3211 or …/http) or CONVEX_SITE_ORIGIN. Loaded from: ${loadedFiles.join(", ") || "(none)"}`,
     );
   }
 
