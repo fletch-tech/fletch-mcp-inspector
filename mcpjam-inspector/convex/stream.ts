@@ -7,6 +7,7 @@
  * - ANTHROPIC_API_KEY for anthropic/*
  * - GOOGLE_GENERATIVE_AI_API_KEY for google/*
  * - DEEPSEEK_API_KEY for deepseek/*
+ * - LLAMA_API_KEY (or META_LLAMA_API_KEY) for meta-llama/* via api.llama.com
  *
  * Modes:
  * - "stream" — UI message stream (NDJSON) for handleMCPJamFreeChatModel / processStream
@@ -88,11 +89,34 @@ function resolveDeepSeekApiModelId(modelId: string): string {
   return "deepseek-chat";
 }
 
+/** Catalog id → Meta Llama API model id (OpenAI-compat endpoint). */
+const META_LLAMA_API_MODEL_IDS: Record<string, string> = {
+  "meta-llama/llama-4-maverick": "Llama-4-Maverick-17B-128E-Instruct-FP8",
+  "meta-llama/llama-4-scout": "Llama-4-Scout-17B-16E-Instruct-FP8",
+  "meta-llama/muse-spark-1.1": "Muse-Spark-1.1",
+};
+
+function resolveMetaLlamaApiModelId(modelId: string): string {
+  const mapped = META_LLAMA_API_MODEL_IDS[modelId];
+  if (mapped) return mapped;
+  // Already a Llama API id, or an unknown catalog slug — pass through.
+  if (modelId.startsWith("meta-llama/")) {
+    return modelId.slice("meta-llama/".length);
+  }
+  if (modelId.startsWith("meta/")) {
+    return modelId.slice("meta/".length);
+  }
+  return modelId;
+}
+
 function resolveModel(modelId: string) {
   const openaiKey = process.env.OPENAI_API_KEY?.trim();
   const anthropicKey = process.env.ANTHROPIC_API_KEY?.trim();
   const googleKey = process.env.GOOGLE_GENERATIVE_AI_API_KEY?.trim();
   const deepseekKey = process.env.DEEPSEEK_API_KEY?.trim();
+  const llamaKey =
+    process.env.LLAMA_API_KEY?.trim() ||
+    process.env.META_LLAMA_API_KEY?.trim();
 
   if (modelId.startsWith("openai/") || modelId.startsWith("gpt-")) {
     if (!openaiKey) {
@@ -130,6 +154,27 @@ function resolveModel(modelId: string) {
     }
     const deepseek = createDeepSeek({ apiKey: deepseekKey });
     return deepseek(resolveDeepSeekApiModelId(modelId));
+  }
+
+  if (
+    modelId.startsWith("meta-llama/") ||
+    modelId.startsWith("meta/") ||
+    modelId.startsWith("Llama-") ||
+    modelId.startsWith("Muse-")
+  ) {
+    if (!llamaKey) {
+      throw new Error(
+        "LLAMA_API_KEY is not set on the Convex backend (Meta Llama API)",
+      );
+    }
+    // Meta's Llama API is OpenAI-compatible:
+    // https://api.llama.com/compat/v1/
+    const llama = createOpenAI({
+      apiKey: llamaKey,
+      baseURL: "https://api.llama.com/compat/v1",
+      name: "meta-llama",
+    });
+    return llama.chat(resolveMetaLlamaApiModelId(modelId));
   }
 
   throw new Error(`Unsupported model for Convex /stream: ${modelId}`);
