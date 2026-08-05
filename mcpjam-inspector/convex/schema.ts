@@ -108,6 +108,18 @@ export default defineSchema({
     .index("by_project", ["projectId"])
     .index("by_project_name", ["projectId", "name"]),
 
+  // Synthetic XAA debugger identities ("People" strip).
+  testIdentities: defineTable({
+    projectId: v.string(),
+    name: v.string(),
+    subject: v.string(),
+    email: v.string(),
+    color: v.optional(v.string()),
+    createdBy: v.optional(v.id("users")),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  }).index("by_project", ["projectId"]),
+
   // Minimal eval suite / case persistence for the Excalidraw quickstart.
   evalSuites: defineTable({
     projectId: v.string(),
