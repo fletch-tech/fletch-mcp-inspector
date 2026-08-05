@@ -3,6 +3,7 @@ import { internal } from "./_generated/api";
 
 type AuthorizeBody = {
   workspaceId?: string;
+  projectId?: string;
   serverId?: string;
   accessScope?: string;
   shareToken?: string;
@@ -15,6 +16,8 @@ function parseJsonBody(raw: unknown): AuthorizeBody | null {
   const o = raw as Record<string, unknown>;
   return {
     workspaceId: typeof o.workspaceId === "string" ? o.workspaceId : undefined,
+    // Hosted inspector sends projectId (workspaces document id).
+    projectId: typeof o.projectId === "string" ? o.projectId : undefined,
     serverId: typeof o.serverId === "string" ? o.serverId : undefined,
     accessScope: typeof o.accessScope === "string" ? o.accessScope : undefined,
     shareToken: typeof o.shareToken === "string" ? o.shareToken : undefined,
@@ -95,12 +98,13 @@ export const webAuthorize = httpAction(async (ctx, request) => {
     );
   }
 
-  const { workspaceId, serverId } = body;
+  const workspaceId = (body.workspaceId || body.projectId || "").trim();
+  const serverId = (body.serverId || "").trim();
   if (!workspaceId || !serverId) {
     return jsonResponse(
       {
         code: "VALIDATION_ERROR",
-        message: "workspaceId and serverId are required",
+        message: "projectId (or workspaceId) and serverId are required",
       },
       400,
     );
@@ -151,17 +155,17 @@ export const webAuthorize = httpAction(async (ctx, request) => {
       },
       WORKSPACE_NOT_FOUND: {
         code: "NOT_FOUND",
-        message: "Workspace not found",
+        message: "Project not found",
         status: 404,
       },
       NOT_A_MEMBER: {
         code: "FORBIDDEN",
-        message: "You are not a member of this workspace",
+        message: "You are not a member of this project",
         status: 403,
       },
       SERVER_NOT_FOUND_OR_MISMATCH: {
         code: "NOT_FOUND",
-        message: "Server not found or does not belong to this workspace",
+        message: "Server not found or does not belong to this project",
         status: 404,
       },
     };
@@ -182,9 +186,10 @@ export const webAuthorize = httpAction(async (ctx, request) => {
   return jsonResponse(
     {
       authorized: true,
-      role: "member" as const,
+      role: lookup.role ?? ("member" as const),
       accessLevel,
       permissions: { chatOnly: accessLevel === "shared_chat" },
+      organizationId: lookup.organizationId ?? null,
       serverConfig: lookup.serverConfig,
     },
     200,
@@ -192,12 +197,17 @@ export const webAuthorize = httpAction(async (ctx, request) => {
 });
 
 /**
- * POST /web/authorize-batch-local
- * Called by the Inspector Node server for local-mode MCP connect/reconnect.
- * Body: { projectId, serverIds: string[] }
- * Returns: { organizationId, results: Record<serverId, result> }
+ * Shared batch authorize body parsing for /web/authorize-batch and
+ * /web/authorize-batch-local.
  */
-export const webAuthorizeBatchLocal = httpAction(async (ctx, request) => {
+async function runAuthorizeBatch(
+  ctx: {
+    auth: { getUserIdentity: () => Promise<any> };
+    runQuery: (...args: any[]) => Promise<any>;
+  },
+  request: Request,
+  options?: { accessScope?: string },
+) {
   if (request.method !== "POST") {
     return jsonResponse(
       { code: "METHOD_NOT_ALLOWED", message: "Use POST" },
@@ -234,6 +244,9 @@ export const webAuthorizeBatchLocal = httpAction(async (ctx, request) => {
   const serverIds = Array.isArray(o.serverIds)
     ? o.serverIds.filter((id): id is string => typeof id === "string")
     : [];
+  const accessScope =
+    options?.accessScope ??
+    (typeof o.accessScope === "string" ? o.accessScope : undefined);
 
   if (!projectId) {
     return jsonResponse(
@@ -303,12 +316,50 @@ export const webAuthorizeBatchLocal = httpAction(async (ctx, request) => {
     );
   }
 
+  const accessLevel =
+    accessScope === "chat_v2" ? "shared_chat" : "project_member";
+  const chatOnly = accessLevel === "shared_chat";
+  const results: Record<string, any> = {};
+  for (const [serverId, result] of Object.entries(
+    lookup.results as Record<string, any>,
+  )) {
+    if (result?.ok) {
+      results[serverId] = {
+        ...result,
+        accessLevel,
+        permissions: { chatOnly },
+      };
+    } else {
+      results[serverId] = result;
+    }
+  }
+
   return jsonResponse(
     {
       organizationId: lookup.organizationId ?? null,
       isAnonymous: false,
-      results: lookup.results,
+      results,
     },
     200,
   );
+}
+
+/**
+ * POST /web/authorize-batch
+ * Called by the Inspector Node server for hosted-mode MCP connect/reconnect.
+ * Body: { projectId, serverIds: string[], accessScope? }
+ * Returns: { organizationId, results: Record<serverId, result> }
+ */
+export const webAuthorizeBatch = httpAction(async (ctx, request) => {
+  return runAuthorizeBatch(ctx, request);
+});
+
+/**
+ * POST /web/authorize-batch-local
+ * Called by the Inspector Node server for local-mode MCP connect/reconnect.
+ * Body: { projectId, serverIds: string[] }
+ * Returns: { organizationId, results: Record<serverId, result> }
+ */
+export const webAuthorizeBatchLocal = httpAction(async (ctx, request) => {
+  return runAuthorizeBatch(ctx, request);
 });

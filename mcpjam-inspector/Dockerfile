@@ -11,6 +11,9 @@ WORKDIR /usr/src/app
 # Install workspace dependencies with a single root lockfile.
 FROM base AS deps
 
+# Set by BuildKit from `--platform` (e.g. amd64 / arm64).
+ARG TARGETARCH
+
 # The `playwright` package's postinstall would pull Chromium into this layer,
 # but the runtime image installs its own copy (final stage) into a known,
 # COPY-free location — so skip the duplicate download here. This also keeps
@@ -20,13 +23,25 @@ ENV PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
 
 COPY package.json package-lock.json ./
 COPY sdk/package.json ./sdk/package.json
-COPY cli/package.json ./cli/package.json
 COPY design-system/package.json ./design-system/package.json
 COPY chat-ui/package.json ./chat-ui/package.json
 COPY widget-react/package.json ./widget-react/package.json
 COPY mcpjam-inspector/package.json ./mcpjam-inspector/package.json
 
-RUN npm ci --legacy-peer-deps
+# Lockfile was generated on darwin/arm64, so npm ci omits other optional
+# natives (npm optional-deps bug). Install the Linux bindings Vite/Tailwind need.
+RUN npm ci --legacy-peer-deps \
+  && case "$TARGETARCH" in \
+       amd64) \
+         npm install --no-save --legacy-peer-deps -w @mcpjam/inspector \
+           lightningcss-linux-x64-gnu@1.30.2 \
+           @tailwindcss/oxide-linux-x64-gnu@4.1.18 ;; \
+       arm64) \
+         npm install --no-save --legacy-peer-deps -w @mcpjam/inspector \
+           lightningcss-linux-arm64-gnu@1.30.2 \
+           @tailwindcss/oxide-linux-arm64-gnu@4.1.18 ;; \
+       *) echo "Unsupported TARGETARCH=$TARGETARCH for native bindings" >&2; exit 1 ;; \
+     esac
 
 ################################################################################
 # Build the inspector and its workspace dependencies.
@@ -38,12 +53,13 @@ ARG VITE_MCPJAM_HOSTED_MODE
 ARG VITE_MCPJAM_NONPROD_LOCKDOWN
 ARG VITE_MCPJAM_EMPLOYEE_EMAIL_DOMAINS
 ARG VITE_WORKOS_API_HOSTNAME
+ARG VITE_MAIN_URL
 ARG VITE_CONVEX_URL
+ARG VITE_CONVEX_SITE_URL
 ARG VITE_WORKOS_CLIENT_ID
 ARG VITE_MCPJAM_SANDBOX_ORIGIN
 
 COPY sdk/tsconfig.json sdk/tsup.config.ts sdk/package.json ./sdk/
-COPY cli/package.json ./cli/package.json
 COPY mcpjam-inspector/tsconfig.json mcpjam-inspector/package.json ./mcpjam-inspector/
 COPY mcpjam-inspector/lib/tsconfig.json mcpjam-inspector/lib/tsup.config.ts ./mcpjam-inspector/lib/
 COPY mcpjam-inspector/server/tsconfig.json mcpjam-inspector/server/tsup.config.ts ./mcpjam-inspector/server/
@@ -89,7 +105,9 @@ RUN if [ -n "$VITE_MCPJAM_HOSTED_MODE" ]; then export VITE_MCPJAM_HOSTED_MODE; f
     if [ -n "$VITE_MCPJAM_NONPROD_LOCKDOWN" ]; then export VITE_MCPJAM_NONPROD_LOCKDOWN; fi; \
     if [ -n "$VITE_MCPJAM_EMPLOYEE_EMAIL_DOMAINS" ]; then export VITE_MCPJAM_EMPLOYEE_EMAIL_DOMAINS; fi; \
     if [ -n "$VITE_WORKOS_API_HOSTNAME" ]; then export VITE_WORKOS_API_HOSTNAME; fi; \
+    if [ -n "$VITE_MAIN_URL" ]; then export VITE_MAIN_URL; fi; \
     if [ -n "$VITE_CONVEX_URL" ]; then export VITE_CONVEX_URL; fi; \
+    if [ -n "$VITE_CONVEX_SITE_URL" ]; then export VITE_CONVEX_SITE_URL; fi; \
     if [ -n "$VITE_WORKOS_CLIENT_ID" ]; then export VITE_WORKOS_CLIENT_ID; fi; \
     if [ -n "$VITE_MCPJAM_SANDBOX_ORIGIN" ]; then export VITE_MCPJAM_SANDBOX_ORIGIN; fi; \
     npm run build:client -w @mcpjam/inspector
@@ -98,19 +116,41 @@ RUN if [ -n "$VITE_MCPJAM_HOSTED_MODE" ]; then export VITE_MCPJAM_HOSTED_MODE; f
 # Runtime image.
 FROM base AS final
 
+ARG VITE_MCPJAM_HOSTED_MODE=true
+ARG VITE_MAIN_URL
+ARG VITE_CONVEX_URL
+ARG VITE_CONVEX_SITE_URL
+ARG MAIN_URL
+ARG CONVEX_CLOUD_ORIGIN
+ARG CONVEX_SITE_ORIGIN
+ARG CONVEX_HTTP_URL
+ARG CONVEX_SELF_HOSTED_URL
+ARG CONVEX_SELF_HOSTED_ADMIN_KEY
+
 ENV NODE_ENV=production
 ENV DOCKER_CONTAINER=true
 # Shared, predictable browser location: the `playwright install` step below
 # writes Chromium here, and the harness's chromium.executablePath() resolves
 # against it at runtime. Both must point at the same directory.
 ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+# Hosted + Convex / studio origins (override .env.production via process env;
+# dotenv does not clobber existing keys). ECS task env still wins when set.
+ENV VITE_MCPJAM_HOSTED_MODE=${VITE_MCPJAM_HOSTED_MODE}
+ENV VITE_MAIN_URL=${VITE_MAIN_URL}
+ENV VITE_CONVEX_URL=${VITE_CONVEX_URL}
+ENV VITE_CONVEX_SITE_URL=${VITE_CONVEX_SITE_URL}
+ENV MAIN_URL=${MAIN_URL}
+ENV CONVEX_CLOUD_ORIGIN=${CONVEX_CLOUD_ORIGIN}
+ENV CONVEX_SITE_ORIGIN=${CONVEX_SITE_ORIGIN}
+ENV CONVEX_HTTP_URL=${CONVEX_HTTP_URL}
+ENV CONVEX_SELF_HOSTED_URL=${CONVEX_SELF_HOSTED_URL}
+ENV CONVEX_SELF_HOSTED_ADMIN_KEY=${CONVEX_SELF_HOSTED_ADMIN_KEY}
 
 USER node
 WORKDIR /usr/src/app/mcpjam-inspector
 
 COPY package.json /usr/src/app/package.json
 COPY sdk/package.json /usr/src/app/sdk/package.json
-COPY cli/package.json /usr/src/app/cli/package.json
 COPY mcpjam-inspector/package.json ./package.json
 
 COPY --from=deps /usr/src/app/node_modules /usr/src/app/node_modules

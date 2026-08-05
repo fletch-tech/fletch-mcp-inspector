@@ -31,12 +31,16 @@ describe("originValidationMiddleware", () => {
   let app: Hono;
   const originalAllowedOrigins = process.env.ALLOWED_ORIGINS;
   const originalNonprodLockdown = process.env.MCPJAM_NONPROD_LOCKDOWN;
+  const originalCorsWildcard = process.env.CORS_WILDCARD_DOMAINS;
+  const originalWebAllowed = process.env.WEB_ALLOWED_ORIGINS;
 
   beforeEach(() => {
     app = createTestApp();
     // Clear any custom allowed origins
     delete process.env.ALLOWED_ORIGINS;
     delete process.env.MCPJAM_NONPROD_LOCKDOWN;
+    delete process.env.CORS_WILDCARD_DOMAINS;
+    delete process.env.WEB_ALLOWED_ORIGINS;
   });
 
   afterEach(() => {
@@ -50,6 +54,16 @@ describe("originValidationMiddleware", () => {
       process.env.MCPJAM_NONPROD_LOCKDOWN = originalNonprodLockdown;
     } else {
       delete process.env.MCPJAM_NONPROD_LOCKDOWN;
+    }
+    if (originalCorsWildcard) {
+      process.env.CORS_WILDCARD_DOMAINS = originalCorsWildcard;
+    } else {
+      delete process.env.CORS_WILDCARD_DOMAINS;
+    }
+    if (originalWebAllowed) {
+      process.env.WEB_ALLOWED_ORIGINS = originalWebAllowed;
+    } else {
+      delete process.env.WEB_ALLOWED_ORIGINS;
     }
   });
 
@@ -356,6 +370,30 @@ describe("originValidationMiddleware", () => {
       });
 
       expect(res.status).toBe(200);
+    });
+  });
+
+  describe("CORS_WILDCARD_DOMAINS alignment", () => {
+    it("allows hosted *.fletch.co origins used by CORS", async () => {
+      process.env.CORS_WILDCARD_DOMAINS = "*.fletch.co";
+      app = createTestApp();
+
+      const res = await app.request("/api/test", {
+        headers: { Origin: "https://sandbox-mcp-inspector.fletch.co" },
+      });
+
+      expect(res.status).toBe(200);
+    });
+
+    it("still blocks unrelated origins when CORS wildcards are set", async () => {
+      process.env.CORS_WILDCARD_DOMAINS = "*.fletch.co";
+      app = createTestApp();
+
+      const res = await app.request("/api/test", {
+        headers: { Origin: "https://evil.example" },
+      });
+
+      expect(res.status).toBe(403);
     });
   });
 

@@ -1,7 +1,6 @@
 import { useAuth } from "@workos-inc/authkit-react";
 import { useConvexAuth } from "convex/react";
 import { Button } from "@mcpjam/design-system/button";
-import { GitHubStarButton } from "@/components/ui/github-star-button";
 import {
   ActiveServerSelector,
   ActiveServerSelectorProps,
@@ -65,7 +64,6 @@ export function AuthUpperArea({
             </Button>
           </>
         )}
-        <GitHubStarButton />
       </div>
     </div>
   );

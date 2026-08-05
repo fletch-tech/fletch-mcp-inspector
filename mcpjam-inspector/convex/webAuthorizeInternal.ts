@@ -68,6 +68,14 @@ export const lookupAuthorizeContext = internalQuery({
 
     return {
       ok: true as const,
+      role: membership.isOwner
+        ? ("owner" as const)
+        : membership.role === "admin"
+          ? ("admin" as const)
+          : ("member" as const),
+      organizationId: workspace.organizationId
+        ? String(workspace.organizationId)
+        : null,
       serverConfig: toLocalServerConfig(server),
     };
   },

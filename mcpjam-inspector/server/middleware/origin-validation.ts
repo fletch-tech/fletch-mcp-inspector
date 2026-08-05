@@ -9,7 +9,7 @@
  */
 
 import type { Context, Next } from "hono";
-import { SERVER_PORT } from "../config.js";
+import { corsOriginCheck, SERVER_PORT } from "../config.js";
 import { logger as appLogger } from "../utils/logger.js";
 
 /**
@@ -118,6 +118,13 @@ export async function originValidationMiddleware(
   // No origin header = same-origin request or non-browser client (curl, etc.)
   // Most routes still require valid token; OAuth proxy routes rely on HTTPS-only + private IP blocking
   if (!origin) {
+    return next();
+  }
+
+  // Share CORS allowlist (ALLOWED_ORIGINS / WEB_ALLOWED_ORIGINS /
+  // CORS_WILDCARD_DOMAINS like *.fletch.co). Without this, hosted browser
+  // POSTs to /relay and /api fail with 403 even when CORS would allow them.
+  if (corsOriginCheck(origin)) {
     return next();
   }
 

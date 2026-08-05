@@ -29,6 +29,7 @@ import {
 } from "./services/session-token";
 import { inspectorCommandBus } from "./services/inspector-command-bus";
 import {
+  isAllowedHost,
   mayServeSessionToken,
   mayServeGuestBootstrap,
 } from "./utils/localhost-check";
