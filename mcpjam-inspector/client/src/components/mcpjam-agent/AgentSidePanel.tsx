@@ -178,7 +178,7 @@ export function AgentSidePanel({
         variant="ghost"
         size="sm"
         onClick={handleClose}
-        aria-label="Close MCPJam Agent"
+        aria-label="Close Fletch Agent"
         className="h-8 w-8 rounded-full p-0 text-muted-foreground hover:text-foreground"
       >
         <X className="h-3.5 w-3.5" aria-hidden />
@@ -194,9 +194,9 @@ export function AgentSidePanel({
           className="flex w-full flex-col gap-0 bg-background p-0 sm:max-w-md [&>button]:hidden"
         >
           <SheetHeader className="sr-only">
-            <SheetTitle>MCPJam Agent</SheetTitle>
+            <SheetTitle>Fletch Agent</SheetTitle>
             <SheetDescription>
-              Ask the MCPJam Agent for help with docs, evals, and tools.
+              Ask the Fletch Agent for help with docs, evals, and tools.
             </SheetDescription>
           </SheetHeader>
           {header}
@@ -292,7 +292,7 @@ function InlineSidePanelShell({
       <div
         role="separator"
         aria-orientation="vertical"
-        aria-label="Resize MCPJam Agent panel"
+        aria-label="Resize Fletch Agent panel"
         onPointerDown={onPointerDown}
         className="absolute inset-y-0 left-0 z-10 w-1.5 -translate-x-1/2 cursor-col-resize bg-transparent transition hover:bg-border/70 active:bg-border"
       />

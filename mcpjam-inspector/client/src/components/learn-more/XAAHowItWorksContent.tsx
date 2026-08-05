@@ -8,29 +8,29 @@ const registrationMethods = [
   {
     name: "Pre-registered client",
     description:
-      "Register MCPJam in your authorization server first, then enter the client ID and optional client secret it gives you.",
+      "Register Fletch MCP Studio in your authorization server first, then enter the client ID and optional client secret it gives you.",
   },
   {
     name: "Client metadata URL (CIMD)",
     description:
-      "MCPJam uses a client metadata URL as the client ID. Your authorization server must advertise CIMD support. The Client authentication control chooses whether MCPJam proves it owns that identity:",
+      "Fletch MCP Studio uses a client metadata URL as the client ID. Your authorization server must advertise CIMD support. The Client authentication control chooses whether Fletch MCP Studio proves it owns that identity:",
     options: [
       {
         name: "Public (no client auth)",
         description:
-          "Your authorization server takes the metadata URL at face value. Nothing proves MCPJam owns that identity. This is the default.",
+          "Your authorization server takes the metadata URL at face value. Nothing proves Fletch MCP Studio owns that identity. This is the default.",
       },
       {
         name: "Confidential (private_key_jwt)",
         description:
-          "MCPJam holds a private key and signs each token request with it, proving it owns the identity. Choose this when your authorization server requires a confidential client.",
+          "Fletch MCP Studio holds a private key and signs each token request with it, proving it owns the identity. Choose this when your authorization server requires a confidential client.",
       },
     ],
   },
   {
     name: "Open dynamic registration (DCR)",
     description:
-      "MCPJam registers a client during the test. Your authorization server must provide an open registration endpoint.",
+      "Fletch MCP Studio registers a client during the test. Your authorization server must provide an open registration endpoint.",
   },
 ];
 
@@ -38,17 +38,17 @@ const identityAssertionFormats = [
   {
     name: "OIDC ID token",
     description:
-      "MCPJam mints an OIDC ID token as the identity assertion. This is the default.",
+      "Fletch MCP Studio mints an OIDC ID token as the identity assertion. This is the default.",
   },
   {
     name: "SAML assertion",
     description:
-      "MCPJam mints a signed SAML 2.0 assertion, and the ID-JAG carries a saml-nameid subject identifier so a SAML-federated server can resolve the user.",
+      "Fletch MCP Studio mints a signed SAML 2.0 assertion, and the ID-JAG carries a saml-nameid subject identifier so a SAML-federated server can resolve the user.",
   },
 ];
 
 const claims = [
-  ["iss", "MCPJam's test identity provider"],
+  ["iss", "Fletch's test identity provider"],
   ["sub / email", "The test user's identity"],
   ["aud", "The authorization server receiving the ID-JAG"],
   ["resource", "The MCP server the access is for"],
@@ -198,7 +198,7 @@ export function XAAHowItWorksContent({
             </div>
             <p className="text-base leading-7 text-muted-foreground">
               The XAA Debugger tests an MCP server and its authorization setup.
-              MCPJam acts as both the test identity provider that signs the ID
+              Fletch MCP Studio acts as both the test identity provider that signs the ID
               token and ID-JAG, and the client/agent that uses them to request
               access.
             </p>
@@ -213,8 +213,8 @@ export function XAAHowItWorksContent({
         <div className="grid items-start gap-8 lg:grid-cols-[minmax(0,1fr)_minmax(260px,360px)]">
           <SectionHeading
             number="1"
-            title="Trust MCPJam's identity provider"
-            description="Before running the test, give your authorization server the MCPJam identity provider values it requires. You can copy all three from the XAA Flow header."
+            title="Trust Fletch's identity provider"
+            description="Before running the test, give your authorization server the Fletch identity provider values it requires. You can copy all three from the XAA Flow header."
           />
           <GuideImage
             src="/xaa-guide/xaa-flow-header.png"
@@ -227,7 +227,7 @@ export function XAAHowItWorksContent({
           <div>
             <h4 className="font-semibold">Local and hosted issuers</h4>
             <p className="mt-2 text-sm leading-6 text-muted-foreground">
-              If MCPJam is running locally and your authorization server is in
+              If Fletch MCP Studio is running locally and your authorization server is in
               the cloud, turn on <strong>Use hosted issuer</strong>. A cloud
               server cannot reach an issuer URL on your machine.
             </p>
@@ -254,7 +254,7 @@ export function XAAHowItWorksContent({
             <SectionHeading
               number="2"
               title="Add your MCP server"
-              description="Select Configure Server to Test (or Add Server), enter the MCP server name and URL, then choose how MCPJam identifies itself to the authorization server."
+              description="Select Configure Server to Test (or Add Server), enter the MCP server name and URL, then choose how Fletch MCP Studio identifies itself to the authorization server."
             />
 
             <div>
@@ -286,7 +286,7 @@ export function XAAHowItWorksContent({
             <div>
               <h4 className="font-semibold">Identity assertion</h4>
               <p className="mt-2 text-sm leading-6 text-muted-foreground">
-                Choose the protocol MCPJam's identity provider uses to
+                Choose the protocol Fletch's identity provider uses to
                 authenticate users.
               </p>
               <div className="mt-3 space-y-3 border-l pl-4">
@@ -304,7 +304,7 @@ export function XAAHowItWorksContent({
             <div>
               <h4 className="font-semibold">Scopes</h4>
               <p className="mt-2 text-sm leading-6 text-muted-foreground">
-                Enter optional permissions separated by spaces. MCPJam includes
+                Enter optional permissions separated by spaces. Fletch MCP Studio includes
                 them when requesting the ID-JAG and access token.
               </p>
             </div>
@@ -328,7 +328,7 @@ export function XAAHowItWorksContent({
                   Authorization Server Issuer
                 </p>
                 <p className="mt-1 text-muted-foreground">
-                  Leave it blank to use the authorization server MCPJam
+                  Leave it blank to use the authorization server Fletch MCP Studio
                   discovers from the MCP server. Enter a URL to use a different
                   authorization server.
                 </p>
@@ -348,7 +348,7 @@ export function XAAHowItWorksContent({
                   Simulated identity
                 </p>
                 <p className="mt-1 text-muted-foreground">
-                  Choose the user MCPJam puts in the ID token. Leave the fields
+                  Choose the user Fletch MCP Studio puts in the ID token. Leave the fields
                   blank to use a built-in demo user (user-12345 /
                   demo.user@example.com).
                 </p>
@@ -364,7 +364,7 @@ export function XAAHowItWorksContent({
             <SectionHeading
               number="3"
               title="Inspect the ID-JAG"
-              description="Before sending the ID-JAG, MCPJam shows exactly what it created and checks whether each value looks correct or broken."
+              description="Before sending the ID-JAG, Fletch MCP Studio shows exactly what it created and checks whether each value looks correct or broken."
             />
             <h4 className="font-semibold">What you can inspect</h4>
             <p className="mt-2 text-sm leading-6 text-muted-foreground">

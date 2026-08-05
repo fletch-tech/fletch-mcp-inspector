@@ -623,7 +623,7 @@ export const APP_SURFACES = [
     routePatterns: ["support"],
     navSegments: ["support"],
     title: "Support",
-    purpose: "Get help and contact MCPJam support.",
+    purpose: "Get help and contact Fletch support.",
     userActivities: ["Contact support"],
     agentTools: {
       kind: "none",
@@ -696,7 +696,7 @@ export function buildAppAtlas(opts?: { hosted?: boolean }): string {
     (s) => s.showInAtlas && !(opts?.hosted && s.hostedBlocked)
   );
   return [
-    "## The MCPJam inspector, screen by screen",
+    "## Fletch MCP Studio, screen by screen",
     "This is the app you are driving. Navigate with `ui_navigate` using the target in parentheses.",
     // Static on purpose (cacheable prefix): which screens grow tools is a
     // per-build fact, and the exact names arrive with the next chat POST's

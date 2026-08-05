@@ -21,7 +21,7 @@ import type { IndicatorDef } from "../types";
  *   respect `prefers-reduced-motion`.
  */
 
-const DEFAULT_DOTS_COLOR = "#F2735B"; // MCPJam orange (matches mcp_jam.svg).
+const DEFAULT_DOTS_COLOR = "#15AD7A"; // Fletch brand green fallback.
 
 const STAGGER_DELAYS_MS: Record<1 | 2 | 3, number[]> = {
   1: [0],

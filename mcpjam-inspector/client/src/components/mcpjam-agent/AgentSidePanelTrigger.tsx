@@ -42,17 +42,17 @@ export function AgentSidePanelTrigger() {
           type="button"
           variant="ghost"
           size="sm"
-          aria-label="Ask MCPJam"
+          aria-label="Ask Fletch"
           aria-pressed={isOpen}
           onClick={onClick}
           className="h-9 gap-1.5 px-2.5"
         >
           <MessageCircle className="h-4 w-4" aria-hidden />
-          <span>Ask MCPJam</span>
+          <span>Ask Fletch</span>
         </Button>
       </TooltipTrigger>
       <TooltipContent side="bottom">
-        Ask MCPJam ({SHORTCUT_LABEL})
+        Ask Fletch ({SHORTCUT_LABEL})
       </TooltipContent>
     </Tooltip>
   );

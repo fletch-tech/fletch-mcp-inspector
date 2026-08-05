@@ -177,7 +177,7 @@ function installSafeOAuthCallbackRouting(
     }
 
     event.preventDefault();
-    log.info(`Routing ${source} OAuth callback back to MCPJam Desktop`);
+    log.info(`Routing ${source} OAuth callback back to Fletch MCP Studio`);
     void handleOAuthCallbackUrl(protocolCallbackUrl).finally(() => {
       if (!authWindow.isDestroyed()) {
         authWindow.close();
@@ -327,10 +327,10 @@ async function startHonoServer(): Promise<number> {
 
     if (port !== DEFAULT_SERVER_PORT) {
       log.warn(
-        `🚀 MCPJam Server started on fallback port ${port} (default ${DEFAULT_SERVER_PORT} was unavailable)`
+        `🚀 Fletch MCP Studio Server started on fallback port ${port} (default ${DEFAULT_SERVER_PORT} was unavailable)`
       );
     } else {
-      log.info(`🚀 MCPJam Server started on port ${port}`);
+      log.info(`🚀 Fletch MCP Studio Server started on port ${port}`);
     }
     return port;
   } catch (error) {
@@ -665,7 +665,7 @@ function showStartupFailureDialog(error: unknown): void {
 
   const choice = dialog.showMessageBoxSync({
     type: "error",
-    title: "MCPJam Inspector failed to start",
+    title: "Fletch MCP Studio failed to start",
     message,
     detail,
     buttons: ["Reset app data and quit", "Open logs folder", "Quit"],
@@ -764,7 +764,7 @@ app.whenReady().then(async () => {
       }
     }
 
-    log.info("MCPJam Electron app ready");
+    log.info("Fletch MCP Studio Electron app ready");
   } catch (error) {
     log.error("Failed to initialize app:", error);
     try {

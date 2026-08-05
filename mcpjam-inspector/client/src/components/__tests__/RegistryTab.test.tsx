@@ -243,7 +243,7 @@ describe("RegistryTab", () => {
       const server = createMockServer({
         displayName: "Linear",
         description: "Manage Linear issues and projects.",
-        publisher: "MCPJam",
+        publisher: "Fletch",
         category: "Project Management",
         transport: {
           transportType: "http",
@@ -266,7 +266,7 @@ describe("RegistryTab", () => {
       expect(
         screen.getByText("Manage Linear issues and projects."),
       ).toBeInTheDocument();
-      expect(screen.getByText("MCPJam")).toBeInTheDocument();
+      expect(screen.getByText("Fletch")).toBeInTheDocument();
     });
 
     it("shows verified star when publishStatus is verified", () => {

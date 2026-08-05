@@ -63,7 +63,7 @@ function createRegistryServer(
     name: "com.test.asana",
     displayName: "Asana",
     description: "Asana MCP server",
-    publisher: "MCPJam",
+    publisher: "Fletch",
     category: "Productivity",
     clientType: "app",
     scope: "global",

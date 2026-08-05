@@ -218,7 +218,7 @@ export function SuiteSourceBadge({ source }: { source?: "ui" | "sdk" }) {
     <Badge
       variant="outline"
       className="shrink-0 px-1.5 py-0 text-[10px] font-normal uppercase tracking-wide"
-      title="Created via the MCPJam SDK"
+      title="Created via the SDK"
     >
       CI
     </Badge>

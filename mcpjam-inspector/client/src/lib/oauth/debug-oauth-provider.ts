@@ -30,9 +30,9 @@ export class DebugMCPOAuthClientProvider implements OAuthClientProvider {
       token_endpoint_auth_method: "none",
       grant_types: ["authorization_code", "refresh_token"],
       response_types: ["code"],
-      client_name: "MCPJam",
+      client_name: "Fletch MCP Studio",
       client_uri: "https://github.com/mcpjam/inspector",
-      logo_uri: "https://www.mcpjam.com/mcp_jam_2row.png",
+      logo_uri: "/fletch_dark.svg",
     };
   }
 

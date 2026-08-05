@@ -84,7 +84,7 @@ export function TunnelExplanationModal({
             <div className="flex-1">
               <h4 className="font-medium text-sm mb-1">Secured at the Edge</h4>
               <p className="text-sm text-muted-foreground">
-                Requests without the secret key are rejected at MCPJam's relay
+                Requests without the secret key are rejected at Fletch MCP Studio's relay
                 edge before they reach your machine, and the tunnel only exposes
                 this one server. Use Rotate to revoke the current URL, or close
                 the tunnel when you're done.

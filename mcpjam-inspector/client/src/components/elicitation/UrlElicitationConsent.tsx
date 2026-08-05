@@ -144,7 +144,7 @@ export function UrlElicitationConsent({
             <div className="flex items-start gap-2 rounded-md border border-destructive/50 bg-destructive/10 p-3">
               <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-destructive" />
               <div className="text-xs text-destructive">
-                This server sent a link MCPJam won't open — it isn't a valid
+                This server sent a link Fletch MCP Studio won't open — it isn't a valid
                 web address. Nothing has been sent to it.
                 <div className="mt-1 break-all font-mono text-[11px] opacity-80">
                   {request.url}

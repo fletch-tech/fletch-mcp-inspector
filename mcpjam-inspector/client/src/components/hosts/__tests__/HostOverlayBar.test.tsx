@@ -49,7 +49,7 @@ vi.mock("@/lib/analytics", () => ({
 const oneHost = [
   {
     hostId: "host-a",
-    name: "MCPJam",
+    name: "Fletch",
     hostConfigId: "cfg-1",
     modelId: "x",
     serverCount: 0,
@@ -103,7 +103,7 @@ describe("HostOverlayBar", () => {
 
     expect(screen.getByTestId("host-overlay-prev")).toBeInTheDocument();
     expect(screen.getByTestId("host-overlay-current")).toHaveTextContent(
-      "MCPJam"
+      "Fletch"
     );
     expect(screen.getByTestId("host-overlay-next")).toBeInTheDocument();
   });

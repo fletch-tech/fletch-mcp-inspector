@@ -175,7 +175,7 @@ export function PluginImportPreviewContent({
       ) : null}
 
       {/* Unsupported components. Always visible when present, and always
-          described as preserved-not-executed — never as something MCPJam
+          described as preserved-not-executed — never as something Fletch MCP Studio
           runs. */}
       {preview.unsupported.length > 0 ? (
         <div
@@ -214,7 +214,7 @@ export function PluginImportPreviewContent({
           testId="plugin-preview-setup"
         >
           <p className="mb-1.5 text-[11px] text-muted-foreground">
-            The bundle declares these names. MCPJam never reads values from the
+            The bundle declares these names. Fletch MCP Studio never reads values from the
             bundle — you provide them per server after installing.
           </p>
           <ul className="space-y-1">

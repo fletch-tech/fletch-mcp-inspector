@@ -679,7 +679,7 @@ export function CiEvalsTab({
                         </h2>
                         <p className="text-base text-muted-foreground leading-relaxed">
                           Follow the steps below to connect to an MCP server,
-                          run an eval, and see your first run appear in MCPJam.
+                          run an eval, and see your first run appear in Fletch MCP Studio.
                         </p>
                       </div>
                       <div

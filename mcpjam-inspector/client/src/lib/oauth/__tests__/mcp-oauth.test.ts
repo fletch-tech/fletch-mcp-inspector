@@ -1094,7 +1094,7 @@ describe("mcp-oauth", () => {
       mockRegisterClient.mockImplementationOnce(
         async (_authServerUrl, options) => {
           const registrationBody = JSON.stringify({
-            client_name: "MCPJam - Linear",
+            client_name: "Fletch MCP Studio - Linear",
             redirect_uris: [`${window.location.origin}/oauth/callback`],
             grant_types: ["authorization_code", "refresh_token"],
             response_types: ["code"],
@@ -1132,7 +1132,7 @@ describe("mcp-oauth", () => {
             method: "POST",
             headers: { "content-type": "application/json" },
             body: {
-              client_name: "MCPJam - Linear",
+              client_name: "Fletch MCP Studio - Linear",
               redirect_uris: [`${window.location.origin}/oauth/callback`],
               grant_types: ["authorization_code", "refresh_token"],
               response_types: ["code"],
@@ -1265,7 +1265,7 @@ describe("mcp-oauth", () => {
         "https://auth.example.com/authorize"
       );
       expect(consoleWarnSpy).toHaveBeenCalledWith(
-        "Failed to open system browser for MCP OAuth; continuing inside MCPJam Desktop:",
+        "Failed to open system browser for MCP OAuth; continuing inside Fletch MCP Studio:",
         expect.any(Error)
       );
     });
@@ -1305,7 +1305,7 @@ describe("mcp-oauth", () => {
         "https://auth.example.com/authorize"
       );
       expect(consoleWarnSpy).toHaveBeenCalledWith(
-        "System browser opener is unavailable for MCP OAuth; continuing inside MCPJam Desktop."
+        "System browser opener is unavailable for MCP OAuth; continuing inside Fletch MCP Studio."
       );
     });
 
@@ -1457,7 +1457,7 @@ describe("mcp-oauth", () => {
       ).toBe(true);
       expect(
         isOAuthTokenGrantRequest("POST", {
-          client_name: "MCPJam - Linear",
+          client_name: "Fletch MCP Studio - Linear",
         })
       ).toBe(false);
       expect(
@@ -1493,7 +1493,7 @@ describe("mcp-oauth", () => {
           registryServerId: "registry-asana",
           useRegistryOAuthProxy: true,
           method: "POST",
-          body: { client_name: "MCPJam - Asana" },
+          body: { client_name: "Fletch MCP Studio - Asana" },
         })
       ).toBe(false);
     });

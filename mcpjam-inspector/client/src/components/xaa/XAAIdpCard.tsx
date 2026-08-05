@@ -126,7 +126,7 @@ function SetupGuidance() {
 }
 
 /**
- * Persistent "MCPJam is your identity provider" bar. The XAA debugger always
+ * Persistent "Fletch is your identity provider" bar. The XAA debugger always
  * mints assertions with MCPJam as the IdP, so this surfaces the issuer + JWKS
  * URLs a developer registers with their own authorization server, inline with
  * copy buttons and visible setup guidance.
@@ -233,7 +233,7 @@ export function XAAIdpCard({
             <div className="flex shrink-0 items-center gap-1.5">
               <KeyRound className="h-4 w-4 shrink-0 text-muted-foreground" />
               <span className="text-sm font-semibold">
-                MCPJam is your identity provider
+                Fletch is your identity provider
               </span>
             </div>
             <div className="flex flex-wrap items-center gap-2">
@@ -305,8 +305,8 @@ export function XAAIdpCard({
                     or Auth0 tenant cannot reach{" "}
                     <code className="font-mono">localhost</code>.
                     {onIssuerModeChange
-                      ? " Flip on the hosted issuer, or expose MCPJam with a public tunnel (e.g. ngrok)."
-                      : " Expose MCPJam with a public tunnel (e.g. ngrok) first."}
+                      ? " Flip on the hosted issuer, or expose Fletch MCP Studio with a public tunnel (e.g. ngrok)."
+                      : " Expose Fletch MCP Studio with a public tunnel (e.g. ngrok) first."}
                   </IssuerModeHint>
                 )}
                 {onIssuerModeChange &&

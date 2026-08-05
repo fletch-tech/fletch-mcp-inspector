@@ -127,7 +127,7 @@ export function ApiKeysRoute({ activeOrganizationId }: ApiKeysRouteProps = {}) {
         <div className="text-center space-y-4 max-w-md">
           <h2 className="text-2xl font-bold">Sign in to manage API keys</h2>
           <p className="text-sm text-muted-foreground">
-            API keys for the MCPJam API are tied to your account. Sign in (or
+            API keys for the Fletch API are tied to your account. Sign in (or
             create a free account) and you'll come right back here to create
             one.
           </p>
@@ -152,7 +152,7 @@ export function ApiKeysRoute({ activeOrganizationId }: ApiKeysRouteProps = {}) {
 
         <div className="flex items-start justify-between gap-4">
           <p className="text-sm text-muted-foreground">
-            Use these keys to call the MCPJam v1 public API from CI, scripts, or
+            Use these keys to call the Fletch MCP Studio v1 public API from CI, scripts, or
             other non-browser contexts. Keys carry your account's permissions
             and can be revoked any time.
           </p>

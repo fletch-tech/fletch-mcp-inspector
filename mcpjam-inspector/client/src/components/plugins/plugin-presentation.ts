@@ -54,7 +54,7 @@ export function describePluginReadiness(
     case "local_runtime_required":
       return {
         label: "Local runtime",
-        detail: "Runs only from a local MCPJam process.",
+        detail: "Runs only from a local Fletch MCP Studio process.",
         tone: "info",
       };
     case "computer_required":
@@ -223,7 +223,7 @@ export function describePluginUnavailableReason(reason: string): {
  * OpenAI runtime parity for components MCPJam preserves but does not execute.
  */
 export const PLUGIN_UNSUPPORTED_EXPLANATION =
-  "Kept in the stored bundle for fidelity. MCPJam does not run these.";
+  "Kept in the stored bundle for fidelity. Fletch MCP Studio does not run these.";
 
 /** Human label for a parser `unsupported.kind`, defaulting to the raw kind. */
 export function describeUnsupportedKind(kind: string): string {

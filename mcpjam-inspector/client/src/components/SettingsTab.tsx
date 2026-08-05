@@ -127,21 +127,8 @@ export function SettingsTab({
               <div className="flex flex-col gap-1">
                 <span className="text-sm text-muted-foreground">
                   Model providers are configured at the organization level.
-                  Create or join an organization on mcpjam.com to set them up.
+                  Create or join an organization in Fletch MCP Studio to set them up.
                 </span>
-                <Button
-                  variant="link"
-                  className="h-auto p-0 text-sm justify-start"
-                  onClick={() =>
-                    window.open(
-                      "https://app.mcpjam.com/organizations",
-                      "_blank",
-                      "noopener,noreferrer"
-                    )
-                  }
-                >
-                  Open mcpjam.com
-                </Button>
               </div>
             </div>
           </SettingsSection>

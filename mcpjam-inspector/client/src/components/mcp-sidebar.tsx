@@ -700,7 +700,7 @@ export function MCPSidebar({
                       ? "/fletch_dark.svg"
                       : "/fletch_light.svg"
                   }
-                  alt="MCP Jam"
+                  alt="Fletch MCP Studio"
                   className="h-4 w-auto"
                 />
               </button>
@@ -722,7 +722,7 @@ export function MCPSidebar({
                         ? "/fletch_dark.svg"
                         : "/fletch_light.svg"
                     }
-                    alt="MCP Jam"
+                    alt="Fletch MCP Studio"
                     className="h-4 w-auto"
                   />
                 </button>

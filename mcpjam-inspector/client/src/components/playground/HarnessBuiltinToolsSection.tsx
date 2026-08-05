@@ -50,7 +50,7 @@ export function HarnessBuiltinToolsSection({
         </span>
         <span
           className="font-mono text-[9px] rounded bg-muted px-1 py-[1px] text-muted-foreground"
-          title="These execute inside the harness sandbox via the agent's own loop. MCPJam can't call them directly — Run asks the agent to."
+          title="These execute inside the harness sandbox via the agent's own loop. Fletch MCP Studio can't call them directly — Run asks the agent to."
         >
           runs in sandbox
         </span>

@@ -419,7 +419,7 @@ function UserSetupError() {
       <div className="max-w-md space-y-2">
         <h1 className="text-xl font-semibold">Could not finish setup</h1>
         <p className="text-sm text-muted-foreground">
-          We could not create your MCPJam user record. Refresh and try again.
+          We could not create your Fletch MCP Studio user record. Refresh and try again.
         </p>
       </div>
       <button

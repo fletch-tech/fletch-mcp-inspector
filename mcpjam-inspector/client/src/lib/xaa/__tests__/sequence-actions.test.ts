@@ -148,10 +148,10 @@ describe("buildXAAActions identity assertion format", () => {
     );
 
     expect(actionById(actions, "user_authentication").label).toBe(
-      "Simulate sign-in at MCPJam IdP",
+      "Simulate sign-in at Fletch IdP",
     );
     const received = actionById(actions, "received_identity_assertion");
-    expect(received.label).toBe("ID token issued by MCPJam IdP");
+    expect(received.label).toBe("ID token issued by Fletch IdP");
     expect(received.details).toEqual([
       { label: "Type", value: "OIDC ID token" },
     ]);

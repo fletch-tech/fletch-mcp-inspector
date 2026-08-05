@@ -102,6 +102,7 @@ interface PlaygroundTabProps {
  */
 export function PlaygroundTab(props: PlaygroundTabProps) {
   const themeMode = usePreferencesStore((state) => state.themeMode);
+  const themePreset = usePreferencesStore((state) => state.themePreset);
 
   const hasCapturedViewRef = useRef(false);
   useEffect(() => {
@@ -264,6 +265,7 @@ export function PlaygroundTab(props: PlaygroundTabProps) {
                       themeMode === "dark" && "dark"
                     )}
                     data-host-style={hostStyle}
+                    data-theme-preset={themePreset}
                     style={shellStyle}
                   >
                     {/* Watches the project's previewed-host id (the named-host

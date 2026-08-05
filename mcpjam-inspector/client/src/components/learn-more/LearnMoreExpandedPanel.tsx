@@ -135,7 +135,7 @@ function VideoThumbnail({
         <p className="text-white text-lg font-semibold drop-shadow-md">
           {entry.title}
         </p>
-        <p className="text-white/70 text-sm">MCPJam Inspector</p>
+        <p className="text-white/70 text-sm">Fletch MCP Studio</p>
       </div>
 
       {/* Centered play button */}

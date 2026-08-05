@@ -10,7 +10,7 @@ const LEARN_MCP_URL = "https://learn.mcpjam.com/mcp";
 export const SDK_EVAL_QUICKSTART_ENV = `export MCP_SERVER_URL=${LEARN_MCP_URL}
 export LLM_API_KEY=<your-llm-api-key>
 export EVAL_MODEL=<provider/model-id> # e.g. openai/gpt-4o-mini, anthropic/claude-sonnet-4-20250514
-export MCPJAM_API_KEY=<your sk_… key from Settings → API keys> # optional: saves results to MCPJam`;
+export MCPJAM_API_KEY=<your sk_… key from Settings → API keys> # optional: saves results to Fletch MCP Studio`;
 
 export function buildSdkEvalQuickstartDotenv(
   projectId?: string | null
@@ -18,7 +18,7 @@ export function buildSdkEvalQuickstartDotenv(
   return `MCP_SERVER_URL=${LEARN_MCP_URL}
 LLM_API_KEY=<your-llm-api-key>
 EVAL_MODEL=<provider/model-id> # e.g. openai/gpt-4o-mini, anthropic/claude-sonnet-4-20250514
-MCPJAM_API_KEY=<your sk_… key from Settings → API keys> # optional: saves results to MCPJam${
+MCPJAM_API_KEY=<your sk_… key from Settings → API keys> # optional: saves results to Fletch MCP Studio${
     projectId ? `\nMCPJAM_PROJECT_ID=${projectId} # this project` : ""
   }`;
 }
@@ -31,7 +31,7 @@ export const SDK_EVAL_QUICKSTART_INSTALL = "npm install @mcpjam/sdk";
 export const SDK_EVAL_QUICKSTART_RUN = `import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { MCPClientManager, TestAgent, EvalTest } from "@mcpjam/sdk";
 
-// MCPJam hosted learning server (tools: greet, display-mcp-app — see Learn in the app)
+// Fletch hosted learning server (tools: greet, display-mcp-app — see Learn in the app)
 const SERVER_ID = "learn";
 const MCP_SERVER_URL =
   process.env.MCP_SERVER_URL ?? "https://learn.mcpjam.com/mcp";
@@ -74,7 +74,7 @@ describe("MCP eval quickstart", () => {
           return r1.hasToolCall("greet") && r2.hasToolCall("greet");
         },
       });
-      // With MCPJAM_API_KEY (sk_…) set, results auto-save to your MCPJam
+      // With MCPJAM_API_KEY (sk_…) set, results auto-save to your Fletch MCP Studio
       // Evals dashboard; without it the run is purely local.
       await evalTest.run(agent, {
         iterations: 1,
@@ -151,7 +151,7 @@ export function SdkEvalQuickstart({ projectId }: SdkEvalQuickstartProps) {
           toolbarLabel=".env"
         />
         <p className="text-[11px] leading-relaxed text-muted-foreground">
-          MCPJAM_API_KEY is an MCPJam API key (sk_…) from Settings → API keys.
+          MCPJAM_API_KEY is an API key (sk_…) from Settings → API keys.
           Set it and eval results save to this project automatically — leave it
           unset to run evals locally only.
         </p>

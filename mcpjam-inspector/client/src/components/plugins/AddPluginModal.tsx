@@ -544,7 +544,7 @@ export function AddPluginModal({
         <DialogHeader>
           <DialogTitle>Add plugin</DialogTitle>
           <DialogDescription>
-            Import an OpenAI plugin bundle. MCPJam stores the original archive
+            Import an OpenAI plugin bundle. Fletch MCP Studio stores the original archive
             and creates a versioned, read-only projection of its skills and MCP
             servers.
           </DialogDescription>

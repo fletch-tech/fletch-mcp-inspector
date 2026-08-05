@@ -40,7 +40,7 @@ const MOCK_REGISTRY_SERVERS: RegistryServer[] = [
     displayName: "Asana",
     description:
       "Connect to Asana to manage tasks, projects, and team workflows directly from your MCP client.",
-    publisher: "MCPJam",
+    publisher: "Fletch",
     publishStatus: "verified",
     category: "Project Management",
     iconUrl: "https://cdn.simpleicons.org/asana",
@@ -63,7 +63,7 @@ const MOCK_REGISTRY_SERVERS: RegistryServer[] = [
     displayName: "Linear",
     description:
       "Interact with Linear issues, projects, and cycles. Create, update, and search issues with natural language.",
-    publisher: "MCPJam",
+    publisher: "Fletch",
     publishStatus: "verified",
     category: "Project Management",
     iconUrl: "https://cdn.simpleicons.org/linear",
@@ -86,7 +86,7 @@ const MOCK_REGISTRY_SERVERS: RegistryServer[] = [
     displayName: "Notion",
     description:
       "Access and manage Notion pages, databases, and content. Search, create, and update your project.",
-    publisher: "MCPJam",
+    publisher: "Fletch",
     publishStatus: "verified",
     category: "Productivity",
     iconUrl:
@@ -110,7 +110,7 @@ const MOCK_REGISTRY_SERVERS: RegistryServer[] = [
     displayName: "Slack",
     description:
       "Send messages, search conversations, and manage Slack channels directly through MCP.",
-    publisher: "MCPJam",
+    publisher: "Fletch",
     publishStatus: "verified",
     category: "Communication",
     iconUrl: "https://cdn.worldvectorlogo.com/logos/slack-new-logo.svg",
@@ -132,7 +132,7 @@ const MOCK_REGISTRY_SERVERS: RegistryServer[] = [
     displayName: "GitHub",
     description:
       "Manage repositories, pull requests, issues, and code reviews. Automate your GitHub workflows.",
-    publisher: "MCPJam",
+    publisher: "Fletch",
     publishStatus: "verified",
     category: "Developer Tools",
     scope: "global",
@@ -153,7 +153,7 @@ const MOCK_REGISTRY_SERVERS: RegistryServer[] = [
     displayName: "Jira",
     description:
       "Create and manage Jira issues, sprints, and boards. Track project progress with natural language.",
-    publisher: "MCPJam",
+    publisher: "Fletch",
     publishStatus: "verified",
     category: "Project Management",
     scope: "global",
@@ -173,7 +173,7 @@ const MOCK_REGISTRY_SERVERS: RegistryServer[] = [
     displayName: "Google Drive",
     description:
       "Search, read, and organize files in Google Drive. Access documents, spreadsheets, and presentations.",
-    publisher: "MCPJam",
+    publisher: "Fletch",
     publishStatus: "verified",
     category: "Productivity",
     scope: "global",
@@ -193,7 +193,7 @@ const MOCK_REGISTRY_SERVERS: RegistryServer[] = [
     displayName: "Stripe",
     description:
       "Query payments, subscriptions, and customer data. Monitor your Stripe business metrics.",
-    publisher: "MCPJam",
+    publisher: "Fletch",
     publishStatus: "verified",
     category: "Finance",
     scope: "global",

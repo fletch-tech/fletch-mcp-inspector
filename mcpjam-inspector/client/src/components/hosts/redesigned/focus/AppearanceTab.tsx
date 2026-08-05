@@ -17,7 +17,7 @@ interface AppearanceTabProps {
   ) => void;
 }
 
-const DEFAULT_DOTS_COLOR = "#F2735B";
+const DEFAULT_DOTS_COLOR = "#15AD7A";
 
 /**
  * Sparse-merge a `ChatUiOverride` patch onto the draft. Drops keys whose

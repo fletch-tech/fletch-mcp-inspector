@@ -688,7 +688,7 @@ export function SkillsTab({
                         the PROJECT store by name, so on a name collision this
                         would delete the user's own skill while they were
                         looking at a server's — data loss with no visible
-                        relation to the click. MCPJam does not own server
+                        relation to the click. Fletch MCP Studio does not own server
                         content and cannot delete it. */}
                     {!serverSkillUri && (
                       <Button

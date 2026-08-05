@@ -139,7 +139,7 @@ export default function OAuthDebugCallback() {
                 {window.isElectron && !window.opener && (
                   <p className="mt-3 text-xs text-muted-foreground">
                     The debug session is no longer attached to a popup window.
-                    Reopen the OAuth Flow tab in MCPJam Inspector and start the
+                    Reopen the OAuth Flow tab in Fletch MCP Studio and start the
                     flow again to exchange a fresh code.
                   </p>
                 )}
@@ -160,7 +160,7 @@ export default function OAuthDebugCallback() {
             {window.isElectron && !window.opener && (
               <p className="mt-3 text-xs text-muted-foreground">
                 The debug session is no longer active in a popup window. Return
-                to MCPJam Inspector and start a new flow to retry.
+                to Fletch MCP Studio and start a new flow to retry.
               </p>
             )}
           </>
@@ -168,8 +168,8 @@ export default function OAuthDebugCallback() {
         {!window.isElectron && returnToElectronUrl && (
           <div className="mt-4 space-y-2 text-xs text-muted-foreground">
             <p>
-              MCPJam Desktop should open automatically. If you are back in the
-              browser, please close this page and continue in MCPJam Desktop.
+              Fletch MCP Studio should open automatically. If you are back in the
+              browser, please close this page and continue in Fletch MCP Studio.
             </p>
             <p>
               If nothing happened,{" "}

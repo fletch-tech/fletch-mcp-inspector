@@ -86,7 +86,7 @@ export function CreditTopupDialog({
         <DialogHeader>
           <DialogTitle>Buy credits to keep chatting</DialogTitle>
           <DialogDescription>
-            Add credits to your organization so the team can keep using MCPJam
+            Add credits to your organization so the team can keep using Fletch MCP Studio
             models when your shared credits run low.
           </DialogDescription>
         </DialogHeader>

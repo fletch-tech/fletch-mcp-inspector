@@ -42,7 +42,7 @@ export function ModelStep({
               : "text-muted-foreground hover:text-foreground",
           )}
         >
-          MCPJam Free Models
+          Hosted Free Models
         </button>
         <button
           type="button"

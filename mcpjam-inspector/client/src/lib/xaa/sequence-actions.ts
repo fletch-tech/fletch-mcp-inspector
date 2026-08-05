@@ -64,7 +64,7 @@ export function buildXAAActions(flowState: XAAFlowState): Action[] {
               id: "received_client_credentials",
               label: "Client credentials issued",
               description:
-                "The Authorization Server created the client; MCPJam holds its credentials for this session only.",
+                "The Authorization Server created the client; Fletch MCP Studio holds its credentials for this session only.",
               from: "authServer",
               to: "client",
               details: flowState.clientId
@@ -78,7 +78,7 @@ export function buildXAAActions(flowState: XAAFlowState): Action[] {
               id: "fetch_client_metadata_document",
               label: "Preflight hosted client metadata document",
               description:
-                "Debugger preflight of MCPJam's hosted document — the Authorization Server performs its own fetch; only the later JWT bearer grant tests its acceptance.",
+                "Debugger preflight of Fletch MCP Studio's hosted document — the Authorization Server performs its own fetch; only the later JWT bearer grant tests its acceptance.",
               from: "client",
               to: "client",
               details: flowState.clientId
@@ -141,10 +141,10 @@ export function buildXAAActions(flowState: XAAFlowState): Action[] {
     ...registrationActions,
     {
       id: "user_authentication",
-      label: isSaml ? "Mock SAML SSO" : "Simulate sign-in at MCPJam IdP",
+      label: isSaml ? "Mock SAML SSO" : "Simulate sign-in at Fletch IdP",
       description: isSaml
-        ? "MCPJam signs the user in at the IdP via SP-initiated SAML SSO (mocked)."
-        : "MCPJam simulates the user signing in at its identity provider.",
+        ? "Fletch signs the user in at the IdP via SP-initiated SAML SSO (mocked)."
+        : "Fletch simulates the user signing in at its identity provider.",
       from: "client",
       to: "testIdp",
       details: flowState.email
@@ -155,10 +155,10 @@ export function buildXAAActions(flowState: XAAFlowState): Action[] {
       id: "received_identity_assertion",
       label: isSaml
         ? "SAML assertion issued"
-        : "ID token issued by MCPJam IdP",
+        : "ID token issued by Fletch IdP",
       description: isSaml
-        ? "MCPJam's identity provider gives the Agent a signed SAML assertion."
-        : "MCPJam's identity provider gives the Agent an ID token.",
+        ? "Fletch's identity provider gives the Agent a signed SAML assertion."
+        : "Fletch's identity provider gives the Agent an ID token.",
       from: "testIdp",
       to: "client",
       details: flowState.identityAssertion

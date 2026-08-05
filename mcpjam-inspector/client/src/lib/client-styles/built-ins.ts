@@ -15,7 +15,7 @@ import clineLogoDark from "/cline_logo_dark.svg";
 import clineLogoLight from "/cline_logo_light.svg";
 import notionLogo from "/notion_logo.png";
 import slackLogo from "/slack_logo.png";
-import mcpjamLogo from "/mcp_jam.svg";
+import mcpjamLogo from "/fletch_dark.svg";
 import { UIType } from "@/lib/mcp-ui/mcp-apps-utils";
 import {
   CHATGPT_CHAT_BACKGROUND,
@@ -815,8 +815,8 @@ export const MCPJAM_HOST_STYLE: HostStyleDefinition = {
     },
   },
   chatUi: {
-    label: "MCPJam",
-    shortLabel: "MCPJam-style host",
+    label: "Fletch",
+    shortLabel: "Fletch-style host",
     pickerDescription: "Inspector's house chrome",
     logoSrc: mcpjamLogo,
     // Maps onto the claude visual family (warm bubble chat language) until

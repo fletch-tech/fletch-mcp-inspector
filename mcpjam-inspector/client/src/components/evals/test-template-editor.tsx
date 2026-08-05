@@ -3587,6 +3587,7 @@ function RunColumn({
   baselineHostStyle: string | undefined;
 }) {
   const themeMode = usePreferencesStore((state) => state.themeMode);
+  const themePreset = usePreferencesStore((state) => state.themePreset);
   const globalPreferenceHostStyle = usePreferencesStore(
     (state) => state.hostStyle,
   );
@@ -4102,6 +4103,7 @@ function RunColumn({
                   themeMode === "dark" && "dark",
                 )}
                 data-host-style={hostStyle}
+                data-theme-preset={themePreset}
                 style={shellStyle}
               >
                 <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden p-3">

@@ -104,7 +104,7 @@ function XaaTestDefaultsSection({
       <div className="space-y-3 px-4 py-3 rounded-md border border-border/40">
         <div className="flex flex-col gap-1">
           <span className="text-sm font-medium">
-            Identity provider: MCPJam test IdP
+            Identity provider: Fletch test IdP
           </span>
           <span className="text-xs text-muted-foreground">
             Used when an authenticated project member connects without a
@@ -112,7 +112,7 @@ function XaaTestDefaultsSection({
           </span>
           {!hasStored && (
             <span className="text-xs text-muted-foreground">
-              Falls back to MCPJam&apos;s demo identity.
+              Falls back to Fletch&apos;s demo identity.
             </span>
           )}
         </div>

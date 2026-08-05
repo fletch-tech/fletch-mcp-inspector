@@ -277,7 +277,7 @@ export function PluginGroupCard({ plugin }: { plugin: PluginSummary }) {
                     version.componentCounts.unsupported,
                     "component",
                   )}{" "}
-                  in this bundle are preserved but not run by MCPJam.
+                  in this bundle are preserved but not run by Fletch MCP Studio.
                 </p>
               ) : null}
 

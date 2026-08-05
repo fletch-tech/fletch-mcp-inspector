@@ -261,7 +261,7 @@ describe("ChatboxChatPage", () => {
     expect(
       container.querySelector('[data-host-style="chatgpt"]')
     ).toBeInTheDocument();
-    expect(screen.getByAltText("MCPJam")).toBeInTheDocument();
+    expect(screen.getByAltText("Fletch MCP Studio")).toBeInTheDocument();
     expect(mockChatTabV2).toHaveBeenCalledWith(
       expect.objectContaining({
         reasoningDisplayMode: "hidden",
@@ -623,7 +623,7 @@ describe("ChatboxChatPage", () => {
     ).toBeInTheDocument();
     expect(
       screen.getByText(
-        "We couldn't open this swarm right now. Please try again or open MCPJam."
+        "We couldn't open this swarm right now. Please try again or open Fletch MCP Studio."
       )
     ).toBeInTheDocument();
     expect(

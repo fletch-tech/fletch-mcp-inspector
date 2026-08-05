@@ -38,7 +38,7 @@ import { getCatalogHost } from "@mcpjam/sdk/host-compat";
 
 const QUICK_ADD_TEMPLATES = ["claude", "chatgpt", "copilot"] as const;
 
-const MCPJAM_HOST_NAME = "MCPJam";
+const MCPJAM_HOST_NAME = "Fletch";
 const LAST_HOST_DELETE_REASON =
   "A project needs at least one client. Create another client first.";
 const ANALYTICS_LOCATION = "host_canvas";

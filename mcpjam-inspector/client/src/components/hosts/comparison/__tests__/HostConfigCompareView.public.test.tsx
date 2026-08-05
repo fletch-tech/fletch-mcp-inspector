@@ -359,7 +359,7 @@ describe("HostConfigCompareView public mode", () => {
       })
     );
     expect(
-      await screen.findByText("We've notified the MCPJam team.")
+      await screen.findByText("We've notified the Fletch team.")
     ).toBeInTheDocument();
   });
 

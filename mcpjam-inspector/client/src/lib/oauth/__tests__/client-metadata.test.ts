@@ -14,7 +14,7 @@ vi.mock("../pkce", () => ({
   generateRandomString: vi.fn(() => "mock-random-string"),
 }));
 
-const EXPECTED_LOGO_URI = "https://www.mcpjam.com/mcp_jam_2row.png";
+const EXPECTED_LOGO_URI = "/fletch_dark.svg";
 
 describe("OAuth client metadata logo_uri", () => {
   beforeEach(() => {

@@ -113,7 +113,7 @@ describe("ProjectSettingsTab — XAA test identity defaults", () => {
     ).toBeInTheDocument();
     // Fixed issuer — the MCPJam test IdP, never enterprise SSO.
     expect(
-      screen.getByText(/Identity provider: MCPJam test IdP/),
+      screen.getByText(/Identity provider: Fletch test IdP/),
     ).toBeInTheDocument();
     expect(
       screen.getByText(
@@ -200,7 +200,7 @@ describe("ProjectSettingsTab — XAA test identity defaults", () => {
   it("documents the demo-identity fallback without claiming the signed-in user", () => {
     renderTab();
     expect(
-      screen.getByText(/Falls back to MCPJam's demo identity/),
+      screen.getByText(/Falls back to Fletch's demo identity/),
     ).toBeInTheDocument();
     // The empty state must never claim the signed-in user's identity is used.
     expect(screen.queryByText(/signed-in/i)).not.toBeInTheDocument();

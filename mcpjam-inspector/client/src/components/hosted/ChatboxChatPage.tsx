@@ -77,7 +77,7 @@ interface ChatboxDisplayError {
 const INVALID_CHATBOX_LINK_MESSAGE =
   "This swarm link is invalid or expired. Ask the owner to share a new link if you still need access.";
 const UNEXPECTED_CHATBOX_ERROR_MESSAGE =
-  "We couldn't open this swarm right now. Please try again or open MCPJam.";
+  "We couldn't open this swarm right now. Please try again or open Fletch MCP Studio.";
 
 type ChatboxBootstrapAuthMode = "workos" | "guest";
 type ChatboxLandingState =
@@ -973,10 +973,10 @@ export function ChatboxChatPage({
                           <img
                             src={
                               themeMode === "dark"
-                                ? "/mcp_jam_dark.png"
-                                : "/mcp_jam_light.png"
+                                ? "/fletch_dark.svg"
+                                : "/fletch_light.svg"
                             }
-                            alt="MCPJam"
+                            alt="Fletch MCP Studio"
                             className="h-4 w-auto object-contain"
                           />
                         </button>

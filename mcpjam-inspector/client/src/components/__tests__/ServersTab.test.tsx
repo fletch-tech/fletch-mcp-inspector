@@ -28,7 +28,7 @@ function createLinearCatalogCard(): EnrichedRegistryCatalogCard {
     name: "app.linear.mcp",
     displayName: "Linear",
     description: "Interact with Linear issues.",
-    publisher: "MCPJam",
+    publisher: "Fletch",
     publishStatus: "verified" as const,
     scope: "global" as const,
     transport: {
@@ -59,7 +59,7 @@ function createNotionCatalogCard(): EnrichedRegistryCatalogCard {
     name: "com.notion.mcp",
     displayName: "Notion",
     description: "Access Notion pages.",
-    publisher: "MCPJam",
+    publisher: "Fletch",
     publishStatus: "verified" as const,
     scope: "global" as const,
     transport: {
@@ -1594,7 +1594,7 @@ describe("ServersTab shared detail modal", () => {
     render(<ServersTab {...defaultProps} projectServers={{}} />);
 
     expect(screen.getByText("Linear")).toBeInTheDocument();
-    expect(screen.getByText("MCPJam")).toBeInTheDocument();
+    expect(screen.getByText("Fletch")).toBeInTheDocument();
     expect(screen.getByLabelText("Verified publisher")).toBeInTheDocument();
     expect(screen.getByLabelText("42 stars")).toBeInTheDocument();
     expect(

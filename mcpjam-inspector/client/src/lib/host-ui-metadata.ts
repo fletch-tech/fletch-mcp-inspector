@@ -1,5 +1,6 @@
 import type { HostThemeMode } from "@/lib/client-styles";
-import mcpjamLogo from "/mcp_jam.svg";
+import mcpjamLogoDark from "/fletch_dark.svg";
+import mcpjamLogoLight from "/fletch_light.svg";
 import claudeLogo from "/claude_logo.png";
 import claudeCodeLogo from "/claude_code_logo.png";
 import openaiLogo from "/openai_logo.png";
@@ -23,7 +24,7 @@ export const DEFAULT_CATALOG_HOST_ID = "mcpjam";
 const UNKNOWN_HOST_LOGO = "/mcp.svg";
 
 const LOGO_BY_HOST_ID: Record<string, string> = {
-  mcpjam: mcpjamLogo,
+  mcpjam: mcpjamLogoDark,
   claude: claudeLogo,
   "claude-code": claudeCodeLogo,
   chatgpt: openaiLogo,
@@ -45,6 +46,10 @@ const LOGO_BY_HOST_ID_AND_THEME: Record<
   string,
   { light: string; dark: string } | undefined
 > = {
+  mcpjam: {
+    light: mcpjamLogoLight,
+    dark: mcpjamLogoDark,
+  },
   goose: {
     light: gooseLogoLight,
     dark: gooseLogoDark,

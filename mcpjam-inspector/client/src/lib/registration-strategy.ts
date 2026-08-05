@@ -43,8 +43,8 @@ export const XAA_STRATEGY_LABELS: Record<RegistrationStrategy, string> = {
 export const XAA_STRATEGY_HINTS: Record<RegistrationStrategy, string> = {
   preregistered:
     "Uses the client ID and secret you registered at the authorization server yourself.",
-  cimd: "Uses MCPJam's hosted metadata URL as the client_id. It does not request a DCR-created client, though the authorization server may fetch/cache the document. This mode is public (no client authentication) and requires advertised CIMD support.",
-  dcr: "Creates a real client at this authorization server. MCPJam keeps its credentials only for this browser session; the remote registration may remain after the session ends. Protected DCR requiring an initial access token is not tested.",
+  cimd: "Uses Fletch MCP Studio's hosted metadata URL as the client_id. It does not request a DCR-created client, though the authorization server may fetch/cache the document. This mode is public (no client authentication) and requires advertised CIMD support.",
+  dcr: "Creates a real client at this authorization server. Fletch MCP Studio keeps its credentials only for this browser session; the remote registration may remain after the session ends. Protected DCR requiring an initial access token is not tested.",
 };
 
 /** Ordered options for the XAA debugger <Select>, canonical strategy order. */

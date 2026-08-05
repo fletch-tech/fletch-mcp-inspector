@@ -30,8 +30,8 @@ export const IDENTITY_ASSERTION_FORMAT_HINTS: Record<
   IdentityAssertionFormat,
   string
 > = {
-  oidc: "The MCPJam IdP mints an OIDC ID token as the identity assertion.",
-  saml: "The MCPJam IdP mints a signed SAML 2.0 assertion; the ID-JAG carries a saml-nameid subject identifier.",
+  oidc: "The Fletch IdP mints an OIDC ID token as the identity assertion.",
+  saml: "The Fletch IdP mints a signed SAML 2.0 assertion; the ID-JAG carries a saml-nameid subject identifier.",
 };
 
 /**

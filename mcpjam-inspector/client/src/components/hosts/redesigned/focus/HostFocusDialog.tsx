@@ -171,7 +171,7 @@ export function HostFocusDialog({
             </Button>
             <div className="flex min-w-0 flex-1 flex-wrap items-center gap-2">
               <span className="text-[12.5px] font-semibold text-foreground">
-                MCPJam
+                Fletch
               </span>
               <span className="truncate text-[12.5px] text-muted-foreground">
                 {hostName || "Untitled host"}

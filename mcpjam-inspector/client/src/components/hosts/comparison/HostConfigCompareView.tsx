@@ -895,7 +895,7 @@ function ReportInconsistencyDialog() {
             <DialogHeader>
               <DialogTitle>Thanks for the heads up.</DialogTitle>
               <DialogDescription>
-                We&apos;ve notified the MCPJam team.
+                We&apos;ve notified the Fletch team.
               </DialogDescription>
             </DialogHeader>
             <DialogFooter>
@@ -1096,7 +1096,7 @@ function CompareSearchBar({
   const searchAnchorRef = useRef<HTMLDivElement | null>(null);
   const themeMode = usePreferencesStore((s) => s.themeMode);
   const mcpJamLogoSrc =
-    themeMode === "dark" ? "/mcp_jam_dark.png" : "/mcp_jam_light.png";
+    themeMode === "dark" ? "/fletch_dark.svg" : "/fletch_light.svg";
   const fieldGroups = useMemo(
     () =>
       groupHostConfigFields(
@@ -1299,10 +1299,10 @@ function CompareSearchBar({
           <a
             href={MAIN_PRODUCT_URL}
             className="inline-flex min-w-0 shrink-0 items-center gap-1.5 text-[11px] leading-none text-muted-foreground transition-opacity hover:opacity-80 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40 @min-[900px]:col-start-3 @min-[900px]:row-start-1 @min-[900px]:justify-self-end"
-            aria-label="Open MCPJam"
+            aria-label="Open Fletch MCP Studio"
           >
             <span>Brought to you by</span>
-            <img src={mcpJamLogoSrc} alt="MCPJam" className="h-3.5 w-auto" />
+            <img src={mcpJamLogoSrc} alt="Fletch MCP Studio" className="h-3.5 w-auto" />
           </a>
         </div>
       ) : (

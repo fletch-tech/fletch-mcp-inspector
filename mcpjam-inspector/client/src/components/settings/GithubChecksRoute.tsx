@@ -288,7 +288,7 @@ export function GithubChecksRoute({
           ) : rows.length === 0 ? (
             <div className="space-y-3 px-4 py-8 text-sm text-muted-foreground">
               <p>
-                No repositories connected yet. Install the MCPJam GitHub App on
+                No repositories connected yet. Install the Fletch GitHub App on
                 a repository, then connect it below to start running checks on
                 its pull requests.
               </p>
@@ -297,7 +297,7 @@ export function GithubChecksRoute({
                 <code className="rounded bg-muted px-1 py-0.5 text-xs">
                   mcpjam.yaml
                 </code>{" "}
-                at the repo root. Without one, MCPJam detects a recipe
+                at the repo root. Without one, Fletch MCP Studio detects a recipe
                 automatically.{" "}
                 <a
                   className="underline underline-offset-2 hover:text-foreground"
@@ -415,7 +415,7 @@ export function GithubChecksRoute({
             </div>
           ) : installationRepos !== null && installationRepos.length === 0 ? (
             <div className="px-4 pb-4 text-sm text-muted-foreground">
-              No repositories available. Install the MCPJam GitHub App on the
+              No repositories available. Install the Fletch GitHub App on the
               repositories you want checked, then reload this page.
             </div>
           ) : null}

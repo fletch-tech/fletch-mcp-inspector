@@ -747,7 +747,7 @@ export function ProtocolTab({
         <div className="flex items-center gap-3">
           <span
             className="text-[12px] font-medium"
-            title="Automatic: store no pin — MCPJam picks the wire version at connect time. Any other choice pins that exact revision for every server on this client."
+            title="Automatic: store no pin — Fletch MCP Studio picks the wire version at connect time. Any other choice pins that exact revision for every server on this client."
           >
             {fProtocolVersion.label}
           </span>

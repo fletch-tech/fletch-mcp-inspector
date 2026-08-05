@@ -247,7 +247,7 @@ export function XaaCredentialFields({
               side="top"
               className="max-w-[14rem]"
             >
-              MCPJam signs the ID token and ID-JAG used in this test.
+              Fletch signs the ID token and ID-JAG used in this test.
             </TooltipContent>
           </Tooltip>
         </div>
@@ -256,7 +256,7 @@ export function XaaCredentialFields({
           aria-label="Identity provider"
           className="flex h-10 w-full items-center rounded-md border border-input bg-muted/30 px-3 text-sm text-muted-foreground"
         >
-          MCPJam test identity provider
+          Fletch test identity provider
         </div>
       </div>
 
@@ -534,7 +534,7 @@ export function XaaCredentialFields({
                   </button>
                 </TooltipTrigger>
                 <TooltipContent variant="muted" side="top" className="max-w-xs">
-                  Leave blank to use the authorization server MCPJam discovers
+                  Leave blank to use the authorization server Fletch discovers
                   from the MCP server. Enter a URL to use a different
                   authorization server instead.
                 </TooltipContent>
@@ -621,7 +621,7 @@ export function XaaCredentialFields({
                     className="max-w-xs"
                   >
                     {identityHelpText ??
-                      "MCPJam acts as the test identity provider and puts these values in the ID token. Leave blank to use the project's default test identity when one is set, otherwise MCPJam's demo identity. Set both fields together to test a specific user on this server."}
+                      "Fletch acts as the test identity provider and puts these values in the ID token. Leave blank to use the project's default test identity when one is set, otherwise Fletch's demo identity. Set both fields together to test a specific user on this server."}
                   </TooltipContent>
                 </Tooltip>
               </div>

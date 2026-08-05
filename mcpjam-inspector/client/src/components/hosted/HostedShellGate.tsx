@@ -25,9 +25,9 @@ function getGateCopy(state: HostedShellGateState): string {
     return "Preparing project...";
   }
   if (state === "restricted") {
-    return "This environment is limited to MCPJam employees.";
+    return "This environment is limited to authorized employees.";
   }
-  return "Sign in to MCPJam to continue";
+  return "Sign in to Fletch MCP Studio to continue";
 }
 
 export function HostedShellGate({
@@ -63,8 +63,8 @@ export function HostedShellGate({
           <div className="flex max-w-md flex-col items-center rounded-lg border border-border bg-card/90 p-6 text-center shadow-sm">
             {state === "logged-out" ? (
               <img
-                src="/mcp_jam.svg"
-                alt="MCPJam"
+                src="/fletch_dark.svg"
+                alt="Fletch MCP Studio"
                 className="mb-4 h-12 w-auto"
               />
             ) : state === "restricted" ? (

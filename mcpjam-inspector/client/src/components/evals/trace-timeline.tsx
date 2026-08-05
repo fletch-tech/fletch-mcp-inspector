@@ -1627,7 +1627,7 @@ function TimelineDetailPane({
                     turnRuntime.engine === "harness"
                       ? "This turn ran through the harness adapter."
                       : turnRuntime.engine === "emulated"
-                        ? "This turn ran through MCPJam's emulated chat engine."
+                        ? "This turn ran through Fletch MCP Studio's emulated chat engine."
                         : turnRuntime.harness
                           ? "This turn ran through the harness adapter."
                           : "Runtime engine was not recorded for this turn."

@@ -110,7 +110,7 @@ function getPlanColumnCta(params: {
       variant: "outline",
       onClick: () => {
         window.location.href =
-          "mailto:founders@mcpjam.com?subject=MCPJam%20Enterprise";
+          "mailto:founders@mcpjam.com?subject=Fletch%20Enterprise";
       },
     };
   }
@@ -295,7 +295,7 @@ const COMPARE_PLAN_ROW_LABEL_TOOLTIPS: Record<
   "Data processing agreement (DPA)": {
     ariaLabel: "About the DPA",
     content:
-      "A legal agreement covering how MCPJam processes personal data on your behalf",
+      "A legal agreement covering how Fletch processes personal data on your behalf",
     contentClassName: "max-w-[22rem]",
   },
   "Uptime service level agreement (SLA)": {

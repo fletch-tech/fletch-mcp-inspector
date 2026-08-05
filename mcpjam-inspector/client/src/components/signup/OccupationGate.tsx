@@ -67,12 +67,12 @@ export function OccupationGate({ userId, email }: OccupationGateProps) {
     <main className="min-h-screen bg-background text-foreground">
       <div className="mx-auto flex min-h-screen w-full max-w-lg flex-col justify-center px-6 py-12">
         <div className="mb-10">
-          <img src="/mcp_jam.svg" alt="MCPJam" className="mb-8 h-9 w-auto" />
+          <img src="/fletch_dark.svg" alt="Fletch MCP Studio" className="mb-8 h-9 w-auto" />
           <h1 className="text-3xl font-semibold tracking-normal">
             What is your role?
           </h1>
           <p className="mt-3 text-sm text-muted-foreground">
-            This helps us understand who is using MCPJam.
+            This helps us understand who is using Fletch MCP Studio.
           </p>
         </div>
 
@@ -159,7 +159,7 @@ export function OccupationGate({ userId, email }: OccupationGateProps) {
           </p>
         ) : userId ? (
           <p className="mt-6 text-xs text-muted-foreground">
-            Signed in to MCPJam
+            Signed in to Fletch MCP Studio
           </p>
         ) : null}
       </div>

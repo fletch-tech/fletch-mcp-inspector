@@ -2,6 +2,10 @@
 label: Fletch
 value: fletch
 Green primary matched to fletch_dark.svg (#15AD7A, #00895C).
+
+Playground / eval / client-styled chat wrap chrome in `.app-theme-scope`,
+which the design-system defaults to MCPJam orange. Override both root and
+scoped shells so Tools/Run/primary actions stay on-brand everywhere.
 */
 
 :root[data-theme-preset="fletch"] {
@@ -17,6 +21,28 @@ Green primary matched to fletch_dark.svg (#15AD7A, #00895C).
 
 .dark:root[data-theme-preset="fletch"] {
   /* #15AD7A on dark */
+  --primary: oklch(0.62 0.138 163);
+  --primary-foreground: oklch(1 0 0);
+  --ring: oklch(0.62 0.138 163);
+  --sidebar-primary: oklch(0.62 0.138 163);
+  --sidebar-primary-foreground: oklch(0.9881 0 0);
+  --sidebar-ring: oklch(0.7731 0 0);
+}
+
+/* Scoped shells (Playground left rail Tools/Run, chat device frame, evals…) */
+:root[data-theme-preset="fletch"] .app-theme-scope,
+.app-theme-scope[data-theme-preset="fletch"] {
+  --primary: oklch(0.62 0.138 163);
+  --primary-foreground: oklch(1 0 0);
+  --ring: oklch(0.50 0.125 163);
+  --sidebar-primary: oklch(0.50 0.125 163);
+  --sidebar-primary-foreground: oklch(0.9881 0 0);
+  --sidebar-ring: oklch(0.7731 0 0);
+}
+
+:root[data-theme-preset="fletch"] .app-theme-scope.dark,
+.dark:root[data-theme-preset="fletch"] .app-theme-scope,
+.app-theme-scope.dark[data-theme-preset="fletch"] {
   --primary: oklch(0.62 0.138 163);
   --primary-foreground: oklch(1 0 0);
   --ring: oklch(0.62 0.138 163);

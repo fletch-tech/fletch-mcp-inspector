@@ -43,9 +43,9 @@ const VALIDATION_RETRY_ATTEMPTS = 3;
 const VALIDATION_RETRY_MS = 400;
 
 const TOKEN_MISSING_ERROR =
-  "Authorization completed, but MCPJam could not find the access token. Try again.";
+  "Authorization completed, but Fletch MCP Studio could not find the access token. Try again.";
 const VALIDATION_ERROR =
-  "Authorization completed, but MCPJam could not verify access. Try again.";
+  "Authorization completed, but Fletch MCP Studio could not verify access. Try again.";
 const RUNTIME_OAUTH_ERROR =
   "Authorization expired or is missing. Authorize again to continue.";
 

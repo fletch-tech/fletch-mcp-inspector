@@ -18,7 +18,7 @@ import clineLogoDark from "/cline_logo_dark.svg";
 import clineLogoLight from "/cline_logo_light.svg";
 import notionLogo from "/notion_logo.png";
 import slackLogo from "/slack_logo.png";
-import mcpjamLogo from "/mcp_jam_2row.png";
+import mcpjamLogo from "/fletch_dark.svg";
 import {
   APPS_HUB_NODE_ID,
   HOST_GROUP_NODE_ID,

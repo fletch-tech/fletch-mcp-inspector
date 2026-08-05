@@ -13,7 +13,7 @@ vi.mock("@/lib/config", () => ({
   HOSTED_MODE: false,
 }));
 
-const EXPECTED_LOGO_URI = "https://www.mcpjam.com/mcp_jam_2row.png";
+const EXPECTED_LOGO_URI = "/fletch_dark.svg";
 const REGISTRATION_ENDPOINT = "https://auth.example.com/register";
 
 type FlowCase = {
@@ -72,11 +72,11 @@ describe("Inspector OAuth adapter client metadata defaults", () => {
     },
     {
       protocolVersion: "2025-06-18",
-      expectedClientName: "MCPJam Inspector Debug Client",
+      expectedClientName: "Fletch MCP Studio",
     },
     {
       protocolVersion: "2025-11-25",
-      expectedClientName: "MCPJam Inspector Debug Client",
+      expectedClientName: "Fletch MCP Studio",
     },
   ])(
     "$protocolVersion includes the Inspector logo_uri and client_name in the DCR registration payload",

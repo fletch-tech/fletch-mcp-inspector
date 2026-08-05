@@ -70,10 +70,7 @@ export function SupportTab() {
             })}
           </div>
           <p className="text-center text-sm text-muted-foreground">
-            or email us at{" "}
-            <a className="underline" href="mailto:founders@mcpjam.com">
-              founders@mcpjam.com
-            </a>
+            For self-hosted deployments, contact your Fletch administrator.
           </p>
         </div>
       </div>

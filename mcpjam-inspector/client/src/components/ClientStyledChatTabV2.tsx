@@ -31,6 +31,7 @@ export function ClientStyledChatTabV2({
   ...props
 }: HostStyledChatTabV2Props) {
   const themeMode = usePreferencesStore((state) => state.themeMode);
+  const themePreset = usePreferencesStore((state) => state.themePreset);
   const prefHostStyle = usePreferencesStore((state) => state.hostStyle);
   const setHostStyle = usePreferencesStore((state) => state.setHostStyle);
   const prefHostCapabilitiesOverride = usePreferencesStore(
@@ -58,6 +59,7 @@ export function ClientStyledChatTabV2({
                   themeMode === "dark" && "dark"
                 )}
                 data-host-style={hostStyle}
+                data-theme-preset={themePreset}
                 style={shellStyle}
               >
                 <ChatTabV2

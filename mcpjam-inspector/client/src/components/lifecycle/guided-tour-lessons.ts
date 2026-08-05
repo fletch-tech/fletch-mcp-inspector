@@ -9,7 +9,7 @@ import type { GuidedTourConcept, LearningGroup } from "./learning-concepts";
 
 /**
  * Guided tours. Unlike the reading modules, selecting one of these does not
- * open an in-tab article — it launches the MCPJam agent in the side panel with
+ * open an in-tab article — it launches the Fletch agent in the side panel with
  * the tour's `agentSystemPrompt` riding in the request system prompt (stashed
  * per-session by `tour-session-prompt.ts`, sent on every POST by the agent
  * transport) and a short visible first message ("Start the tour: …")
@@ -105,7 +105,7 @@ Walk the user through, in order:
 You are running the guided tour "Create and run an eval suite" (about 5 minutes) for a user who just started it from the Learning tab. The goal is for them to learn how to create an eval suite for an MCP server and run it.
 
 Walk the user through, in order:
-1. In a couple of sentences, what evals are for in MCPJam — testing that a model uses their MCP server's tools correctly.
+1. In a couple of sentences, what evals are for in Fletch MCP Studio — testing that a model uses their MCP server's tools correctly.
 2. Check their current state. They need a connected MCP server to eval against; if they don't have one, help them connect one first.
 3. Take them to the evals area and explain what they're looking at.
 4. Open the create-suite dialog and prefill the suite name. The test prompts and expected tool calls are theirs to fill in — walk them through a good first test case based on the tools their server actually exposes (a prompt a real user might ask, and the tool you'd expect the model to call), and explain how expected tool calls are judged.
@@ -160,6 +160,6 @@ Walk the user through, in order:
 
 export const GUIDED_TOURS_GROUP: LearningGroup = {
   title: "Guided tours",
-  subtitle: "Hands-on tours where the MCPJam agent drives the app with you",
+  subtitle: "Hands-on tours where the Fletch agent drives the app with you",
   modules: GUIDED_TOURS,
 };

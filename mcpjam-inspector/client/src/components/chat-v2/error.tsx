@@ -125,7 +125,7 @@ export function ErrorBox({
   const errorLabel = isMCPJamModelLimit
     ? "Free daily credits used up"
     : isPlatformError
-    ? "MCPJam platform issue"
+    ? "Fletch platform issue"
     : "An error occurred";
   const errorPrefix = isMCPJamModelLimit ? `${errorLabel}.` : `${errorLabel}:`;
 
@@ -146,7 +146,7 @@ export function ErrorBox({
               We&apos;ve paused this account while a recent payment is reviewed.{" "}
               <a
                 className="underline hover:no-underline"
-                href="mailto:founders@mcpjam.com?subject=MCPJam%20Account%20Review"
+                href="mailto:founders@mcpjam.com?subject=Fletch%20Account%20Review"
               >
                 Reach out to support
               </a>{" "}

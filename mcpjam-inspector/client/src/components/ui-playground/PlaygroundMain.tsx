@@ -1197,7 +1197,7 @@ export function PlaygroundMain({
   const { createHost: createPlaygroundHost } = useHostMutations();
   const resolveFallbackHostId = useCallback(
     (hosts: HostListItem[]): string | null => {
-      const mcpjamHost = hosts.find((host) => host.name === "MCPJam");
+      const mcpjamHost = hosts.find((host) => host.name === "Fletch" || host.name === "MCPJam");
       if (mcpjamHost) return mcpjamHost.hostId;
       const [firstHost] = [...hosts].sort((a, b) =>
         a.name.localeCompare(b.name)
@@ -1207,7 +1207,7 @@ export function PlaygroundMain({
     []
   );
   // Seed backstop: the global host bar (which normally auto-creates the
-  // default "MCPJam" host for empty projects) is hidden on the playground,
+  // default "Fletch" host for empty projects) is hidden on the playground,
   // so replicate its one-shot seed here. Guarded by `hostList.length === 0`
   // + a per-project ref so it fires at most once per empty project and never
   // blocks a different empty project from getting its own default host.
@@ -1225,7 +1225,7 @@ export function PlaygroundMain({
     playgroundSeededProjectIdsRef.current.add(multiHostProjectId);
     createPlaygroundHost({
       projectId: multiHostProjectId,
-      name: "MCPJam",
+      name: "Fletch",
       // Pin a cheap default model — see HostOverlayBar's seed for why a
       // modelless default host breaks synthetic/swarm runs.
       input: emptyHostConfigInputV2({ modelId: DEFAULT_SEEDED_HOST_MODEL_ID }),
@@ -3849,10 +3849,10 @@ export function PlaygroundMain({
                       <img
                         src={
                           effectiveThreadTheme === "dark"
-                            ? "/mcp_jam_dark.png"
-                            : "/mcp_jam_light.png"
+                            ? "/fletch_dark.svg"
+                            : "/fletch_light.svg"
                         }
-                        alt="MCPJam"
+                        alt="Fletch MCP Studio"
                         draggable={false}
                         className="h-10 w-auto mx-auto mb-4"
                       />

@@ -921,7 +921,7 @@ describe("PlaygroundMain", () => {
     it("shows welcome message when thread is empty", () => {
       render(<PlaygroundMain {...defaultProps} />);
 
-      expect(screen.getByRole("img", { name: /MCPJam/i })).toBeInTheDocument();
+      expect(screen.getByRole("img", { name: /Fletch MCP Studio/i })).toBeInTheDocument();
       expect(
         screen.getByRole("heading", {
           name: /This is your playground for MCP./i,

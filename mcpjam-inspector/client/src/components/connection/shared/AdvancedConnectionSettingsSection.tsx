@@ -82,7 +82,7 @@ interface AdvancedConnectionSettingsSectionProps {
     version: McpProtocolVersion | undefined
   ) => void;
   /**
-   * Transport kind of this server. MCPJam's current stateless preview
+   * Transport kind of this server. Fletch MCP Studio's current stateless preview
    * is HTTP-POST only, so for stdio / SSE we filter the dropdown to
    * stateful versions (factory rejects stateless on those transports —
    * UI filter is the user-friendly safety net).
@@ -127,7 +127,7 @@ export function AdvancedConnectionSettingsSection({
   const showProtocolVersionControl = showMcpProtocolVersionOverride;
   const canEditProtocolVersion =
     onMcpProtocolVersionOverrideChange !== undefined;
-  // MCPJam's current RC preview is Streamable HTTP POST only — picking
+  // Fletch MCP Studio's current RC preview is Streamable HTTP POST only — picking
   // it on stdio / sse would fail at construction with
   // `StatelessRequiresHttpTransport`.
   // Hide it on non-HTTP transports as the user-friendly safety net.
@@ -356,14 +356,14 @@ export function AdvancedConnectionSettingsSection({
                 "November" → `"2025-11-25"` (legacy adapter + initialize
                 handshake); "Latest" → `"2026-07-28"` (stateless preview
                 client). The Latest option is hidden on non-HTTP
-                transports because MCPJam's current stateless client
+                transports because Fletch MCP Studio's current stateless client
                 requires Streamable HTTP. */}
             {showProtocolVersionControl && (
               <div className="space-y-1.5">
                 <label
                   id={protocolLabelId}
                   className="text-xs font-medium text-foreground"
-                  title="Latest: MCPJam's newest 2026-07-28 stateless preview over Streamable HTTP POST. November: the 2025-11-25 stateful MCP wire version."
+                  title="Latest: Fletch MCP Studio's newest 2026-07-28 stateless preview over Streamable HTTP POST. November: the 2025-11-25 stateful MCP wire version."
                 >
                   Protocol version
                 </label>

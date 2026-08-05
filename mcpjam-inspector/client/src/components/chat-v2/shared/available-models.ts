@@ -17,7 +17,7 @@ import {
 // while this composition stays real.
 
 export const GUEST_LOCKED_MODEL_REASON =
-  "Sign in to use MCPJam provided models";
+  "Sign in to use hosted models";
 
 /**
  * Unauthenticated users keep BYOK/custom models but premium MCPJam-provided

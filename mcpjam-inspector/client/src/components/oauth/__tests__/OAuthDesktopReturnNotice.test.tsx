@@ -31,7 +31,7 @@ describe("OAuthDesktopReturnNotice", () => {
       <OAuthDesktopReturnNotice returnToElectronUrl="mcpjam://oauth/callback?code=123" />,
     );
 
-    expect(screen.getByText("Continue in MCPJam Desktop")).toBeInTheDocument();
+    expect(screen.getByText("Continue in Fletch MCP Studio")).toBeInTheDocument();
   });
 
   it("does not redirect again inside Electron", () => {

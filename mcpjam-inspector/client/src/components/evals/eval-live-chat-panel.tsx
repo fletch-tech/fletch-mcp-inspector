@@ -158,6 +158,7 @@ export function EvalLiveChatPanel({
   const { isAuthenticated: isConvexAuthenticated } = useConvexAuth();
 
   const themeMode = usePreferencesStore((s) => s.themeMode);
+  const themePreset = usePreferencesStore((s) => s.themePreset);
   const hostStyle = usePreferencesStore((s) => s.hostStyle);
   const hostCapabilitiesOverride = usePreferencesStore(
     (s) => s.hostCapabilitiesOverride,
@@ -204,6 +205,7 @@ export function EvalLiveChatPanel({
                       themeMode === "dark" && "dark",
                     )}
                     data-host-style={hostStyle}
+                    data-theme-preset={themePreset}
                     style={shellStyle}
                   >
                     <PlaygroundMain

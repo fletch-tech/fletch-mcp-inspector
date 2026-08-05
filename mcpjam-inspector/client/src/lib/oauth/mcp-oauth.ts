@@ -2144,9 +2144,9 @@ export class MCPOAuthProvider implements OAuthClientProvider {
       this.customClientSecret || this.convexBinding?.hasClientSecret
     );
     return {
-      client_name: `MCPJam - ${this.serverName}`,
+      client_name: `Fletch MCP Studio - ${this.serverName}`,
       client_uri: "https://github.com/mcpjam/inspector",
-      logo_uri: "https://www.mcpjam.com/mcp_jam_2row.png",
+      logo_uri: "/fletch_dark.svg",
       redirect_uris: [this.redirectUri],
       grant_types: ["authorization_code", "refresh_token"],
       response_types: ["code"],
@@ -2461,13 +2461,13 @@ export class MCPOAuthProvider implements OAuthClientProvider {
           return;
         } catch (error) {
           console.warn(
-            "Failed to open system browser for MCP OAuth; continuing inside MCPJam Desktop:",
+            "Failed to open system browser for MCP OAuth; continuing inside Fletch MCP Studio:",
             error
           );
         }
       } else {
         console.warn(
-          "System browser opener is unavailable for MCP OAuth; continuing inside MCPJam Desktop."
+          "System browser opener is unavailable for MCP OAuth; continuing inside Fletch MCP Studio."
         );
       }
 

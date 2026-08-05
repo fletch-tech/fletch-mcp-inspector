@@ -57,7 +57,7 @@ vi.mock("@/lib/analytics", () => ({
 const oneHost = [
   {
     hostId: "host-a",
-    name: "MCPJam",
+    name: "Fletch",
     hostConfigId: "cfg-1",
     modelId: "x",
     serverCount: 0,
@@ -89,7 +89,7 @@ describe("HostCanvasSelector", () => {
     render(<HostCanvasSelector projectId="proj-1" activeHostId="host-a" />);
 
     expect(screen.getByTestId("host-canvas-current")).toHaveTextContent(
-      "MCPJam"
+      "Fletch"
     );
     expect(screen.getByTestId("host-canvas-current")).toHaveTextContent(
       "1 / 1"

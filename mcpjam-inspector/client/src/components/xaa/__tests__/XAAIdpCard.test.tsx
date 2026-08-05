@@ -33,7 +33,7 @@ describe("XAAIdpCard", () => {
     render(<XAAIdpCard />);
 
     expect(
-      screen.getByText("MCPJam is your identity provider")
+      screen.getByText("Fletch is your identity provider")
     ).toBeInTheDocument();
     // The chips show only a label; the full URL lives in the title attribute
     // (and is copied on click) to keep the bar compact.
@@ -249,7 +249,7 @@ describe("XAAIdpCard (non-hosted mode)", () => {
       screen.getByRole("button", { name: /about local issuer urls/i })
     );
     expect(await screen.findByRole("tooltip")).toHaveTextContent(
-      /Expose\s+MCPJam with a public tunnel/i
+      /Expose\s+Fletch MCP Studio with a public tunnel/i
     );
   });
 

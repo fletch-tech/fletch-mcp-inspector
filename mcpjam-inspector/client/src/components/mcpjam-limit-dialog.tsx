@@ -132,7 +132,7 @@ export function MCPJamLimitDialog() {
               <DialogDescription data-testid="limit-dialog-description">
                 {isKnownNonManager
                   ? "Ask your org admin to top up credits."
-                  : "Top up or bring your own key to allow your org to keep using MCPJam."}
+                  : "Top up or bring your own key to allow your org to keep using Fletch MCP Studio."}
               </DialogDescription>
             </DialogHeader>
             {/* Non-managers get no CTAs — just the "ask your org admin" copy.

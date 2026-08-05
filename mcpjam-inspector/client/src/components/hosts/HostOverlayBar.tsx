@@ -23,7 +23,7 @@ import { getHostLogoSrc } from "@/lib/host-ui-metadata";
 
 const QUICK_ADD_TEMPLATES = ["claude", "chatgpt", "copilot"] as const;
 
-const MCPJAM_HOST_NAME = "MCPJam";
+const MCPJAM_HOST_NAME = "Fletch";
 const LAST_HOST_DELETE_REASON =
   "A project needs at least one client. Create another client first.";
 
@@ -63,11 +63,12 @@ export function HostOverlayBar({
     () =>
       hosts.find((h) => h.name === mcpjamHostName) ??
       hosts.find((h) => h.name === MCPJAM_HOST_NAME) ??
+      hosts.find((h) => h.name === "MCPJam") ??
       null,
     [hosts, mcpjamHostName]
   );
 
-  // Lazily seed a "MCPJam" host from the live backend template only when the
+  // Lazily seed a "Fletch" host from the live backend template only when the
   // project has no hosts at all. Once any host exists (including after the user
   // deletes MCPJam), we stop seeding — otherwise a deleted MCPJam respawns on
   // every mount and duplicates accumulate. The catalog template carries the
@@ -116,9 +117,13 @@ export function HostOverlayBar({
   const sortedHosts = useMemo(() => {
     return [...hosts].sort((a, b) => {
       const aIsDefault =
-        a.name === mcpjamHostName || a.name === MCPJAM_HOST_NAME;
+        a.name === mcpjamHostName ||
+        a.name === MCPJAM_HOST_NAME ||
+        a.name === "MCPJam";
       const bIsDefault =
-        b.name === mcpjamHostName || b.name === MCPJAM_HOST_NAME;
+        b.name === mcpjamHostName ||
+        b.name === MCPJAM_HOST_NAME ||
+        b.name === "MCPJam";
       if (aIsDefault && !bIsDefault) return -1;
       if (bIsDefault && !aIsDefault) return 1;
       return a.name.localeCompare(b.name);

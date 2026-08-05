@@ -66,9 +66,9 @@ describe("HostedShellGate", () => {
     );
 
     expect(
-      screen.getByText("Sign in to MCPJam to continue"),
+      screen.getByText("Sign in to Fletch MCP Studio to continue"),
     ).toBeInTheDocument();
-    expect(screen.getByRole("img", { name: "MCPJam" })).toBeInTheDocument();
+    expect(screen.getByRole("img", { name: "Fletch MCP Studio" })).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Sign in" }));
     expect(onSignIn).toHaveBeenCalledTimes(1);
   });
@@ -83,7 +83,7 @@ describe("HostedShellGate", () => {
     );
 
     expect(
-      screen.getByText("This environment is limited to MCPJam employees."),
+      screen.getByText("This environment is limited to authorized employees."),
     ).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Use another account" }));
     expect(onSignOut).toHaveBeenCalledTimes(1);

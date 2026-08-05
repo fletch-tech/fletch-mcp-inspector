@@ -154,7 +154,7 @@ export function ProjectSlackIntegrationSection({
         </div>
         <p className="mt-1 text-sm text-muted-foreground">
           Slack integrations are available after this project is synced to
-          MCPJam.
+          Fletch MCP Studio.
         </p>
       </div>
     );

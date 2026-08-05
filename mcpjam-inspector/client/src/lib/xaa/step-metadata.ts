@@ -50,7 +50,7 @@ export const XAA_PHASES: Record<XAAPhaseKey, XAAPhaseInfo> = {
     title: "Sign in and get an identity assertion",
     specStep: 1,
     blurb:
-      "The user logs in at their IdP — the identity provider, i.e. the company login — and the Agent comes away with an identity assertion (an OIDC ID token or a SAML assertion): proof of who the user is. This happens once per session and isn't tied to any MCP server yet. In this debugger MCPJam plays the IdP, so the login is simulated.",
+      "The user logs in at their IdP — the identity provider, i.e. the company login — and the Agent comes away with an identity assertion (an OIDC ID token or a SAML assertion): proof of who the user is. This happens once per session and isn't tied to any MCP server yet. In this debugger Fletch plays the IdP, so the login is simulated.",
   },
   token_exchange: {
     title: "Exchange the identity assertion for an ID-JAG",
@@ -164,7 +164,7 @@ export const XAA_STEP_METADATA: Record<XAAFlowStep, XAAStepInfo> = {
   received_client_credentials: {
     title: "Client Registered",
     summary:
-      "The Authorization Server created the client. MCPJam keeps its credentials in memory for this browser session only.",
+      "The Authorization Server created the client. Fletch MCP Studio keeps its credentials in memory for this browser session only.",
     phase: "bootstrap",
     teachableMoments: [
       "The minted client_id now flows into the ID-JAG and the token request — the whole rest of the flow runs as this client.",
@@ -174,7 +174,7 @@ export const XAA_STEP_METADATA: Record<XAAFlowStep, XAAStepInfo> = {
   fetch_client_metadata_document: {
     title: "Request Client Metadata Document",
     summary:
-      "CIMD: the client_id is a URL to MCPJam's hosted metadata document. The debugger fetches and validates it — the Authorization Server does its own fetch later.",
+      "CIMD: the client_id is a URL to Fletch MCP Studio's hosted metadata document. The debugger fetches and validates it — the Authorization Server does its own fetch later.",
     phase: "bootstrap",
     teachableMoments: [
       "With CIMD there's nothing to register: the Authorization Server learns about the client by fetching the URL the client_id points at.",
@@ -192,18 +192,18 @@ export const XAA_STEP_METADATA: Record<XAAFlowStep, XAAStepInfo> = {
     ],
   },
   user_authentication: {
-    title: "Simulate sign-in at MCPJam IdP",
+    title: "Simulate sign-in at Fletch IdP",
     summary:
-      "MCPJam simulates the user signing in at its identity provider.",
+      "Fletch simulates the user signing in at its identity provider.",
     phase: "sso",
     teachableMoments: [
       "This login just proves who the user is — it isn't tied to any MCP server yet.",
     ],
   },
   received_identity_assertion: {
-    title: "ID token issued by MCPJam IdP",
+    title: "ID token issued by Fletch IdP",
     summary:
-      "MCPJam's identity provider gives the Agent an ID token.",
+      "Fletch's identity provider gives the Agent an ID token.",
     phase: "sso",
     teachableMoments: [
       "The ID token is only used to get the next token — it's never sent to the Authorization Server or the MCP Server.",
@@ -212,7 +212,7 @@ export const XAA_STEP_METADATA: Record<XAAFlowStep, XAAStepInfo> = {
   token_exchange_request: {
     title: "Exchange the ID Token for an ID-JAG",
     summary:
-      "The Agent trades the ID token back to the IdP for an ID-JAG — a grant scoped to one MCP Server. On the happy path this is a standard RFC 8693 form POST to the IdP's /token endpoint; a test mode instead uses MCPJam's mint endpoint to forge a deliberately broken grant.",
+      "The Agent trades the ID token back to the IdP for an ID-JAG — a grant scoped to one MCP Server. On the happy path this is a standard RFC 8693 form POST to the IdP's /token endpoint; a test mode instead uses Fletch's mint endpoint to forge a deliberately broken grant.",
     phase: "token_exchange",
     teachableMoments: [
       "The Agent tells the IdP which Authorization Server the grant is for — that becomes the grant's audience.",
@@ -284,14 +284,14 @@ const XAA_SAML_STEP_OVERRIDES: Partial<
   Record<XAAFlowStep, Pick<XAAStepInfo, "title" | "summary" | "teachableMoments">>
 > = {
   user_authentication: {
-    title: "Simulate SAML sign-in at MCPJam IdP",
+    title: "Simulate SAML sign-in at Fletch IdP",
     summary:
-      "MCPJam simulates the user signing in at its identity provider and issues a signed SAML assertion. This is a mock — there is no real SAML redirect, AuthnRequest, or ACS round-trip.",
+      "Fletch simulates the user signing in at its identity provider and issues a signed SAML assertion. This is a mock — there is no real SAML redirect, AuthnRequest, or ACS round-trip.",
   },
   received_identity_assertion: {
-    title: "SAML assertion issued by MCPJam IdP",
+    title: "SAML assertion issued by Fletch IdP",
     summary:
-      "MCPJam's identity provider gives the Agent a signed SAML 2.0 assertion.",
+      "Fletch's identity provider gives the Agent a signed SAML 2.0 assertion.",
     teachableMoments: [
       "The SAML assertion is only used to get the next token — it's never sent to the Authorization Server or the MCP Server.",
     ],
@@ -299,7 +299,7 @@ const XAA_SAML_STEP_OVERRIDES: Partial<
   token_exchange_request: {
     title: "Exchange the SAML Assertion for an ID-JAG",
     summary:
-      "The Agent trades the SAML assertion back to the IdP for an ID-JAG — a grant scoped to one MCP Server. On the happy path this is a standard RFC 8693 form POST to the IdP's /token endpoint (subject_token_type urn:ietf:params:oauth:token-type:saml2); a test mode instead uses MCPJam's mint endpoint to forge a deliberately broken grant.",
+      "The Agent trades the SAML assertion back to the IdP for an ID-JAG — a grant scoped to one MCP Server. On the happy path this is a standard RFC 8693 form POST to the IdP's /token endpoint (subject_token_type urn:ietf:params:oauth:token-type:saml2); a test mode instead uses Fletch's mint endpoint to forge a deliberately broken grant.",
   },
 };
 
