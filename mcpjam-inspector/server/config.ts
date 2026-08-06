@@ -285,3 +285,16 @@ export const HAS_CONVEX = CONVEX_HTTP_URL.length > 0;
 
 /** Same as CONVEX_HTTP_URL; used when CONVEX_URL is not set. */
 export const CONVEX_URL = process.env.CONVEX_URL?.trim() || CONVEX_HTTP_URL;
+
+/**
+ * Deployment URL for `ConvexHttpClient` (sync/.cloud), not the HTTP-actions
+ * site URL. Prefer explicit CONVEX_URL, then the client Vite URL / cloud origin.
+ */
+export function resolveConvexDeploymentUrl(): string | undefined {
+  return (
+    process.env.CONVEX_URL?.trim() ||
+    process.env.VITE_CONVEX_URL?.trim() ||
+    process.env.CONVEX_CLOUD_ORIGIN?.trim() ||
+    undefined
+  );
+}

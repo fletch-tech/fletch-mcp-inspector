@@ -61,9 +61,11 @@ export function CreateHostDialog({
   const catalogState = useHostCatalog();
   const claudeCodeEnabled = useClaudeCodeHostEnabled();
   const codexEnabled = useCodexHostEnabled();
+  // Accept live OR fallback: sandbox may only have the bundled snapshot until
+  // Convex `/public/host-catalog` is deployed; both carry usable templates.
   const visibleCatalogHosts = useMemo(
     () =>
-      catalogState.status === "live"
+      catalogState.status === "live" || catalogState.status === "fallback"
         ? filterHostsByFeatureFlags(getCatalogHosts(catalogState.catalog), {
             claudeCode: claudeCodeEnabled,
             codex: codexEnabled,

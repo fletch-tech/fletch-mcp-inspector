@@ -44,7 +44,11 @@ VITE_MAIN_URL ?= $(MAIN_URL)
 # Client WebSocket (cloud) + HTTP actions (site). Overridable per release.
 VITE_CONVEX_URL ?= $(CONVEX_CLOUD_ORIGIN)
 VITE_CONVEX_SITE_URL ?= $(CONVEX_SITE_ORIGIN)
-# Server Convex URLs — site for HTTP actions, cloud for self-hosted sync.
+# Server Convex URLs:
+#   CONVEX_URL            — ConvexHttpClient sync/cloud (evals run, mutations)
+#   CONVEX_HTTP_URL       — HTTP actions (/stream, /eval-generation, authorize)
+#   CONVEX_SELF_HOSTED_URL — self-hosted deploy / admin sync endpoint
+CONVEX_URL ?= $(CONVEX_CLOUD_ORIGIN)
 CONVEX_HTTP_URL ?= $(CONVEX_SITE_ORIGIN)
 CONVEX_SELF_HOSTED_URL ?= $(CONVEX_CLOUD_ORIGIN)
 
@@ -65,6 +69,7 @@ BUILD_ARGS := \
 	--build-arg MAIN_URL="$(MAIN_URL)" \
 	--build-arg CONVEX_CLOUD_ORIGIN="$(CONVEX_CLOUD_ORIGIN)" \
 	--build-arg CONVEX_SITE_ORIGIN="$(CONVEX_SITE_ORIGIN)" \
+	--build-arg CONVEX_URL="$(CONVEX_URL)" \
 	--build-arg CONVEX_HTTP_URL="$(CONVEX_HTTP_URL)" \
 	--build-arg CONVEX_SELF_HOSTED_URL="$(CONVEX_SELF_HOSTED_URL)" \
 	--build-arg CONVEX_SELF_HOSTED_ADMIN_KEY="$(CONVEX_SELF_HOSTED_ADMIN_KEY)"
@@ -94,7 +99,7 @@ help:
 	@echo "  ENV, AWS_REGION, AWS_PROFILE, ECR_REGISTRY, ECR_REPOSITORY,"
 	@echo "  ECS_CLUSTER, ECS_SERVICE, IMAGE_TAG, PLATFORM,"
 	@echo "  VITE_MCPJAM_HOSTED_MODE, MAIN_URL, VITE_MAIN_URL,"
-	@echo "  CONVEX_CLOUD_ORIGIN, CONVEX_SITE_ORIGIN, CONVEX_HTTP_URL,"
+	@echo "  CONVEX_CLOUD_ORIGIN, CONVEX_SITE_ORIGIN, CONVEX_URL, CONVEX_HTTP_URL,"
 	@echo "  CONVEX_SELF_HOSTED_URL, VITE_CONVEX_URL, VITE_CONVEX_SITE_URL,"
 	@echo "  CONVEX_SELF_HOSTED_ADMIN_KEY (export before publish/release)"
 
@@ -116,6 +121,7 @@ print-env: validate-ecr validate-ecs
 	@echo "VITE_MAIN_URL=$(VITE_MAIN_URL)"
 	@echo "CONVEX_CLOUD_ORIGIN=$(CONVEX_CLOUD_ORIGIN)"
 	@echo "CONVEX_SITE_ORIGIN=$(CONVEX_SITE_ORIGIN)"
+	@echo "CONVEX_URL=$(CONVEX_URL)"
 	@echo "CONVEX_HTTP_URL=$(CONVEX_HTTP_URL)"
 	@echo "CONVEX_SELF_HOSTED_URL=$(CONVEX_SELF_HOSTED_URL)"
 	@echo "VITE_CONVEX_URL=$(VITE_CONVEX_URL)"

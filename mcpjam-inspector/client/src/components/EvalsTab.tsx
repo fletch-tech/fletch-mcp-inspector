@@ -544,7 +544,7 @@ function EvalsTabContent({
       return {
         canGenerate: false,
         disabledReason:
-          "Attach a client in the suite header before generating cases.",
+          "Pick a server group in the suite header before generating cases.",
       };
     }
 

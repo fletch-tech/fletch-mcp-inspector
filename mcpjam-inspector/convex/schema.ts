@@ -96,6 +96,16 @@ export default defineSchema({
     updatedAt: v.number(),
   }).index("by_project", ["projectId"]),
 
+  // hostConfigsV2 suite/project defaults (content-addressed in upstream;
+  // here we store one document per scope).
+  hostConfigScopes: defineTable({
+    scopeType: v.union(v.literal("suite"), v.literal("project")),
+    scopeId: v.string(),
+    config: v.any(),
+    updatedAt: v.number(),
+    updatedBy: v.optional(v.id("users")),
+  }).index("by_scope", ["scopeType", "scopeId"]),
+
   // Named server groups for eval suites / swarms (serverAttachments:*).
   serverAttachments: defineTable({
     projectId: v.string(),
@@ -149,6 +159,55 @@ export default defineSchema({
     createdAt: v.number(),
     updatedAt: v.number(),
   }).index("by_suite", ["suiteId"]),
+
+  // Suite runs created by testSuites:startTestSuiteRun.
+  evalSuiteRuns: defineTable({
+    suiteId: v.string(),
+    projectId: v.string(),
+    runNumber: v.number(),
+    status: v.string(),
+    result: v.optional(v.string()),
+    notes: v.optional(v.string()),
+    passCriteria: v.optional(v.any()),
+    configSnapshot: v.optional(v.any()),
+    toolSnapshot: v.optional(v.any()),
+    toolSnapshotDebug: v.optional(v.any()),
+    namedHostId: v.optional(v.string()),
+    runGroupId: v.optional(v.string()),
+    source: v.optional(v.string()),
+    expectedIterations: v.optional(v.number()),
+    summary: v.optional(v.any()),
+    stopReason: v.optional(v.string()),
+    matchOptionsOverride: v.optional(v.any()),
+    createdBy: v.optional(v.id("users")),
+    createdAt: v.number(),
+    completedAt: v.optional(v.number()),
+    updatedAt: v.number(),
+  })
+    .index("by_suite", ["suiteId"])
+    .index("by_suite_created", ["suiteId", "createdAt"]),
+
+  // Per-case iteration rows for a suite run.
+  evalTestIterations: defineTable({
+    runId: v.string(),
+    suiteId: v.string(),
+    testCaseId: v.string(),
+    iterationNumber: v.number(),
+    status: v.string(),
+    result: v.optional(v.string()),
+    testCaseSnapshot: v.optional(v.any()),
+    actualToolCalls: v.optional(v.any()),
+    tokensUsed: v.optional(v.number()),
+    error: v.optional(v.string()),
+    errorDetails: v.optional(v.any()),
+    metadata: v.optional(v.any()),
+    messages: v.optional(v.any()),
+    createdBy: v.optional(v.id("users")),
+    startedAt: v.optional(v.number()),
+    completedAt: v.optional(v.number()),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  }).index("by_run", ["runId"]),
 
   productUpdateDismissals: defineTable({
     userId: v.id("users"),

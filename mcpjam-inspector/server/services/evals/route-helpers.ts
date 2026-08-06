@@ -4,7 +4,7 @@ import {
   type HttpServerConfig,
   type MCPServerReplayConfig,
 } from "@mcpjam/sdk";
-import { WEB_CALL_TIMEOUT_MS } from "../../config.js";
+import { WEB_CALL_TIMEOUT_MS, resolveConvexDeploymentUrl } from "../../config.js";
 import {
   buildServerToolSnapshotDebug,
   exportConnectedServerToolSnapshotForEvalAuthoring,
@@ -39,9 +39,11 @@ export async function captureToolSnapshotForEvalAuthoring(
 }
 
 export function createConvexClient(convexAuthToken: string) {
-  const convexUrl = process.env.CONVEX_URL;
+  const convexUrl = resolveConvexDeploymentUrl();
   if (!convexUrl) {
-    throw new Error("CONVEX_URL is not set");
+    throw new Error(
+      "CONVEX_URL is not set (set CONVEX_URL or VITE_CONVEX_URL to the Convex sync/cloud URL)",
+    );
   }
 
   const convexClient = new ConvexHttpClient(convexUrl);

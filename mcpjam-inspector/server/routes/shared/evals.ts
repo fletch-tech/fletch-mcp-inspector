@@ -17,6 +17,7 @@ import {
   storeReplayConfig,
 } from "../../services/evals/route-helpers";
 import { loadSuiteHostConfig } from "../../services/evals/compat-runtime";
+import { resolveConvexDeploymentUrl } from "../../config.js";
 import {
   applyVisibilityPolicyAndCountSignals,
   extractHostExecutionPolicy,
@@ -842,9 +843,11 @@ function buildRuntimeEnvironmentWithBindings(args: {
 }
 
 export function createConvexClients(convexAuthToken: string) {
-  const convexUrl = process.env.CONVEX_URL;
+  const convexUrl = resolveConvexDeploymentUrl();
   if (!convexUrl) {
-    throw new Error("CONVEX_URL is not set");
+    throw new Error(
+      "CONVEX_URL is not set (set CONVEX_URL or VITE_CONVEX_URL to the Convex sync/cloud URL)",
+    );
   }
 
   const convexHttpUrl = process.env.CONVEX_HTTP_URL;
@@ -1733,119 +1736,131 @@ export async function prepareEvalRun(
     idempotencyKey,
     skillsOverride,
   });
-  const suiteHostConfig =
-    runHostConfigSnapshot ??
-    (await loadSuiteHostConfig(convexClient, resolvedSuiteId, namedHostId));
-  const suiteInjectOpenAiCompat =
-    resolveOpenAiCompatForHostConfig(suiteHostConfig);
-  const suiteHostPolicy = extractHostExecutionPolicy(
-    suiteHostConfig,
-    namedHostId
-  );
 
-  const replayConfigsToStore = filterAndRemapReplayConfigs(
-    clientManager.getServerReplayConfigs(),
-    resolvedServerIds,
-    persistedServerRefs
-  );
-  if (replayConfigsToStore.length > 0) {
-    try {
-      await storeReplayConfig(runId, replayConfigsToStore, convexAuthToken);
-    } catch (error) {
-      logger.warn("[evals] Failed to store replay config for suite run", {
+  // Anything after the run row exists must finalize on failure, or the suite
+  // is left PENDING forever (client already saw "Run started successfully").
+  const abortSetup = async (error: unknown) => {
+    const cause = (
+      error instanceof Error ? error.message : String(error)
+    ).slice(0, 500);
+    await convexClient
+      .mutation("testSuites:markSetupPendingIterationsFailed" as any, {
         runId,
-        error: error instanceof Error ? error.message : String(error),
-      });
-    }
-  }
+        error: cause,
+      })
+      .catch((cleanupError: unknown) =>
+        logger.warn(
+          "[evals] Failed to fail pending iterations after setup abort",
+          {
+            runId,
+            error:
+              cleanupError instanceof Error
+                ? cleanupError.message
+                : String(cleanupError),
+          }
+        )
+      );
+    await recorder
+      .finalize({ status: "failed", notes: cause })
+      .catch((finalizeError: unknown) =>
+        logger.warn("[evals] Failed to finalize run after setup abort", {
+          runId,
+          error:
+            finalizeError instanceof Error
+              ? finalizeError.message
+              : String(finalizeError),
+        })
+      );
+  };
 
-  // Resolve org model config: prefer client-sent keys, fall back to org config.
-  // Treat an empty client-provided map as "no keys" so org fallback still runs.
-  // For reruns, projectId may not be in the request — derive it from the
-  // suite record so org BYOK keeps working.
-  const hasClientKeys = !!modelApiKeys && Object.keys(modelApiKeys).length > 0;
-  const resolvedModelApiKeys = hasClientKeys ? modelApiKeys : undefined;
+  let suiteHostConfig: Record<string, unknown>;
+  let suiteInjectOpenAiCompat: boolean;
+  let suiteHostPolicy: ReturnType<typeof extractHostExecutionPolicy>;
+  let pinnedSkillSource: EvalPinnedSkillSource | undefined;
+  let resolvedModelApiKeys = !!modelApiKeys && Object.keys(modelApiKeys).length > 0
+    ? modelApiKeys
+    : undefined;
   let resolvedOrgModelConfig = orgModelConfig;
   let resolvedOrgModelConfigTarget: { projectId: string } | undefined;
-  let projectIdForOrgConfig: string | undefined = projectId;
-  if (!projectIdForOrgConfig && resolvedSuiteId) {
-    try {
-      const suite = await convexClient.query("testSuites:getTestSuite" as any, {
-        suiteId: resolvedSuiteId,
-      });
-      if (suite?.projectId) {
-        projectIdForOrgConfig = String(suite.projectId);
-      }
-    } catch (error) {
-      logger.warn("[evals] Failed to load suite for projectId fallback", {
-        suiteId: resolvedSuiteId,
-        error: error instanceof Error ? error.message : String(error),
-      });
-    }
-  }
-  const orgConfigTarget = projectIdForOrgConfig
-    ? { projectId: projectIdForOrgConfig }
-    : undefined;
-  resolvedOrgModelConfigTarget = orgConfigTarget;
 
-  if (!resolvedModelApiKeys && !resolvedOrgModelConfig) {
-    if (orgConfigTarget) {
+  try {
+    suiteHostConfig =
+      runHostConfigSnapshot ??
+      (await loadSuiteHostConfig(convexClient, resolvedSuiteId, namedHostId));
+    suiteInjectOpenAiCompat =
+      resolveOpenAiCompatForHostConfig(suiteHostConfig);
+    suiteHostPolicy = extractHostExecutionPolicy(
+      suiteHostConfig,
+      namedHostId
+    );
+
+    const replayConfigsToStore = filterAndRemapReplayConfigs(
+      clientManager.getServerReplayConfigs(),
+      resolvedServerIds,
+      persistedServerRefs
+    );
+    if (replayConfigsToStore.length > 0) {
       try {
-        const orgConfig = await resolveOrgModelConfig(orgConfigTarget, {
-          bearerToken: convexAuthToken,
-          chatboxId,
-          accessVersion,
-          serverIds: resolvedServerIds,
-        });
-        resolvedOrgModelConfig = orgConfig;
+        await storeReplayConfig(runId, replayConfigsToStore, convexAuthToken);
       } catch (error) {
-        logger.warn("[evals] Failed to resolve org model config", {
-          projectId: projectIdForOrgConfig,
+        logger.warn("[evals] Failed to store replay config for suite run", {
+          runId,
           error: error instanceof Error ? error.message : String(error),
         });
       }
     }
-  }
 
-  // SETUP phase for this run's pinned capabilities (PR-E3, extended by INS-5).
-  // Suite runs only — quick-run (runId null) has no run row to carry pins, so
-  // it stays skill-free. STRICT throughout: the pin fetch is retried (250ms/1s
-  // backoff), plugin pins are re-gated against the live plugin lifecycle, and
-  // every pinned supporting file must be readable. Any of those failing FAILS
-  // run preparation. Silently degrading to "no skills" or "fewer servers" would
-  // let the run execute while the configSnapshot and the judge still claim the
-  // full pinned surface was available — a green run measuring a configuration
-  // that never existed.
-  //
-  // Everything here happens BEFORE `execute()`, which is the whole point: a
-  // setup failure must precede model execution and name the component that
-  // caused it.
-  let pinnedSkillSource: EvalPinnedSkillSource | undefined;
-  if (runId) {
-    // The run row already exists (startSuiteRunWithRecorder created it), so a
-    // persistent setup failure would otherwise strand the run as
-    // running/pending forever. Finalize it as failed before rethrowing.
-    try {
+    // Resolve org model config: prefer client-sent keys, fall back to org config.
+    // Treat an empty client-provided map as "no keys" so org fallback still runs.
+    // For reruns, projectId may not be in the request — derive it from the
+    // suite record so org BYOK keeps working.
+    let projectIdForOrgConfig: string | undefined = projectId;
+    if (!projectIdForOrgConfig && resolvedSuiteId) {
+      try {
+        const suite = await convexClient.query("testSuites:getTestSuite" as any, {
+          suiteId: resolvedSuiteId,
+        });
+        if (suite?.projectId) {
+          projectIdForOrgConfig = String(suite.projectId);
+        }
+      } catch (error) {
+        logger.warn("[evals] Failed to load suite for projectId fallback", {
+          suiteId: resolvedSuiteId,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+    const orgConfigTarget = projectIdForOrgConfig
+      ? { projectId: projectIdForOrgConfig }
+      : undefined;
+    resolvedOrgModelConfigTarget = orgConfigTarget;
+
+    if (!resolvedModelApiKeys && !resolvedOrgModelConfig) {
+      if (orgConfigTarget) {
+        try {
+          const orgConfig = await resolveOrgModelConfig(orgConfigTarget, {
+            bearerToken: convexAuthToken,
+            chatboxId,
+            accessVersion,
+            serverIds: resolvedServerIds,
+          });
+          resolvedOrgModelConfig = orgConfig;
+        } catch (error) {
+          logger.warn("[evals] Failed to resolve org model config", {
+            projectId: projectIdForOrgConfig,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
+      }
+    }
+
+    // SETUP phase for this run's pinned capabilities (PR-E3, extended by INS-5).
+    if (runId) {
       const runPinnedSkills = await fetchRunPinnedSkillsWithRetry(
         convexClient,
         runId
       );
 
-      // INS-5 — decision D2, at the last moment before execution.
-      //
-      // The run snapshot records which plugin VERSIONS the environment pinned.
-      // That is provenance, never a standing grant: the backend re-resolves the
-      // live plugin rows on every call, so a plugin disabled or uninstalled
-      // since the launch resolution (seconds ago, but a race is a race) reports
-      // here and stops the run. Failing NOW is the point — the run row exists,
-      // no model has been called, and the failure names the component.
-      //
-      // Called for every run with a runId, including plugin-free ones: the
-      // backend's all-clear for "pinned nothing" is the same empty envelope, so
-      // there is no snapshot read to do first. A LEGACY (non-environment) run
-      // cannot carry a pin at all — the environment is the only pin carrier —
-      // so it tolerates a backend that predates BE-5 rather than failing for a
-      // capability it structurally cannot have.
       const runPluginServers = await resolveSuiteRunPluginServers(
         () => convexClient,
         {
@@ -1855,19 +1870,12 @@ export async function prepareEvalRun(
       );
 
       if (runPinnedSkills?.length) {
-        // A pinned supporting file whose blob is gone fails the run BEFORE the
-        // model runs, attributed to the skill and the path. `url: null` is an
-        // unreachable blob, never "no file" — see the assertion's own note.
         assertPinnedSkillFilesReachable(runPinnedSkills);
         pinnedSkillSource = runNeedsEffectiveSkillSurface(runPinnedSkills)
           ? {
               kind: "pinned-effective",
               capabilities: buildRunCapabilitySet({
                 pins: runPinnedSkills,
-                // Straight from `configSnapshot.environmentPluginVersions` —
-                // the run's own record. NOT re-resolved to the plugin's active
-                // version, which is what would let a mid-run re-import change
-                // an in-flight run.
                 pluginVersions: runEnvironmentPluginVersions,
                 pluginServers: runPluginServers,
                 effectiveServerIds: resolvedServerIds,
@@ -1878,49 +1886,10 @@ export async function prepareEvalRun(
             }
           : { kind: "pinned", skills: runPinnedSkills };
       }
-    } catch (error) {
-      const cause = (
-        error instanceof Error ? error.message : String(error)
-      ).slice(0, 500);
-      // startSuiteRunWithRecorder already precreated the iteration rows, so
-      // finalizing only the run leaves every attempt stuck pending. Mirror the
-      // precreate-failure cleanup: fail the pending iterations, then the run.
-      // Log cleanup failures (but never let them mask the original pin-fetch
-      // error): if either call fails the run can stay stranded pending, and an
-      // operator needs a breadcrumb to find and repair it.
-      await convexClient
-        .mutation("testSuites:markSetupPendingIterationsFailed" as any, {
-          runId,
-          error: cause,
-        })
-        .catch((cleanupError: unknown) =>
-          logger.warn(
-            "[evals] Failed to fail pending iterations after setup abort",
-            {
-              runId,
-              error:
-                cleanupError instanceof Error
-                  ? cleanupError.message
-                  : String(cleanupError),
-            }
-          )
-        );
-      await recorder
-        .finalize({ status: "failed", notes: cause })
-        .catch((finalizeError: unknown) =>
-          logger.warn(
-            "[evals] Failed to finalize run after setup abort",
-            {
-              runId,
-              error:
-                finalizeError instanceof Error
-                  ? finalizeError.message
-                  : String(finalizeError),
-            }
-          )
-        );
-      throw error;
     }
+  } catch (error) {
+    await abortSetup(error);
+    throw error;
   }
 
   const execute = async () => {
@@ -1937,12 +1906,8 @@ export async function prepareEvalRun(
       mcpClientManager: clientManager,
       recorder,
       suiteInjectOpenAiCompat,
-      hostExecutionPolicy: suiteHostPolicy,
-      // PR 4d: thread the raw suite hostConfig record into the runner so
-      // it can resolve CONFIG fields (`systemPrompt` / `temperature` /
-      // `selectedServerIds`) via `resolveExecutionContext`. `hostPolicy`
-      // is the POLICY subset extracted upstream; this is the rest.
-      suiteHostConfig,
+      hostExecutionPolicy: suiteHostPolicy!,
+      suiteHostConfig: suiteHostConfig!,
       ...(pinnedSkillSource ? { pinnedSkillSource } : {}),
     });
   };
