@@ -126,8 +126,10 @@ function collectModelsFromTestCases(
   return Array.from(uniqueModels.values());
 }
 
+import { FLETCH_DEFAULT_EVAL_MODELS } from "@/shared/fletch-eval-defaults";
+
 function defaultEvalModels(): Array<{ model: string; provider: string }> {
-  return [{ model: "anthropic/claude-haiku-4.5", provider: "anthropic" }];
+  return [...FLETCH_DEFAULT_EVAL_MODELS];
 }
 
 export type GenerateAndPersistEvalTestsOptions = {
@@ -225,10 +227,15 @@ export async function generateAndPersistEvalTests(
     };
   }
 
-  let modelsToUse = collectModelsFromTestCases(existingList);
-  if (modelsToUse.length === 0) {
-    modelsToUse = defaultEvalModels();
-  }
+  // Prefer non-Anthropic models already on the suite so we don't re-bake
+  // Haiku onto new Generate output when the sandbox only has OpenAI.
+  // Fall back to the Fletch sandbox default when nothing usable remains.
+  const collected = collectModelsFromTestCases(existingList);
+  const nonAnthropic = collected.filter(
+    (m) => m.provider.toLowerCase() !== "anthropic",
+  );
+  const modelsToUse =
+    nonAnthropic.length > 0 ? nonAnthropic : defaultEvalModels();
 
   // `getAccessToken` already resolves the guest bearer for guests (see
   // use-convex-access-token), so no `isDirectGuest` branch is needed here.

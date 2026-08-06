@@ -1,7 +1,8 @@
 import type { CreateEvalTestCaseInput } from "./generate-and-persist-tests";
+import { FLETCH_DEFAULT_EVAL_MODELS } from "@/shared/fletch-eval-defaults";
 
 const DEFAULT_MODELS: CreateEvalTestCaseInput["models"] = [
-  { model: "anthropic/claude-haiku-4.5", provider: "anthropic" },
+  ...FLETCH_DEFAULT_EVAL_MODELS,
 ];
 
 /**

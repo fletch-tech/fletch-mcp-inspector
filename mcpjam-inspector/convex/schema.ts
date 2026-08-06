@@ -183,6 +183,11 @@ export default defineSchema({
     createdAt: v.number(),
     completedAt: v.optional(v.number()),
     updatedAt: v.number(),
+    // Optional AI insight payloads (Fletch stubs write failed placeholders).
+    runInsightsStatus: v.optional(v.string()),
+    runInsights: v.optional(v.any()),
+    serverQualityStatus: v.optional(v.string()),
+    serverQuality: v.optional(v.any()),
   })
     .index("by_suite", ["suiteId"])
     .index("by_suite_created", ["suiteId", "createdAt"]),

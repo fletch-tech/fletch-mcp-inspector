@@ -198,6 +198,10 @@ function runDto(row: any, createdBy: string) {
     expectedIterations: row.expectedIterations,
     namedHostId: row.namedHostId,
     runGroupId: row.runGroupId,
+    runInsightsStatus: row.runInsightsStatus,
+    runInsights: row.runInsights,
+    serverQualityStatus: row.serverQualityStatus,
+    serverQuality: row.serverQuality,
     _creationTime: row.createdAt,
   };
 }
@@ -919,24 +923,51 @@ export const startTestSuiteRun = mutation({
     }
 
     const suiteDtoValue = await suiteDto(ctx, suite, String(user._id));
-    const serversFromAttachment =
-      suiteDtoValue.serverAttachment?.resolvedServerNames ?? [];
+    // Prefer stable server IDs — never display names. Names break
+    // resolveConfiguredServerIds / getToolsForAiSdk and leave runs PENDING
+    // with iterations stuck at "Running 0/1".
+    const serversFromAttachmentIds = Array.isArray(
+      suiteDtoValue.serverAttachment?.serverIds,
+    )
+      ? suiteDtoValue.serverAttachment.serverIds.filter(
+          (id: unknown): id is string => typeof id === "string" && id.length > 0,
+        )
+      : [];
     const serversFromOverride = Array.isArray(args.environmentOverride?.servers)
-      ? args.environmentOverride.servers
+      ? args.environmentOverride.servers.filter(
+          (id: unknown): id is string => typeof id === "string" && id.length > 0,
+        )
       : [];
     const serversFromSnapshot = Array.isArray(args.toolSnapshot?.servers)
       ? args.toolSnapshot.servers
           .map((s: any) =>
             typeof s?.serverId === "string" ? s.serverId : null,
           )
-          .filter(Boolean)
+          .filter((id: string | null): id is string => Boolean(id))
       : [];
     const environmentServers =
       serversFromOverride.length > 0
         ? serversFromOverride
-        : serversFromAttachment.length > 0
-          ? serversFromAttachment
+        : serversFromAttachmentIds.length > 0
+          ? serversFromAttachmentIds
           : serversFromSnapshot;
+
+    const attachmentNames = Array.isArray(
+      suiteDtoValue.serverAttachment?.resolvedServerNames,
+    )
+      ? suiteDtoValue.serverAttachment.resolvedServerNames
+      : [];
+    const serverBindings =
+      Array.isArray(args.environmentOverride?.serverBindings) &&
+      args.environmentOverride.serverBindings.length > 0
+        ? args.environmentOverride.serverBindings
+        : serversFromAttachmentIds.length > 0 &&
+            attachmentNames.length === serversFromAttachmentIds.length
+          ? serversFromAttachmentIds.map((projectServerId: string, i: number) => ({
+              serverName: attachmentNames[i],
+              projectServerId,
+            }))
+          : undefined;
 
     const testCases = cases.map((c) => {
       const runs =
@@ -976,9 +1007,7 @@ export const startTestSuiteRun = mutation({
       })),
       environment: {
         servers: environmentServers,
-        ...(Array.isArray(args.environmentOverride?.serverBindings)
-          ? { serverBindings: args.environmentOverride.serverBindings }
-          : {}),
+        ...(serverBindings ? { serverBindings } : {}),
       },
       defaultPredicates: [],
       skillsExcluded: args.skillsOverride === "exclude",

@@ -520,7 +520,9 @@ export function resolveConfiguredServerIds(args: {
 
   const availableServerIds = args.mcpClientManager.listServers();
   if (availableServerIds.length === 0) {
-    return configuredServerRefs;
+    throw new Error(
+      `Could not start eval because no MCP servers are connected (needed: ${configuredServerRefs.join(", ")}). Reconnect the server and try again.`,
+    );
   }
 
   const availableServerIdsSet = new Set(availableServerIds);
@@ -587,8 +589,13 @@ export function resolveConfiguredServerIds(args: {
           }
 
           return undefined;
-        })() ??
-        trimmedServerRef;
+        })();
+
+    if (!normalizedServerId) {
+      throw new Error(
+        `Could not start eval because "${trimmedServerRef}" is not connected. Reconnect the server and try again.`,
+      );
+    }
 
     if (seen.has(normalizedServerId)) {
       continue;

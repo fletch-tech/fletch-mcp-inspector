@@ -9,6 +9,7 @@ import { webHostRuntimeConfig } from "./hostRuntimeConfig";
 import { streamHttp } from "./stream";
 import { publicHostCatalog } from "./hostCatalogHttp";
 import { evalGenerationGenerate } from "./evalGeneration";
+import { v1Models } from "./v1Models";
 
 const http = httpRouter();
 
@@ -18,10 +19,17 @@ http.route({
   method: "GET",
   handler: httpAction(async () => {
     return new Response(
-      "Convex HTTP actions OK. GET /public/host-catalog, POST /web/authorize, POST /web/authorize-batch, POST /web/authorize-batch-local, POST /web/host/runtime-config, POST /stream, POST /eval-generation/generate.",
+      "Convex HTTP actions OK. GET /v1/models, GET /public/host-catalog, POST /web/authorize, POST /web/authorize-batch, POST /web/authorize-batch-local, POST /web/host/runtime-config, POST /stream, POST /eval-generation/generate.",
       { status: 200, headers: { "Content-Type": "text/plain; charset=utf-8" } },
     );
   }),
+});
+
+/** GET /v1/models — public hosted-model catalog for Inspector picker + billing. */
+http.route({
+  path: "/v1/models",
+  method: "GET",
+  handler: v1Models,
 });
 
 http.route({

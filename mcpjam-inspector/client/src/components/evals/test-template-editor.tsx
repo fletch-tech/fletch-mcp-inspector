@@ -19,6 +19,7 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import { listEvalTools, streamEvalTestCase } from "@/lib/apis/evals-api";
+import { FLETCH_DEFAULT_EVAL_MODELS } from "@/shared/fletch-eval-defaults";
 import { Button } from "@mcpjam/design-system/button";
 import {
   Tooltip,
@@ -323,7 +324,7 @@ function buildDraftTestCase(
   const models =
     collected.length > 0
       ? collected
-      : [{ provider: "anthropic", model: "anthropic/claude-haiku-4.5" }];
+      : [...FLETCH_DEFAULT_EVAL_MODELS];
   return {
     _id: id,
     title: "Untitled test case",
@@ -1099,6 +1100,10 @@ export function TestTemplateEditor({
     isAuthenticated,
     hostId: hasHostAttachments ? (selectedQuickRunHostId ?? null) : null,
   });
+  const selectedQuickRunHostModelId =
+    typeof selectedQuickRunHost?.config?.modelId === "string"
+      ? selectedQuickRunHost.config.modelId.trim()
+      : "";
   const suiteRunHarnessId = hasHostAttachments
     ? (selectedQuickRunHost?.config?.harness ?? null)
     : (hostConfigBaseline?.harness ?? null);
@@ -2884,6 +2889,9 @@ export function TestTemplateEditor({
                       </TooltipTrigger>
                       <TooltipContent variant="muted" side="top" sideOffset={6}>
                         Client for the next run
+                        {selectedQuickRunHostModelId
+                          ? ` · model ${selectedQuickRunHostModelId}`
+                          : ""}
                       </TooltipContent>
                     </Tooltip>
                   ) : (

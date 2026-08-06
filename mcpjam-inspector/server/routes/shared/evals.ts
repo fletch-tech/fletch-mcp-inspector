@@ -19,6 +19,11 @@ import {
 import { loadSuiteHostConfig } from "../../services/evals/compat-runtime";
 import { resolveConvexDeploymentUrl } from "../../config.js";
 import {
+  applyHostModelToEvalTests,
+  isModelFreeEvalTest,
+  resolveEvalModelFromHostConfig,
+} from "@/shared/host-eval-model";
+import {
   applyVisibilityPolicyAndCountSignals,
   extractHostExecutionPolicy,
   resolveOpenAiCompatForHostConfig,
@@ -1712,6 +1717,27 @@ export async function prepareEvalRun(
     notes,
     passCriteria,
     serverIds: resolvedServerIds,
+    // Freeze connected manager keys onto the run so Convex never snapshots
+    // attachment display names into environment.servers (which strands workers).
+    environmentOverride: {
+      servers: resolvedServerIds,
+      ...(environmentLaunch?.servers?.length
+        ? {
+            serverBindings: environmentLaunch.servers
+              .filter(
+                (s) =>
+                  typeof s?.serverId === "string" &&
+                  s.serverId.length > 0 &&
+                  typeof s?.name === "string" &&
+                  s.name.length > 0,
+              )
+              .map((s) => ({
+                serverName: s.name,
+                projectServerId: s.serverId,
+              })),
+          }
+        : {}),
+    },
     toolSnapshot,
     toolSnapshotDebug,
     iterationOverride,
@@ -1893,10 +1919,37 @@ export async function prepareEvalRun(
   }
 
   const execute = async () => {
+    // Named-host runs use the host's modelId as the LLM (host axis replaced
+    // the suite model picker). Case snapshots may still carry generate-time
+    // Anthropic defaults — remap before the worker starts.
+    const hostModel = namedHostId
+      ? resolveEvalModelFromHostConfig(suiteHostConfig)
+      : null;
+    if (namedHostId && !hostModel) {
+      throw new WebRouteError(
+        400,
+        ErrorCode.VALIDATION_ERROR,
+        `Attached host has no parseable modelId. Set a model on the client (e.g. openai/gpt-4o-mini) before running evals.`,
+      );
+    }
+    const effectiveConfig =
+      hostModel && config && typeof config === "object"
+        ? {
+            ...config,
+            tests: applyHostModelToEvalTests(
+              Array.isArray((config as { tests?: unknown }).tests)
+                ? ((config as { tests: Array<{ provider: string; model: string }> })
+                    .tests)
+                : [],
+              hostModel,
+            ),
+          }
+        : config;
+
     await runEvalSuiteWithAiSdk({
       suiteId: resolvedSuiteId,
       runId,
-      config,
+      config: effectiveConfig,
       modelApiKeys: resolvedModelApiKeys ?? undefined,
       orgModelConfig: resolvedOrgModelConfig,
       orgModelConfigTarget: resolvedOrgModelConfigTarget,
@@ -2016,12 +2069,27 @@ export async function runEvalTestCaseWithManager(
     resolvedServerIds,
     suiteEnvironment,
   });
+  // Named host → host modelId is the LLM (see applyHostModelToEvalTests).
+  const hostModelForCase = namedHostId
+    ? resolveEvalModelFromHostConfig(suiteHostConfig)
+    : null;
+  if (namedHostId && !hostModelForCase) {
+    throw new WebRouteError(
+      400,
+      ErrorCode.VALIDATION_ERROR,
+      `Attached host has no parseable modelId. Set a model on the client (e.g. openai/gpt-4o-mini) before running evals.`,
+    );
+  }
+  const effectiveCaseModel =
+    hostModelForCase && !isModelFreeEvalTest({ model, provider })
+      ? hostModelForCase
+      : { model, provider };
   const test = {
     title: testCase.title,
     query: testCaseOverrides?.query ?? testCase.query,
     runs: testCaseOverrides?.runs ?? 1,
-    model,
-    provider,
+    model: effectiveCaseModel.model,
+    provider: effectiveCaseModel.provider,
     expectedToolCalls:
       testCaseOverrides?.expectedToolCalls ?? testCase.expectedToolCalls ?? [],
     isNegativeTest:
@@ -2398,12 +2466,27 @@ export async function streamEvalTestCaseWithManager(
     resolvedServerIds,
     suiteEnvironment,
   });
+  // Named host → host modelId is the LLM (see applyHostModelToEvalTests).
+  const hostModelForStream = namedHostId
+    ? resolveEvalModelFromHostConfig(suiteHostConfig)
+    : null;
+  if (namedHostId && !hostModelForStream) {
+    throw new WebRouteError(
+      400,
+      ErrorCode.VALIDATION_ERROR,
+      `Attached host has no parseable modelId. Set a model on the client (e.g. openai/gpt-4o-mini) before running evals.`,
+    );
+  }
+  const effectiveStreamModel =
+    hostModelForStream && !isModelFreeEvalTest({ model, provider })
+      ? hostModelForStream
+      : { model, provider };
   const test = {
     title: testCase.title,
     query: testCaseOverrides?.query ?? testCase.query,
     runs: testCaseOverrides?.runs ?? 1,
-    model,
-    provider,
+    model: effectiveStreamModel.model,
+    provider: effectiveStreamModel.provider,
     expectedToolCalls:
       testCaseOverrides?.expectedToolCalls ?? testCase.expectedToolCalls ?? [],
     isNegativeTest:

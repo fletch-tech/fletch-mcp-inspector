@@ -583,7 +583,7 @@ const AGENT_API_MODEL: ModelDefinition = {
  * is the cheap eval workhorse (same one the public-API docs examples
  * use); the user can always name a bigger model.
  */
-const DEFAULT_SUITE_MODEL = "anthropic/claude-haiku-4.5";
+const DEFAULT_SUITE_MODEL = "openai/gpt-4o-mini";
 
 /**
  * The rules that hold for every operation on this surface.

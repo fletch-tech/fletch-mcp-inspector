@@ -2,8 +2,50 @@ import { Hono } from "hono";
 import "../../types/hono";
 import { logger } from "../../utils/logger";
 import { ingestHostedCatalogIds } from "../../services/hosted-model-catalog.js";
+import {
+  MCPJAM_PROVIDED_MODEL_IDS,
+  hostedDisplayNameFromCanonicalId,
+  isMCPJamGuestAllowedModel,
+} from "@/shared/types";
 
 const models = new Hono();
+
+/**
+ * Offline floor when Convex `/v1/models` is missing or unreachable and we have
+ * no last-good memo. Same seed the client picker / billing classifier use.
+ */
+function seedCatalogItems(): unknown[] {
+  return MCPJAM_PROVIDED_MODEL_IDS.map((id) => ({
+    id,
+    canonical_slug: id,
+    name: hostedDisplayNameFromCanonicalId(id),
+    created: 0,
+    pricing: {
+      prompt: "0",
+      completion: "0",
+      request: "0",
+      image: "0",
+    },
+    context_length: null,
+    architecture: {
+      modality: "text->text",
+      input_modalities: ["text"],
+      output_modalities: ["text"],
+      tokenizer: "Unknown",
+    },
+    top_provider: {
+      is_moderated: false,
+      context_length: null,
+      max_completion_tokens: null,
+    },
+    per_request_limits: null,
+    supported_parameters: [],
+    default_parameters: null,
+    description: "",
+    guestAllowed: isMCPJamGuestAllowedModel(id),
+    providerSource: "gateway",
+  }));
+}
 
 /**
  * How long a successful catalog fetch is served from memory before we hit the
@@ -135,12 +177,27 @@ models.get("/", async (c) => {
   }
 
   // Degraded (upstream error / empty payload / missing config): prefer the last
-  // good catalog so a transient failure doesn't collapse the picker to the
-  // static snapshot. Only surface the error when we have nothing cached.
+  // good catalog so a transient failure doesn't collapse the picker. When there
+  // is no memo (cold start against a missing `/v1/models`), serve the checked-in
+  // seed so Fletch / offline still get a non-empty picker instead of 502.
   if (catalogCache) {
     return c.json({ ok: true, data: catalogCache.data });
   }
-  return c.json({ ok: false, error: result.error }, result.status);
+  if (result.status === 500 && result.error.includes("CONVEX_HTTP_URL")) {
+    return c.json({ ok: false, error: result.error }, result.status);
+  }
+  const seed = seedCatalogItems();
+  logger.warn("[models] serving seed catalog after upstream failure", {
+    error: result.error,
+    count: seed.length,
+  });
+  ingestHostedCatalogIds(
+    seed
+      .map((m) => (m as { id?: unknown })?.id)
+      .filter((id): id is string => typeof id === "string"),
+  );
+  catalogCache = { data: seed, fetchedAt: Date.now() };
+  return c.json({ ok: true, data: seed });
 });
 
 /** Reset the in-memory catalog memo and in-flight refresh. Test-only. */

@@ -2,12 +2,12 @@ import { describe, expect, it } from "vitest";
 import { collectUniqueModelsFromTestCases } from "../collect-unique-suite-models";
 
 describe("collectUniqueModelsFromTestCases", () => {
-  it("returns default Haiku when no test cases", () => {
+  it("returns Fletch OpenAI default when no test cases", () => {
     expect(collectUniqueModelsFromTestCases(null)).toEqual([
-      { model: "anthropic/claude-haiku-4.5", provider: "anthropic" },
+      { model: "openai/gpt-4o-mini", provider: "openai" },
     ]);
     expect(collectUniqueModelsFromTestCases([])).toEqual([
-      { model: "anthropic/claude-haiku-4.5", provider: "anthropic" },
+      { model: "openai/gpt-4o-mini", provider: "openai" },
     ]);
   });
 
@@ -47,6 +47,7 @@ describe("collectUniqueModelsFromTestCases", () => {
         expectedToolCalls: [],
       },
     ]);
-    expect(out[0]?.provider).toBe("anthropic");
+    expect(out[0]?.provider).toBe("openai");
+    expect(out[0]?.model).toBe("openai/gpt-4o-mini");
   });
 });

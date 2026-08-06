@@ -1,12 +1,13 @@
 import type { EvalCase } from "@/components/evals/types";
+import { FLETCH_DEFAULT_EVAL_MODELS } from "@/shared/fletch-eval-defaults";
 
 const DEFAULT_MODELS: Array<{ model: string; provider: string }> = [
-  { model: "anthropic/claude-haiku-4.5", provider: "anthropic" },
+  ...FLETCH_DEFAULT_EVAL_MODELS,
 ];
 
 /**
  * Unique provider:model rows from existing suite test cases (order preserved).
- * Falls back to Haiku 4.5 when the suite has no model configuration.
+ * Falls back to the Fletch sandbox default when the suite has no model config.
  */
 export function collectUniqueModelsFromTestCases(
   testCases: EvalCase[] | null | undefined,

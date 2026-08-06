@@ -299,7 +299,7 @@ export const DEFAULT_HOST_STYLE_V2: HostStyleId = "mcpjam";
 // "" — seeding a real model keeps the default host runnable everywhere.
 // Matches the top of getDefaultModel's priority list and the dominant
 // template choice; keep the three in sync.
-export const DEFAULT_SEEDED_HOST_MODEL_ID = "anthropic/claude-haiku-4.5";
+export const DEFAULT_SEEDED_HOST_MODEL_ID = "openai/gpt-4o-mini";
 
 // Delegates to the Node-safe SDK builder so the empty-config defaults have a
 // single source of truth shared with the server `--template` resolver and the

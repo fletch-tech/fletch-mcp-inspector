@@ -80,13 +80,18 @@ describe("GET /api/mcp/models (catalog proxy)", () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
-  it("returns 502 when the backend fails and there is no cached catalog", async () => {
+  it("serves the seed catalog when the backend fails and there is no cached catalog", async () => {
     fetchMock.mockResolvedValueOnce(
       new Response("upstream boom", { status: 503 }),
     );
     const res = await mount().request("/api/mcp/models");
-    expect(res.status).toBe(502);
-    expect((await res.json()).ok).toBe(false);
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.ok).toBe(true);
+    expect(Array.isArray(body.data)).toBe(true);
+    expect(body.data.length).toBeGreaterThan(0);
+    expect(typeof body.data[0].id).toBe("string");
+    expect(ingestMock).toHaveBeenCalled();
   });
 
   it("serves the last-good catalog when the backend fails after the memo goes stale", async () => {
@@ -163,13 +168,16 @@ describe("GET /api/mcp/models (catalog proxy)", () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
-  it("returns 502 on an empty catalog when there is no cached catalog", async () => {
+  it("serves the seed catalog on an empty upstream when there is no cached catalog", async () => {
     fetchMock.mockResolvedValueOnce(okCatalog([]));
     const res = await mount().request("/api/mcp/models");
-    expect(res.status).toBe(502);
-    expect((await res.json()).ok).toBe(false);
-    // An empty payload must not be ingested into the billing classifier.
-    expect(ingestMock).not.toHaveBeenCalled();
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.ok).toBe(true);
+    expect(Array.isArray(body.data)).toBe(true);
+    expect(body.data.length).toBeGreaterThan(0);
+    // Seed ids are ingested so billing classification stays hosted, not BYOK.
+    expect(ingestMock).toHaveBeenCalled();
   });
 
   it("settles and serves last-good when the upstream fetch rejects (e.g. timeout)", async () => {
