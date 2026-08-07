@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { useAuth } from "@/lib/auth/jwt-auth-context";
+import { useAuth } from "@workos-inc/authkit-react";
 import { useConvexAuth } from "convex/react";
 import type {
   OpenRouterModel,
@@ -29,7 +29,7 @@ export function useModelMetadata() {
       setError(null);
 
       try {
-        // Get access token to pass to the inspector server
+        // Get WorkOS access token to pass to the inspector server
         const accessToken = await getAccessToken();
 
         // Call the local inspector server which proxies to Convex

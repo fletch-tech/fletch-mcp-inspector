@@ -49,6 +49,14 @@ services:
       - S3_STORAGE_MODULES_BUCKET
       - S3_STORAGE_SEARCH_BUCKET
       - S3_STORAGE_SNAPSHOT_IMPORTS_BUCKET
+      # LLM keys for convex/stream.ts (hosted chat + evals). Site HTTP actions
+      # need these on BOTH cloud and site backends when they share the module.
+      - OPENAI_API_KEY
+      - ANTHROPIC_API_KEY
+      - GOOGLE_GENERATIVE_AI_API_KEY
+      - DEEPSEEK_API_KEY
+      - LLAMA_API_KEY
+      - META_LLAMA_API_KEY
 
     healthcheck:
       test: curl -f http://localhost:3210/version

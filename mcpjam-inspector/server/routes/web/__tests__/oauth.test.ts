@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   createWebTestApp,
   expectJson,
@@ -25,12 +25,102 @@ vi.mock("../../../utils/oauth-proxy.js", () => ({
 }));
 
 import { OAuthProxyError } from "../../../utils/oauth-proxy.js";
+import { initGuestTokenSecret } from "../../../services/guest-token.js";
+
+// Guest token secret must be initialized before oauth routes validate tokens
+initGuestTokenSecret();
 
 interface OAuthErrorResponse {
   code: string;
   message: string;
   error: string;
 }
+
+describe("web routes — oauth requires bearer token", () => {
+  const { app, token } = createWebTestApp();
+
+  beforeEach(() => {
+    executeOAuthProxyMock.mockReset();
+    fetchOAuthMetadataMock.mockReset();
+  });
+
+  it("POST /proxy returns 401 without bearer token", async () => {
+    const response = await postJson(app, "/api/web/oauth/proxy", {
+      url: "https://example.com/token",
+    });
+    const { status, data } = await expectJson(response);
+
+    expect(status).toBe(401);
+    expect(data).toEqual({
+      code: "UNAUTHORIZED",
+      message: "Bearer token required",
+    });
+  });
+
+  it("GET /metadata returns 401 without bearer token", async () => {
+    const response = await getJson(
+      app,
+      "/api/web/oauth/metadata?url=https://example.com/.well-known/oauth",
+    );
+    const { status, data } = await expectJson(response);
+
+    expect(status).toBe(401);
+    expect(data).toEqual({
+      code: "UNAUTHORIZED",
+      message: "Bearer token required",
+    });
+  });
+
+  it("POST /proxy succeeds with bearer token", async () => {
+    executeOAuthProxyMock.mockResolvedValueOnce({
+      status: 200,
+      statusText: "OK",
+      headers: {},
+      body: { ok: true },
+      finalUrl: "https://example.com/token",
+    });
+
+    const response = await postJson(
+      app,
+      "/api/web/oauth/proxy",
+      { url: "https://example.com/token" },
+      token,
+    );
+    const { status, data } = await expectJson(response);
+
+    expect(status).toBe(200);
+    expect(data).toEqual({
+      status: 200,
+      statusText: "OK",
+      headers: {},
+      body: { ok: true },
+      finalUrl: "https://example.com/token",
+    });
+    expect(response.headers.get("x-mcpjam-oauth-upstream-url")).toBe(
+      "https://example.com/token"
+    );
+  });
+
+  it("GET /metadata succeeds with bearer token", async () => {
+    fetchOAuthMetadataMock.mockResolvedValueOnce({
+      metadata: { issuer: "https://example.com" },
+      finalUrl: "https://example.com/.well-known/oauth",
+    });
+
+    const response = await getJson(
+      app,
+      "/api/web/oauth/metadata?url=https://example.com/.well-known/oauth",
+      token,
+    );
+    const { status, data } = await expectJson(response);
+
+    expect(status).toBe(200);
+    expect(data).toEqual({ issuer: "https://example.com" });
+    expect(response.headers.get("x-mcpjam-oauth-upstream-url")).toBe(
+      "https://example.com/.well-known/oauth"
+    );
+  });
+});
 
 describe("web routes — oauth error contract", () => {
   const { app, token } = createWebTestApp();
@@ -108,10 +198,113 @@ describe("web routes — oauth error contract", () => {
     const { status, data } = await expectJson<OAuthErrorResponse>(response);
 
     expect(status).toBe(502);
+    // mapRuntimeError frames connection-class failures as a target-server
+    // problem (the raw errno alone reads like an MCPJam outage in the client
+    // toast) while preserving the raw error for debugging.
+    expect(data.code).toBe("SERVER_UNREACHABLE");
+    expect(data.message).toContain("connect ECONNREFUSED");
+    expect(data.message).toContain("not an MCPJam outage");
+    expect(data.error).toBe(data.message);
+  });
+});
+
+describe("web routes — oauth session forwarding", () => {
+  const { app, token } = createWebTestApp();
+
+  beforeEach(() => {
+    vi.stubEnv("CONVEX_HTTP_URL", "https://example.convex.site");
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    vi.unstubAllGlobals();
+  });
+
+  it("POST /session forwards the bearer-authenticated session bootstrap to Convex", async () => {
+    const fetchMock = vi.fn().mockResolvedValueOnce(
+      new Response(JSON.stringify({ success: true, sessionId: "session-123" }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const payload = {
+      projectId: "ws_1",
+      serverId: "srv_1",
+      codeVerifier: "verifier",
+      redirectUri: "http://localhost:5173/oauth/callback",
+      clientInformation: {
+        clientId: "client-id",
+      },
+    };
+
+    const response = await postJson(app, "/api/web/oauth/session", payload, token);
+    const { status, data } = await expectJson(response);
+
+    expect(status).toBe(200);
+    expect(data).toEqual({ success: true, sessionId: "session-123" });
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://example.convex.site/web/oauth/session",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify(payload),
+      },
+    );
+  });
+
+  it("POST /tokens forwards the bearer-authenticated token reveal to Convex", async () => {
+    const fetchMock = vi.fn().mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          success: true,
+          tokens: {
+            access_token: "access-token",
+            refresh_token: "refresh-token",
+          },
+          expiresAt: null,
+          kind: "generic",
+        }),
+        {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        },
+      ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const payload = {
+      projectId: "ws_1",
+      serverId: "srv_1",
+    };
+
+    const response = await postJson(app, "/api/web/oauth/tokens", payload, token);
+    const { status, data } = await expectJson(response);
+
+    expect(status).toBe(200);
     expect(data).toEqual({
-      code: "SERVER_UNREACHABLE",
-      message: "connect ECONNREFUSED",
-      error: "connect ECONNREFUSED",
+      success: true,
+      tokens: {
+        access_token: "access-token",
+        refresh_token: "refresh-token",
+      },
+      expiresAt: null,
+      kind: "generic",
     });
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://example.convex.site/web/oauth/tokens",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify(payload),
+      },
+    );
   });
 });

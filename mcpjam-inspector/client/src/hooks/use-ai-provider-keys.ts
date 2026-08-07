@@ -1,12 +1,5 @@
-import {
-  useState,
-  useEffect,
-  useCallback,
-  useMemo,
-  useRef,
-} from "react";
-import { useAuth } from "@/lib/auth/jwt-auth-context";
-import { scopedLocalStorageKey } from "@/lib/hosted-user-storage";
+import { useState, useEffect, useCallback } from "react";
+import { useByokAllowed } from "@/hooks/use-byok-allowed";
 
 export interface ProviderTokens {
   anthropic: string;
@@ -38,7 +31,7 @@ export interface useAiProviderKeysReturn {
   setAzureBaseUrl: (url: string) => void;
 }
 
-const STORAGE_KEY_BASE = "mcp-inspector-provider-tokens";
+const STORAGE_KEY = "mcp-inspector-provider-tokens";
 
 const defaultTokens: ProviderTokens = {
   anthropic: "",
@@ -55,72 +48,96 @@ const defaultTokens: ProviderTokens = {
   openRouterSelectedModels: [],
 };
 
-function mergeStoredTokens(raw: Partial<ProviderTokens>): ProviderTokens {
-  return { ...defaultTokens, ...raw };
-}
-
 export function useAiProviderKeys(): useAiProviderKeysReturn {
-  const { user } = useAuth();
-  const storageKey = useMemo(
-    () => scopedLocalStorageKey(STORAGE_KEY_BASE, user?.id ?? null),
-    [user?.id],
-  );
-
+  // BYOK is sign-in only: guests see empty tokens and no-op setters. When the
+  // user signs in mid-session the load effect re-runs and rehydrates from
+  // localStorage; on sign-out the same effect resets state back to defaults.
+  const allowed = useByokAllowed();
   const [tokens, setTokens] = useState<ProviderTokens>(defaultTokens);
-  const isRestoringRef = useRef(false);
+  const [isInitialized, setIsInitialized] = useState(false);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
-    isRestoringRef.current = true;
+    if (!allowed) {
+      // Sign-out (or initial guest load) clears both in-memory state AND
+      // localStorage so the next sign-in on the same browser — possibly a
+      // different WorkOS user — cannot silently rehydrate the previous
+      // user's keys.
+      setTokens(defaultTokens);
+      try {
+        localStorage.removeItem(STORAGE_KEY);
+      } catch (error) {
+        console.warn(
+          "Failed to clear provider tokens from localStorage:",
+          error,
+        );
+      }
+      setIsInitialized(true);
+      return;
+    }
     try {
-      const stored = localStorage.getItem(storageKey);
+      const stored = localStorage.getItem(STORAGE_KEY);
       if (stored) {
+        // Merge a (possibly legacy/partial) payload onto defaults so missing
+        // or malformed fields can't leave the state ill-shaped — e.g. an
+        // absent openRouterSelectedModels would otherwise make
+        // hasToken("openrouter") throw on `.length`.
         const parsed = JSON.parse(stored) as Partial<ProviderTokens>;
-        setTokens(mergeStoredTokens(parsed));
-      } else {
-        setTokens({ ...defaultTokens });
+        setTokens({
+          ...defaultTokens,
+          ...parsed,
+          openRouterSelectedModels: Array.isArray(
+            parsed.openRouterSelectedModels,
+          )
+            ? parsed.openRouterSelectedModels
+            : defaultTokens.openRouterSelectedModels,
+        });
       }
     } catch (error) {
       console.warn(
         "Failed to load provider tokens from localStorage:",
         error,
       );
-      setTokens({ ...defaultTokens });
     }
-    queueMicrotask(() => {
-      isRestoringRef.current = false;
-    });
-  }, [storageKey]);
+    setIsInitialized(true);
+  }, [allowed]);
 
   useEffect(() => {
-    if (typeof window === "undefined" || isRestoringRef.current) return;
+    if (!isInitialized || typeof window === "undefined") return;
+    if (!allowed) return;
     try {
-      localStorage.setItem(storageKey, JSON.stringify(tokens));
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(tokens));
     } catch (error) {
       console.warn("Failed to save provider tokens to localStorage:", error);
     }
-  }, [tokens, storageKey]);
+  }, [tokens, isInitialized, allowed]);
 
   const setToken = useCallback(
     (provider: keyof ProviderTokens, token: string) => {
+      if (!allowed) return;
       setTokens((prev) => ({
         ...prev,
         [provider]: token,
       }));
     },
-    [],
+    [allowed],
   );
 
-  const clearToken = useCallback((provider: keyof ProviderTokens) => {
-    setTokens((prev) => ({
-      ...prev,
-      [provider]: "",
-    }));
-  }, []);
+  const clearToken = useCallback(
+    (provider: keyof ProviderTokens) => {
+      if (!allowed) return;
+      setTokens((prev) => ({
+        ...prev,
+        [provider]: "",
+      }));
+    },
+    [allowed],
+  );
 
   const clearAllTokens = useCallback(() => {
+    if (!allowed) return;
     setTokens(defaultTokens);
-  }, []);
+  }, [allowed]);
 
   const hasToken = useCallback(
     (provider: keyof ProviderTokens) => {
@@ -155,23 +172,31 @@ export function useAiProviderKeys(): useAiProviderKeysReturn {
     return tokens.ollamaBaseUrl || defaultTokens.ollamaBaseUrl;
   }, [tokens.ollamaBaseUrl]);
 
-  const setOllamaBaseUrl = useCallback((url: string) => {
-    setTokens((prev) => ({
-      ...prev,
-      ollamaBaseUrl: url,
-    }));
-  }, []);
+  const setOllamaBaseUrl = useCallback(
+    (url: string) => {
+      if (!allowed) return;
+      setTokens((prev) => ({
+        ...prev,
+        ollamaBaseUrl: url,
+      }));
+    },
+    [allowed],
+  );
 
   const getAzureBaseUrl = useCallback(() => {
     return tokens.azureBaseUrl || defaultTokens.azureBaseUrl;
   }, [tokens.azureBaseUrl]);
 
-  const setAzureBaseUrl = useCallback((url: string) => {
-    setTokens((prev) => ({
-      ...prev,
-      azureBaseUrl: url,
-    }));
-  }, []);
+  const setAzureBaseUrl = useCallback(
+    (url: string) => {
+      if (!allowed) return;
+      setTokens((prev) => ({
+        ...prev,
+        azureBaseUrl: url,
+      }));
+    },
+    [allowed],
+  );
 
   const getOpenRouterSelectedModels = useCallback(() => {
     return (
@@ -179,12 +204,16 @@ export function useAiProviderKeys(): useAiProviderKeysReturn {
     );
   }, [tokens.openRouterSelectedModels]);
 
-  const setOpenRouterSelectedModels = useCallback((models: string[]) => {
-    setTokens((prev) => ({
-      ...prev,
-      openRouterSelectedModels: models,
-    }));
-  }, []);
+  const setOpenRouterSelectedModels = useCallback(
+    (models: string[]) => {
+      if (!allowed) return;
+      setTokens((prev) => ({
+        ...prev,
+        openRouterSelectedModels: models,
+      }));
+    },
+    [allowed],
+  );
 
   return {
     tokens,

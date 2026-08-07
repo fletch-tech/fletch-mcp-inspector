@@ -1,6 +1,8 @@
 import { spawn, ChildProcess } from "child_process";
-import { fileURLToPath } from "url";
+import { createRequire } from "module";
 import path from "path";
+
+const require = createRequire(import.meta.url);
 
 /**
  * Configuration options for launching the MCP Inspector.
@@ -33,7 +35,7 @@ export interface LaunchOptions {
 
   /**
    * Initial tab to navigate to.
-   * Options: "servers", "tools", "resources", "prompts", "chat", "app-builder"
+   * Options: "servers", "tools", "resources", "prompts", "chat", "playground"
    */
   defaultTab?: string;
 
@@ -45,8 +47,8 @@ export interface LaunchOptions {
 
   /**
    * Content Security Policy mode for the App Builder sandbox.
-   * - "widget-declared": enforces CSP directives declared by the widget (default)
-   * - "permissive": disables CSP enforcement for easier development
+   * - "permissive": disables CSP enforcement for easier development (default)
+   * - "widget-declared": enforces CSP directives declared by the widget
    */
   cspMode?: "permissive" | "widget-declared";
 }
@@ -100,7 +102,7 @@ async function waitForServer(port: number, timeout = 30000): Promise<void> {
  *     name: 'My MCP Server',
  *     url: 'http://localhost:3000/mcp',
  *   },
- *   defaultTab: 'app-builder',
+ *   defaultTab: 'playground',
  * });
  *
  * console.log(`Inspector running at ${inspector.url}`);
@@ -114,10 +116,8 @@ const INSPECTOR_PORT = 6274;
 export async function launchInspector(
   options: LaunchOptions = {},
 ): Promise<InspectorInstance> {
-  // Find bin/start.js relative to this file
-  // From dist/lib/launcher/index.js -> ../../../bin/start.js
-  const __dirname = path.dirname(fileURLToPath(import.meta.url));
-  const binPath = path.resolve(__dirname, "../../../bin/start.js");
+  const packageJsonPath = require.resolve("@mcpjam/inspector/package.json");
+  const binPath = path.resolve(path.dirname(packageJsonPath), "bin/start.js");
 
   // Build environment
   const env: Record<string, string> = {

@@ -1,11 +1,11 @@
 import { useMemo, useState } from "react";
 import { Grid3x3, List, Search, AlertCircle } from "lucide-react";
-import { Input } from "@/components/ui/input";
-import { Button } from "@/components/ui/button";
+import { Input } from "@mcpjam/design-system/input";
+import { Button } from "@mcpjam/design-system/button";
 import { cn } from "@/lib/utils";
 import { UserModelCard } from "./user-model-card";
 import type { ModelDefinition } from "@/shared/types";
-import { isMCPJamProvidedModel } from "@/shared/types";
+import { isMCPJamProvidedModelMenuItem } from "@/components/chat-v2/shared/model-helpers";
 
 interface UserModelSelectorProps {
   selectedModel: ModelDefinition | null;
@@ -31,7 +31,7 @@ export function UserModelSelector({
   const filteredModels = useMemo(() => {
     // First filter out MCPJam provided models
     const userModels = availableModels.filter(
-      (model) => !isMCPJamProvidedModel(String(model.id)),
+      (model) => !isMCPJamProvidedModelMenuItem(model),
     );
 
     // Then apply search filter

@@ -7,16 +7,17 @@
  */
 
 import { create } from "zustand";
-import type { Tool } from "@modelcontextprotocol/sdk/types.js";
+import type { Tool } from "@modelcontextprotocol/client";
 import type { FormField } from "@/lib/tool-form";
-import { UIType } from "@/lib/mcp-ui/mcp-apps-utils";
 
-export type DeviceType = "mobile" | "tablet" | "desktop" | "custom";
-export type HostStyle = "claude" | "chatgpt";
+export type DeviceType = "fill" | "mobile" | "tablet" | "desktop" | "custom";
+
+/** Fixed-size emulation presets; "fill" and "custom" size differently. */
+export type PresetDeviceType = Exclude<DeviceType, "fill" | "custom">;
 
 /** Device viewport configurations - shared across playground and MCP apps renderer */
 export const DEVICE_VIEWPORT_CONFIGS: Record<
-  Exclude<DeviceType, "custom">,
+  PresetDeviceType,
   { width: number; height: number }
 > = {
   mobile: { width: 430, height: 932 },
@@ -124,9 +125,6 @@ interface UIPlaygroundState {
   // CSP enforcement mode for MCP Apps (SEP-1865)
   mcpAppsCspMode: CspMode;
 
-  // Currently selected app protocol (detected from tool metadata)
-  selectedProtocol: UIType | null;
-
   // Device capabilities (hover/touch support)
   capabilities: DeviceCapabilities;
 
@@ -136,9 +134,6 @@ interface UIPlaygroundState {
 
   // Custom viewport dimensions (for custom device type)
   customViewport: CustomViewport;
-
-  // Host style for MCP Apps (which host's design tokens to inject)
-  hostStyle: HostStyle;
 
   // Actions
   setTools: (tools: Record<string, Tool>) => void;
@@ -167,12 +162,10 @@ interface UIPlaygroundState {
   setPlaygroundActive: (active: boolean) => void;
   setCspMode: (mode: CspMode) => void;
   setMcpAppsCspMode: (mode: CspMode) => void;
-  setSelectedProtocol: (protocol: UIType | null) => void;
   setCapabilities: (capabilities: Partial<DeviceCapabilities>) => void;
   setSafeAreaPreset: (preset: SafeAreaPreset) => void;
   setSafeAreaInsets: (insets: Partial<SafeAreaInsets>) => void;
   setCustomViewport: (viewport: Partial<CustomViewport>) => void;
-  setHostStyle: (style: HostStyle) => void;
   reset: () => void;
 }
 
@@ -180,17 +173,18 @@ const getInitialGlobals = (): PlaygroundGlobals => ({
   theme: "dark",
   locale: navigator.language || "en-US",
   timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC",
-  deviceType: "desktop",
+  deviceType: "fill",
   displayMode: "inline",
   userLocation: null,
 });
 
 const STORAGE_KEY_SIDEBAR = "mcpjam-ui-playground-sidebar-visible";
 const STORAGE_KEY_CUSTOM_VIEWPORT = "mcpjam-ui-playground-custom-viewport";
-const STORAGE_KEY_DEVICE_TYPE = "mcpjam-ui-playground-device-type";
-const STORAGE_KEY_SELECTED_PROTOCOL = "mcpjam-ui-playground-selected-protocol";
-const STORAGE_KEY_HOST_STYLE = "mcpjam-ui-playground-host-style";
-
+// v2: "fill" became the default device. The v1 key is abandoned rather than
+// migrated — applyHostConfigToPlayground used to write "desktop" on every
+// host switch, so v1 values are machine-written and don't reflect a user's
+// deliberate preset choice.
+const STORAGE_KEY_DEVICE_TYPE = "mcpjam-ui-playground-device-type-v2";
 const getStoredVisibility = (key: string, defaultValue: boolean): boolean => {
   if (typeof window === "undefined") return defaultValue;
   const stored = localStorage.getItem(key);
@@ -207,50 +201,35 @@ const getStoredCustomViewport = (): CustomViewport => {
 };
 
 const getStoredDeviceType = (): DeviceType => {
-  if (typeof window === "undefined") return "desktop";
+  if (typeof window === "undefined") return "fill";
   const stored = localStorage.getItem(STORAGE_KEY_DEVICE_TYPE);
-  if (stored && ["mobile", "tablet", "desktop", "custom"].includes(stored)) {
-    return stored as DeviceType;
-  }
-  return "desktop";
-};
-
-const getStoredHostStyle = (): HostStyle => {
-  if (typeof window === "undefined") return "claude";
-  const stored = localStorage.getItem(STORAGE_KEY_HOST_STYLE);
-  if (stored && ["claude", "chatgpt"].includes(stored)) {
-    return stored as HostStyle;
-  }
-  return "claude";
-};
-
-const getStoredSelectedProtocol = (): UIType | null => {
-  if (typeof window === "undefined") return null;
-  const stored = localStorage.getItem(STORAGE_KEY_SELECTED_PROTOCOL);
   if (
     stored &&
-    [UIType.MCP_APPS, UIType.OPENAI_SDK].includes(stored as UIType)
+    ["fill", "mobile", "tablet", "desktop", "custom"].includes(stored)
   ) {
-    return stored as UIType;
+    return stored as DeviceType;
   }
-  return null;
+  return "fill";
 };
 
 /** Get default capabilities based on device type */
 const getDefaultCapabilities = (
-  deviceType: DeviceType = "desktop",
+  deviceType: DeviceType = "fill",
 ): DeviceCapabilities => {
   switch (deviceType) {
     case "mobile":
       return { hover: false, touch: true };
     case "tablet":
       return { hover: false, touch: true };
+    case "fill":
     case "custom":
     case "desktop":
     default:
       return { hover: true, touch: false };
   }
 };
+
+const initialDeviceType = getStoredDeviceType();
 
 const initialState = {
   isPlaygroundActive: false,
@@ -264,20 +243,18 @@ const initialState = {
   widgetUrl: null,
   widgetState: null,
   isWidgetTool: false,
-  deviceType: getStoredDeviceType(),
+  deviceType: initialDeviceType,
   displayMode: "inline" as DisplayMode,
-  globals: getInitialGlobals(),
+  globals: { ...getInitialGlobals(), deviceType: initialDeviceType },
   lastToolCallId: null,
   followUpMessages: [] as FollowUpMessage[],
   isSidebarVisible: getStoredVisibility(STORAGE_KEY_SIDEBAR, true),
-  cspMode: "widget-declared" as CspMode,
-  mcpAppsCspMode: "widget-declared" as CspMode,
-  selectedProtocol: getStoredSelectedProtocol(),
-  capabilities: getDefaultCapabilities("desktop"),
+  cspMode: "permissive" as CspMode,
+  mcpAppsCspMode: "permissive" as CspMode,
+  capabilities: getDefaultCapabilities(initialDeviceType),
   safeAreaPreset: "none" as SafeAreaPreset,
   safeAreaInsets: SAFE_AREA_PRESETS["none"],
   customViewport: getStoredCustomViewport(),
-  hostStyle: getStoredHostStyle(),
 };
 
 export const useUIPlaygroundStore = create<UIPlaygroundState>((set) => ({
@@ -385,13 +362,6 @@ export const useUIPlaygroundStore = create<UIPlaygroundState>((set) => ({
 
   setMcpAppsCspMode: (mode) => set({ mcpAppsCspMode: mode }),
 
-  setSelectedProtocol: (protocol) => {
-    if (protocol) {
-      localStorage.setItem(STORAGE_KEY_SELECTED_PROTOCOL, protocol);
-    }
-    return set({ selectedProtocol: protocol });
-  },
-
   setCapabilities: (newCapabilities) =>
     set((state) => ({
       capabilities: { ...state.capabilities, ...newCapabilities },
@@ -411,11 +381,6 @@ export const useUIPlaygroundStore = create<UIPlaygroundState>((set) => ({
       safeAreaPreset: "custom" as SafeAreaPreset,
       safeAreaInsets: { ...state.safeAreaInsets, ...insets },
     })),
-
-  setHostStyle: (hostStyle) => {
-    localStorage.setItem(STORAGE_KEY_HOST_STYLE, hostStyle);
-    return set({ hostStyle });
-  },
 
   setCustomViewport: (viewport) =>
     set((state) => {
@@ -443,12 +408,9 @@ export const useUIPlaygroundStore = create<UIPlaygroundState>((set) => ({
         isPlaygroundActive: state.isPlaygroundActive,
         // Preserve device type and custom viewport from localStorage
         deviceType: storedDeviceType,
+        globals: { ...initialState.globals, deviceType: storedDeviceType },
         customViewport: getStoredCustomViewport(),
         capabilities: getDefaultCapabilities(storedDeviceType),
-        // Preserve selected protocol from localStorage
-        selectedProtocol: getStoredSelectedProtocol(),
-        // Preserve host style from localStorage
-        hostStyle: getStoredHostStyle(),
         // Preserve CSP modes (may be set via CLI config before reset fires)
         cspMode: state.cspMode,
         mcpAppsCspMode: state.mcpAppsCspMode,

@@ -23,10 +23,10 @@ export default defineWorkspace([
     },
   },
   {
-    extends: "./convex/vitest.config.ts",
+    extends: "./src/vitest.config.ts",
     test: {
-      name: "convex",
-      root: "./convex",
+      name: "src",
+      root: "./src",
     },
   },
 ]);

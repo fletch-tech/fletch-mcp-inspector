@@ -1,18 +1,28 @@
-import type { TestAgent } from "./TestAgent.js";
+import type { HostExecutor } from "./HostExecutor.js";
 import type { LatencyBreakdown } from "./types.js";
 import { calculateLatencyStats, type LatencyStats } from "./percentiles.js";
+import type {
+  EvalExpectedToolCall,
+  EvalResultInput,
+  MCPJamReportingConfig,
+} from "./eval-reporting-types.js";
 import type {
   EvalTest,
   EvalTestRunOptions,
   EvalRunResult,
   IterationResult,
 } from "./EvalTest.js";
+import { reportEvalResultsSafely } from "./report-eval-results.js";
+import { suiteTestResultsToEvalResultInputs } from "./eval-result-mapping.js";
+import { resolveServerReplayConfigs } from "./server-replay-configs.js";
+import { buildHostSnapshotMetadata } from "./host-config/internal.js";
 
 /**
  * Configuration for an EvalSuite
  */
 export interface EvalSuiteConfig {
   name?: string;
+  mcpjam?: MCPJamReportingConfig;
 }
 
 /**
@@ -53,31 +63,33 @@ export interface EvalSuiteResult {
  * const suite = new EvalSuite({ name: "Math" });
  * suite.add(new EvalTest({
  *   name: "addition",
- *   test: async (agent) => {
- *     const r = await agent.prompt("Add 2+3");
+ *   test: async (executor) => {
+ *     const r = await executor.run("Add 2+3");
  *     return r.hasToolCall("add");
  *   },
  * }));
  * suite.add(new EvalTest({
  *   name: "multiply",
- *   test: async (agent) => {
- *     const r = await agent.prompt("Multiply 4*5");
+ *   test: async (executor) => {
+ *     const r = await executor.run("Multiply 4*5");
  *     return r.hasToolCall("multiply");
  *   },
  * }));
  *
- * await suite.run(agent, { iterations: 30 });
+ * await suite.run(executor, { iterations: 30 });
  * console.log(suite.accuracy());                 // Aggregate: 0.95
  * console.log(suite.get("addition").accuracy()); // Individual: 0.97
  * ```
  */
 export class EvalSuite {
   private name: string;
+  private mcpjamConfig?: MCPJamReportingConfig;
   private tests: Map<string, EvalTest> = new Map();
   private lastRunResult: EvalSuiteResult | null = null;
 
   constructor(config?: EvalSuiteConfig) {
     this.name = config?.name ?? "EvalSuite";
+    this.mcpjamConfig = config?.mcpjam;
   }
 
   /**
@@ -106,13 +118,14 @@ export class EvalSuite {
   }
 
   /**
-   * Run all tests in the suite with the given agent and options
+   * Run all tests in the suite with the given executor and options.
    */
   async run(
-    agent: TestAgent,
+    executor: HostExecutor,
     options: EvalTestRunOptions
   ): Promise<EvalSuiteResult> {
     const testResults = new Map<string, EvalRunResult>();
+    const suiteReportingConfig = options.mcpjam ?? this.mcpjamConfig;
 
     // Track total progress across all tests
     const totalIterations = this.tests.size * options.iterations;
@@ -122,6 +135,13 @@ export class EvalSuite {
     for (const [name, test] of this.tests) {
       const testOptions: EvalTestRunOptions = {
         ...options,
+        mcpjam: suiteReportingConfig
+          ? {
+              ...suiteReportingConfig,
+              enabled: false,
+            }
+          : undefined,
+        __suppressMcpjamAutoSave: true,
         onProgress: options.onProgress
           ? (completed, _total) => {
               // Calculate overall progress
@@ -131,14 +151,86 @@ export class EvalSuite {
           : undefined,
       };
 
-      const result = await test.run(agent, testOptions);
+      const result = await test.run(executor, testOptions);
       testResults.set(name, result);
       completedIterations += options.iterations;
     }
 
     // Aggregate results
     this.lastRunResult = this.aggregateResults(testResults);
+    await this.autoSaveSuiteRunIfConfigured(
+      testResults,
+      suiteReportingConfig,
+      executor
+    );
     return this.lastRunResult;
+  }
+
+  private async autoSaveSuiteRunIfConfigured(
+    testResults: Map<string, EvalRunResult>,
+    config: MCPJamReportingConfig | undefined,
+    executor: HostExecutor
+  ): Promise<void> {
+    if (config?.enabled === false) {
+      return;
+    }
+    const apiKey = config?.apiKey ?? process.env.MCPJAM_API_KEY;
+    if (!apiKey) {
+      return;
+    }
+
+    const hostSnapshot = executor.getHostSnapshot?.();
+    const hostExtras = hostSnapshot
+      ? buildHostSnapshotMetadata(
+          hostSnapshot as unknown as Record<string, unknown>,
+        )
+      : undefined;
+    const results = this.buildEvalResultInputs(testResults, config, hostExtras);
+    if (results.length === 0) {
+      return;
+    }
+
+    await reportEvalResultsSafely({
+      suiteName: config?.suiteName ?? this.name,
+      suiteDescription: config?.suiteDescription,
+      serverNames: config?.serverNames,
+      serverReplayConfigs: resolveServerReplayConfigs({
+        serverReplayConfigs: config?.serverReplayConfigs,
+        serverNames: config?.serverNames,
+        agent: executor,
+      }),
+      notes: config?.notes,
+      passCriteria: config?.passCriteria,
+      externalRunId: config?.externalRunId,
+      framework: config?.framework,
+      ci: config?.ci,
+      apiKey,
+      baseUrl: config?.baseUrl,
+      strict: config?.strict,
+      results,
+    });
+  }
+
+  private buildEvalResultInputs(
+    testResults: Map<string, EvalRunResult>,
+    reporting?: MCPJamReportingConfig,
+    hostExtras?: Record<string, string | number | boolean>,
+  ): EvalResultInput[] {
+    const expectedToolCallsByTest: Record<string, EvalExpectedToolCall[]> = {};
+    for (const [name, test] of this.tests) {
+      const expected = test.getConfig().expectedToolCalls;
+      if (expected) {
+        expectedToolCallsByTest[name] = expected;
+      }
+    }
+    return suiteTestResultsToEvalResultInputs(
+      testResults,
+      Object.keys(expectedToolCallsByTest).length > 0
+        ? expectedToolCallsByTest
+        : undefined,
+      reporting?.failOnToolError,
+      hostExtras,
+    );
   }
 
   private aggregateResults(

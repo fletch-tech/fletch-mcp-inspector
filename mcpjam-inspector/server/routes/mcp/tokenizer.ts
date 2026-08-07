@@ -3,12 +3,10 @@ import "../../types/hono";
 import {
   mapModelIdToTokenizerBackend,
   estimateTokensFromChars,
+  isFetchConnectionFailure,
+  getFetchErrorCause,
 } from "../../utils/tokenizer-helpers";
 import { logger } from "../../utils/logger";
-import {
-  CONVEX_HTTP_URL,
-  getConvexServerAuthHeaders,
-} from "../../config.js";
 
 const tokenizer = new Hono();
 
@@ -56,11 +54,12 @@ tokenizer.post("/count-tools", async (c) => {
 
     const mcpClientManager = c.mcpClientManager;
 
-    if (!CONVEX_HTTP_URL) {
+    const convexHttpUrl = process.env.CONVEX_HTTP_URL;
+    if (!convexHttpUrl) {
       return c.json(
         {
           ok: false,
-          error: "Server missing Convex configuration (CONVEX_SELF_HOSTED_URL or CONVEX_HTTP_URL)",
+          error: "Server missing CONVEX_HTTP_URL configuration",
         },
         500,
       );
@@ -84,11 +83,10 @@ tokenizer.post("/count-tools", async (c) => {
 
           if (useBackendTokenizer && mappedModelId) {
             // Use backend tokenizer API for mapped models
-            const response = await fetch(`${CONVEX_HTTP_URL}/tokenizer/count`, {
+            const response = await fetch(`${convexHttpUrl}/tokenizer/count`, {
               method: "POST",
               headers: {
                 "Content-Type": "application/json",
-                ...getConvexServerAuthHeaders(),
               },
               body: JSON.stringify({
                 text: toolsText,
@@ -125,10 +123,20 @@ tokenizer.post("/count-tools", async (c) => {
             tokenCounts[serverId] = estimateTokensFromChars(toolsText);
           }
         } catch (error) {
-          logger.warn(`[tokenizer] Error counting tokens for server`, {
-            serverId,
-            error: error instanceof Error ? error.message : String(error),
-          });
+          // Connection-level failures reaching the Convex tokenizer come from
+          // the caller's network, not our backend — log locally and move on.
+          if (isFetchConnectionFailure(error)) {
+            logger.debug(
+              `[tokenizer] Backend unreachable for server, falling back to estimate`,
+              { serverId, cause: getFetchErrorCause(error) },
+            );
+          } else {
+            logger.warn(`[tokenizer] Error counting tokens for server`, {
+              serverId,
+              error: error instanceof Error ? error.message : String(error),
+              cause: getFetchErrorCause(error),
+            });
+          }
           // Fallback to character-based estimation on error
           try {
             const tools = await mcpClientManager.getToolsForAiSdk([serverId]);
@@ -191,11 +199,12 @@ tokenizer.post("/count-text", async (c) => {
       );
     }
 
-    if (!CONVEX_HTTP_URL) {
+    const convexHttpUrl = process.env.CONVEX_HTTP_URL;
+    if (!convexHttpUrl) {
       return c.json(
         {
           ok: false,
-          error: "Server missing Convex configuration (CONVEX_SELF_HOSTED_URL or CONVEX_HTTP_URL)",
+          error: "Server missing CONVEX_HTTP_URL configuration",
         },
         500,
       );
@@ -207,11 +216,10 @@ tokenizer.post("/count-text", async (c) => {
     if (useBackendTokenizer && mappedModelId) {
       try {
         // Use backend tokenizer API for mapped models
-        const response = await fetch(`${CONVEX_HTTP_URL}/tokenizer/count`, {
+        const response = await fetch(`${convexHttpUrl}/tokenizer/count`, {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
-            ...getConvexServerAuthHeaders(),
           },
           body: JSON.stringify({
             text,
@@ -251,9 +259,20 @@ tokenizer.post("/count-text", async (c) => {
           });
         }
       } catch (error) {
-        logger.warn(`[tokenizer] Error counting tokens for text`, {
-          error: error instanceof Error ? error.message : String(error),
-        });
+        // Connection-level failures (DNS, ECONNREFUSED, TLS) are user-network
+        // issues, not backend problems. Demote to debug so they don't page
+        // Sentry; backend HTTP/logical errors are already handled above as warnings.
+        if (isFetchConnectionFailure(error)) {
+          logger.debug(
+            `[tokenizer] Backend unreachable, falling back to estimate`,
+            { cause: getFetchErrorCause(error) },
+          );
+        } else {
+          logger.warn(`[tokenizer] Error counting tokens for text`, {
+            error: error instanceof Error ? error.message : String(error),
+            cause: getFetchErrorCause(error),
+          });
+        }
         // Fallback to character-based estimation on error
         return c.json({
           ok: true,

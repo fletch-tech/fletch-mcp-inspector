@@ -1,0 +1,125 @@
+import { Boxes } from "lucide-react";
+import { useFeatureFlagEnabled } from "posthog-js/react";
+import type { ServerWithName } from "@/state/app-types";
+import { useServerToolsData } from "@/lib/host-compat/use-host-compat";
+import { HostCompatContent } from "@/components/compat/HostCompatContent";
+import { HostCompatMatrix } from "@/components/compat/HostCompatMatrix";
+import { EmptyState } from "@/components/ui/empty-state";
+import { useSurfaceAgentBridge } from "@/lib/webmcp/use-surface-agent-bridge";
+import { buildCompatibilitySnapshot } from "@/lib/webmcp/review-surface-snapshots";
+
+/**
+ * Standalone Compatibility destination — "does my server work on these hosts?".
+ *
+ * With multiple connected servers it leads with a servers × hosts matrix
+ * (click a row to drill in); the selected server's full report (conformance
+ * gate + per-host apps/server findings) renders below. With a single server it
+ * is just that report. Reuses the same engine + `HostCompatContent` as the
+ * server-detail modal tab.
+ *
+ * The "Test in host" CTA is intentionally absent on this page: it needs the
+ * project-server-ref id the modal resolves, so `HostCompatContent` (passed no
+ * `serverId`) hides it.
+ */
+export function HostCompatPage({
+  servers,
+  selectedServer,
+  onSelectServer,
+  projectId,
+}: {
+  /** Connected servers eligible for evaluation. */
+  servers: ServerWithName[];
+  /** The server whose full report shows below the matrix. */
+  selectedServer: ServerWithName | null;
+  onSelectServer: (name: string) => void;
+  projectId?: string | null;
+}) {
+  // Resolve the detail against the CONNECTED list (the matrix only lists
+  // connected servers): a stale/disconnected global selection that isn't in
+  // `servers` is ignored, falling back to the first connected server. The
+  // matrix highlight reads `detailServer.name`, so the two always agree. Hook
+  // runs unconditionally; it no-ops for a null/empty server.
+  const detailServer =
+    servers.find((s) => s.name === selectedServer?.name) ?? servers[0] ?? null;
+  const toolsState = useServerToolsData(detailServer);
+
+  // Agent bridge: SNAPSHOT-ONLY (no tools). Compatibility is a read-only review
+  // screen (agentTools kind "none") that the agent may OBSERVE: which connected
+  // servers are on the matrix and which one's report is open. Must run before
+  // the early return below (rules of hooks). Redacted STATE only — server names
+  // and selection, never a server's config or the per-host findings.
+  // Gate the provider on the SAME flag as the surface: ui_snapshot_app reads
+  // the registry independent of sidebar visibility, so without this an agent
+  // could observe Compatibility even where the flag is off. `=== true` keeps it
+  // unregistered while the flag is still loading; the bridge re-runs on flip.
+  const compatibilityEnabled = useFeatureFlagEnabled("mcpjam-compatibility");
+  useSurfaceAgentBridge({
+    surfaceId: "compatibility",
+    enabled: compatibilityEnabled === true,
+    snapshot: () =>
+      buildCompatibilitySnapshot({
+        servers,
+        selectedServerName: detailServer?.name ?? null,
+        showMatrix: servers.length > 1,
+      }),
+  });
+
+  if (servers.length === 0) {
+    return (
+      <EmptyState
+        icon={Boxes}
+        title="No connected server"
+        description="Connect a server above to check whether it works on each client."
+        className="h-full"
+      />
+    );
+  }
+
+  const showMatrix = servers.length > 1;
+
+  return (
+    <div className="mx-auto w-full max-w-3xl px-6 py-5">
+      <div className="mb-3">
+        <h1 className="text-base font-semibold text-foreground">
+          Compatibility
+        </h1>
+        <p className="text-xs text-muted-foreground">
+          Whether your servers work on each client — spec conformance first, then
+          per-client apps &amp; server gaps.
+        </p>
+      </div>
+
+      {showMatrix && (
+        <div className="mb-5">
+          <HostCompatMatrix
+            servers={servers}
+            selectedServerName={detailServer?.name}
+            onSelectServer={onSelectServer}
+          />
+          <p className="mt-1.5 text-[11px] text-muted-foreground">
+            Select a server to see its full report.
+          </p>
+        </div>
+      )}
+
+      {detailServer && (
+        <section>
+          {/* Always name the server the report is for — HostCompatContent
+              renders no visible server identity, so without this a
+              single-connected-server report (matrix hidden) could be read as
+              a different, globally-selected server's. */}
+          <h2 className="mb-1.5 text-sm font-medium text-foreground">
+            {detailServer.name}
+          </h2>
+          <HostCompatContent
+            server={detailServer}
+            toolsData={toolsState.data}
+            toolsLoadStatus={toolsState.status}
+            projectId={projectId}
+            source="compat_page"
+          />
+        </section>
+      )}
+    </div>
+  );
+}

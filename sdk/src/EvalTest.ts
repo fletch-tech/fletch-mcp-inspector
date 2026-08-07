@@ -1,17 +1,29 @@
-import type { TestAgent } from "./TestAgent.js";
+import type { HostExecutor } from "./HostExecutor.js";
 import type { PromptResult } from "./PromptResult.js";
 import type { LatencyBreakdown } from "./types.js";
+import type {
+  EvalExpectedToolCall,
+  EvalResultInput,
+  MCPJamReportingConfig,
+} from "./eval-reporting-types.js";
 import { calculateLatencyStats, type LatencyStats } from "./percentiles.js";
 import { posthog } from "./telemetry.js";
+import { reportEvalResultsSafely } from "./report-eval-results.js";
+import { iterationsToEvalResultInputs } from "./eval-result-mapping.js";
+import { resolveServerReplayConfigs } from "./server-replay-configs.js";
+import { buildHostSnapshotMetadata } from "./host-config/internal.js";
 
 /**
  * Configuration for an EvalTest
  *
- * All tests use the multi-turn pattern with a test function that receives a TestAgent.
+ * All tests use the multi-turn pattern with a test function that receives a
+ * `HostExecutor` (implemented by `HostRunner`, `HostRuntime`, and any custom
+ * executor that mirrors the interface).
  */
 export interface EvalTestConfig {
   name: string;
-  test: (agent: TestAgent) => boolean | Promise<boolean>;
+  test: (executor: HostExecutor) => boolean | Promise<boolean>;
+  expectedToolCalls?: EvalExpectedToolCall[];
 }
 
 /**
@@ -25,6 +37,9 @@ export interface EvalTestRunOptions {
   onProgress?: (completed: number, total: number) => void;
   /** Called with a failure report if any iterations fail */
   onFailure?: (report: string) => void;
+  mcpjam?: MCPJamReportingConfig;
+  /** @internal used by EvalSuite to prevent duplicate per-test uploads */
+  __suppressMcpjamAutoSave?: boolean;
 }
 
 /**
@@ -38,6 +53,17 @@ export interface IterationResult {
   retryCount?: number;
   /** The prompt results from this iteration */
   prompts?: PromptResult[];
+  /**
+   * Host snapshot captured at the END of this iteration's execution.
+   * Populated when the executor exposes `getHostSnapshot()`. For
+   * `HostRunner`, this matches the construction-time snapshot (immutable).
+   * For `HostRuntime`, this captures the live `Host` state at iteration
+   * end so per-iteration metadata stamping reflects what THIS iteration
+   * ran with, not the global state at upload time. (Mid-iteration host
+   * mutations between turns are not separately captured — that would
+   * require threading the snapshot into `PromptResult`.)
+   */
+  hostSnapshot?: import("./host-config/public-types.js").HostJson;
 }
 
 /**
@@ -92,32 +118,102 @@ class Semaphore {
   }
 }
 
-/**
- * Timeout wrapper for promises
- */
-function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
-  return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => {
-      reject(new Error(`Operation timed out after ${ms}ms`));
-    }, ms);
-
-    promise
-      .then((value) => {
-        clearTimeout(timer);
-        resolve(value);
-      })
-      .catch((error) => {
-        clearTimeout(timer);
-        reject(error);
-      });
-  });
-}
+const ITERATION_ABORT_GRACE_MS = 1000;
 
 /**
  * Sleep for a given number of milliseconds
  */
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function mergeAbortSignals(
+  first?: AbortSignal,
+  second?: AbortSignal
+): AbortSignal | undefined {
+  if (!first) {
+    return second;
+  }
+
+  if (!second) {
+    return first;
+  }
+
+  if (first.aborted) {
+    return AbortSignal.abort(first.reason);
+  }
+
+  if (second.aborted) {
+    return AbortSignal.abort(second.reason);
+  }
+
+  const controller = new AbortController();
+  const abort = (signal: AbortSignal) => {
+    cleanup();
+    controller.abort(signal.reason);
+  };
+  const onFirstAbort = () => abort(first);
+  const onSecondAbort = () => abort(second);
+  const cleanup = () => {
+    first.removeEventListener("abort", onFirstAbort);
+    second.removeEventListener("abort", onSecondAbort);
+  };
+
+  first.addEventListener("abort", onFirstAbort, { once: true });
+  second.addEventListener("abort", onSecondAbort, { once: true });
+
+  return controller.signal;
+}
+
+function collectPromptMetrics(
+  promptResults: PromptResult[]
+): Pick<IterationResult, "latencies" | "tokens" | "prompts"> {
+  const latencies = promptResults.map((result) => result.getLatency());
+
+  return {
+    latencies:
+      latencies.length > 0 ? latencies : [{ e2eMs: 0, llmMs: 0, mcpMs: 0 }],
+    tokens: {
+      total: promptResults.reduce(
+        (sum, result) => sum + result.totalTokens(),
+        0
+      ),
+      input: promptResults.reduce(
+        (sum, result) => sum + result.inputTokens(),
+        0
+      ),
+      output: promptResults.reduce(
+        (sum, result) => sum + result.outputTokens(),
+        0
+      ),
+    },
+    prompts: promptResults,
+  };
+}
+
+function wrapAgentWithAbortSignal(
+  agent: HostExecutor,
+  abortSignal: AbortSignal
+): HostExecutor {
+  return {
+    run: (message, options) =>
+      agent.run(message, {
+        ...options,
+        abortSignal: mergeAbortSignals(options?.abortSignal, abortSignal),
+      }),
+    withOptions: (options) =>
+      wrapAgentWithAbortSignal(agent.withOptions(options), abortSignal),
+    getPromptHistory: () => agent.getPromptHistory(),
+    resetPromptHistory: () => agent.resetPromptHistory(),
+    // Forward host-introspection methods so per-iteration metadata
+    // stamping can capture the live snapshot from a HostRuntime clone.
+    getHostSnapshot: agent.getHostSnapshot
+      ? () => agent.getHostSnapshot!()
+      : undefined,
+    getServerReplayConfigs: agent.getServerReplayConfigs
+      ? () => agent.getServerReplayConfigs!()
+      : undefined,
+  };
 }
 
 /**
@@ -129,12 +225,12 @@ function sleep(ms: number): Promise<void> {
  * ```ts
  * const test = new EvalTest({
  *   name: "addition",
- *   test: async (agent) => {
- *     const result = await agent.prompt("Add 2+3");
+ *   test: async (executor) => {
+ *     const result = await executor.run("Add 2+3");
  *     return result.hasToolCall("add");
  *   },
  * });
- * await test.run(agent, { iterations: 30 });
+ * await test.run(executor, { iterations: 30 });
  * console.log(test.accuracy()); // 0.97
  * ```
  */
@@ -150,12 +246,15 @@ export class EvalTest {
   }
 
   /**
-   * Run this test with the given agent and options
+   * Run this test with the given executor and options.
    */
   async run(
-    agent: TestAgent,
+    executor: HostExecutor,
     options: EvalTestRunOptions
   ): Promise<EvalRunResult> {
+    // Internal alias kept short so the iteration loop reads cleanly; the
+    // public-facing parameter name is `executor`.
+    const agent = executor;
     posthog.capture({
       distinctId: "anonymous",
       event: "eval_test_run_triggered",
@@ -180,39 +279,55 @@ export class EvalTest {
       await semaphore.acquire();
       try {
         let lastError: string | undefined;
+        let iterationAgent: HostExecutor | undefined;
 
         for (let attempt = 0; attempt <= retries; attempt++) {
+          const abortController = new AbortController();
+          const timeoutError = new Error(
+            `Operation timed out after ${timeoutMs}ms`
+          );
+          let timeoutTriggered = false;
+          let timeoutId: ReturnType<typeof setTimeout> | undefined;
+          let hardTimeoutId: ReturnType<typeof setTimeout> | undefined;
+
           try {
             // Create a fresh agent clone for this iteration to avoid race conditions
             // when multiple iterations run concurrently
-            const iterationAgent = agent.withOptions({});
-
-            const passed = await withTimeout(
-              Promise.resolve(testFn(iterationAgent)),
-              timeoutMs
+            iterationAgent = wrapAgentWithAbortSignal(
+              agent.withOptions({}),
+              abortController.signal
             );
-
-            // Get metrics from this iteration's prompt history
+            const hardTimeoutPromise = new Promise<never>((_, reject) => {
+              timeoutId = setTimeout(() => {
+                timeoutTriggered = true;
+                abortController.abort(timeoutError);
+                hardTimeoutId = setTimeout(
+                  () => reject(timeoutError),
+                  ITERATION_ABORT_GRACE_MS
+                );
+              }, timeoutMs);
+            });
+            const passed = await Promise.race([
+              Promise.resolve().then(() => testFn(iterationAgent!)),
+              hardTimeoutPromise,
+            ]);
             const promptResults = iterationAgent.getPromptHistory();
-            const latencies = promptResults.map((r) => r.getLatency());
-            const tokens = {
-              total: promptResults.reduce((sum, r) => sum + r.totalTokens(), 0),
-              input: promptResults.reduce((sum, r) => sum + r.inputTokens(), 0),
-              output: promptResults.reduce(
-                (sum, r) => sum + r.outputTokens(),
-                0
-              ),
-            };
+            const promptMetrics = collectPromptMetrics(promptResults);
+            // Per-iteration host snapshot: for HostRuntime this captures
+            // the live Host state at iteration end, so the metadata
+            // stamp reflects what THIS iteration ran with — not the
+            // global state at upload time, which can drift if the user
+            // mutates the bound Host between iterations.
+            const iterationHostSnapshot = iterationAgent.getHostSnapshot?.();
 
             return {
               passed,
-              latencies:
-                latencies.length > 0
-                  ? latencies
-                  : [{ e2eMs: 0, llmMs: 0, mcpMs: 0 }],
-              tokens,
+              ...promptMetrics,
+              ...(timeoutTriggered && !passed
+                ? { error: timeoutError.message }
+                : {}),
               retryCount: attempt,
-              prompts: promptResults,
+              hostSnapshot: iterationHostSnapshot,
             };
           } catch (error) {
             lastError = error instanceof Error ? error.message : String(error);
@@ -220,15 +335,27 @@ export class EvalTest {
             if (attempt < retries) {
               await sleep(100 * Math.pow(2, attempt));
             }
+          } finally {
+            if (timeoutId) {
+              clearTimeout(timeoutId);
+            }
+            if (hardTimeoutId) {
+              clearTimeout(hardTimeoutId);
+            }
           }
         }
 
+        const promptMetrics = collectPromptMetrics(
+          iterationAgent?.getPromptHistory() ?? []
+        );
+        const iterationHostSnapshot = iterationAgent?.getHostSnapshot?.();
+
         return {
           passed: false,
-          latencies: [{ e2eMs: 0, llmMs: 0, mcpMs: 0 }],
-          tokens: { total: 0, input: 0, output: 0 },
+          ...promptMetrics,
           error: lastError,
           retryCount: retries,
+          hostSnapshot: iterationHostSnapshot,
         };
       } finally {
         semaphore.release();
@@ -252,7 +379,79 @@ export class EvalTest {
       options.onFailure(this.getFailureReport());
     }
 
+    await this.autoSaveRunIfConfigured(runResult, options, agent);
+
     return runResult;
+  }
+
+  private async autoSaveRunIfConfigured(
+    runResult: EvalRunResult,
+    options: EvalTestRunOptions,
+    executor: HostExecutor
+  ): Promise<void> {
+    const agent = executor;
+    if (options.__suppressMcpjamAutoSave) {
+      return;
+    }
+
+    const config = options.mcpjam;
+    if (config?.enabled === false) {
+      return;
+    }
+
+    const apiKey = config?.apiKey ?? process.env.MCPJAM_API_KEY;
+    if (!apiKey) {
+      return;
+    }
+
+    const hostSnapshot = executor.getHostSnapshot?.();
+    const hostExtras = hostSnapshot
+      ? buildHostSnapshotMetadata(
+          hostSnapshot as unknown as Record<string, unknown>,
+        )
+      : undefined;
+    const results = this.buildEvalResultInputs(
+      runResult.iterationDetails,
+      config,
+      hostExtras,
+    );
+    if (results.length === 0) {
+      return;
+    }
+
+    await reportEvalResultsSafely({
+      suiteName: config?.suiteName ?? `EvalTest: ${this.getName()}`,
+      suiteDescription: config?.suiteDescription,
+      serverNames: config?.serverNames,
+      serverReplayConfigs: resolveServerReplayConfigs({
+        serverReplayConfigs: config?.serverReplayConfigs,
+        serverNames: config?.serverNames,
+        agent,
+      }),
+      notes: config?.notes,
+      passCriteria: config?.passCriteria,
+      externalRunId: config?.externalRunId,
+      framework: config?.framework,
+      ci: config?.ci,
+      apiKey,
+      baseUrl: config?.baseUrl,
+      strict: config?.strict,
+      results,
+    });
+  }
+
+  private buildEvalResultInputs(
+    iterations: IterationResult[],
+    reporting?: MCPJamReportingConfig,
+    hostExtras?: Record<string, string | number | boolean>,
+  ): EvalResultInput[] {
+    return iterationsToEvalResultInputs(
+      this.getName(),
+      iterations,
+      this.config.expectedToolCalls,
+      reporting?.failOnToolError,
+      hostExtras,
+    );
   }
 
   private aggregateResults(iterations: IterationResult[]): EvalRunResult {

@@ -1,9 +1,9 @@
 import { Plus, ShieldX, Sparkles, X } from "lucide-react";
-import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import { Textarea } from "@/components/ui/textarea";
+import { Badge } from "@mcpjam/design-system/badge";
+import { Button } from "@mcpjam/design-system/button";
+import { Input } from "@mcpjam/design-system/input";
+import { Label } from "@mcpjam/design-system/label";
+import { Textarea } from "@mcpjam/design-system/textarea";
 import { ExpectedToolsEditor } from "../expected-tools-editor";
 import type {
   AvailableTool,
@@ -75,6 +75,16 @@ export function TestsStep({
         )}
       </div>
 
+      {template.promptTurns && template.promptTurns.length > 1 ? (
+        <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+          <Badge variant="outline">{template.promptTurns.length} turns</Badge>
+          <span>
+            Additional follow-up turns are preserved and will be available in
+            the test case editor after creation.
+          </span>
+        </div>
+      ) : null}
+
       <div className="space-y-2">
         <Label className="text-xs uppercase text-muted-foreground">Query</Label>
         <Textarea
@@ -121,13 +131,13 @@ export function TestsStep({
   const renderNegativeTestCard = (template: TestTemplate, index: number) => (
     <div
       key={index}
-      className="space-y-3 rounded-lg border border-orange-500/50 bg-orange-50/5 p-4"
+      className="space-y-3 rounded-lg border border-info/50 bg-info/50 p-4"
     >
       <div className="flex items-start justify-between gap-3">
         <div className="flex items-center gap-2">
           <Badge
             variant="outline"
-            className="bg-orange-500/10 text-orange-600 border-orange-500/30"
+            className="bg-info/50 text-foreground border-info/50"
           >
             <ShieldX className="h-3 w-3 mr-1" />
             Negative Test
@@ -232,7 +242,7 @@ export function TestsStep({
           variant="outline"
           onClick={onAddNegativeTestTemplate}
           aria-label="Add negative test case"
-          className="flex-1 border-orange-500/30 text-orange-600 hover:bg-orange-50/10"
+          className="flex-1 border-info/50 text-info hover:bg-info/50 hover:text-foreground"
         >
           <ShieldX className="h-4 w-4 mr-2" />
           Add negative test
@@ -297,7 +307,7 @@ export function TestsStep({
               variant="outline"
               onClick={onGenerateNegativeTests}
               disabled={isAnyGenerating}
-              className="border-orange-500/30 text-orange-600 hover:bg-orange-50/10"
+              className="border-info/50 text-info hover:bg-info/50 hover:text-foreground"
             >
               {isGeneratingNegativeTests
                 ? "Generating..."

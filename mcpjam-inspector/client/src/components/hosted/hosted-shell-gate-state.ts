@@ -1,40 +1,49 @@
 import type { HostedShellGateState } from "./HostedShellGate";
+import { isAllowedEmployeeEmail } from "@/lib/config";
 
 interface ResolveHostedShellGateStateOptions {
   hostedMode: boolean;
+  nonProdLockdown: boolean;
   isConvexAuthLoading: boolean;
   isConvexAuthenticated: boolean;
-  isAuthProviderLoading: boolean;
-  hasAuthUser: boolean;
-  isLoadingRemoteWorkspaces: boolean;
+  isWorkOsLoading: boolean;
+  hasWorkOsUser: boolean;
+  workOsUserEmail?: string | null;
 }
 
 export function resolveHostedShellGateState({
   hostedMode,
+  nonProdLockdown,
   isConvexAuthLoading,
   isConvexAuthenticated,
-  isAuthProviderLoading,
-  hasAuthUser,
-  isLoadingRemoteWorkspaces,
+  isWorkOsLoading,
+  hasWorkOsUser,
+  workOsUserEmail,
 }: ResolveHostedShellGateStateOptions): HostedShellGateState {
   if (!hostedMode) {
     return "ready";
   }
 
-  // Only treat as loading while a provider is still resolving. Do not keep
-  // spinning when Convex has settled on "not authenticated" while the JWT
-  // layer still shows a user — that is a terminal mismatch (e.g. token churn
-  // or re-login with a new token), not "still checking".
-  if (isAuthProviderLoading || isConvexAuthLoading) {
+  const isAuthSettling =
+    isWorkOsLoading ||
+    isConvexAuthLoading ||
+    (hasWorkOsUser && !isConvexAuthenticated);
+  if (isAuthSettling) {
     return "auth-loading";
   }
 
-  if (!hasAuthUser || !isConvexAuthenticated) {
-    return "logged-out";
+  if (nonProdLockdown) {
+    if (!hasWorkOsUser || !isConvexAuthenticated) {
+      return "logged-out";
+    }
+
+    if (!isAllowedEmployeeEmail(workOsUserEmail)) {
+      return "restricted";
+    }
   }
 
-  if (isLoadingRemoteWorkspaces) {
-    return "workspace-loading";
+  if (!hasWorkOsUser && !isConvexAuthenticated) {
+    return "ready";
   }
 
   return "ready";

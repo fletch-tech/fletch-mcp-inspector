@@ -1,10 +1,10 @@
 import { ShieldX } from "lucide-react";
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import { Textarea } from "@/components/ui/textarea";
-import { Badge } from "@/components/ui/badge";
-import { Separator } from "@/components/ui/separator";
+import { Button } from "@mcpjam/design-system/button";
+import { Input } from "@mcpjam/design-system/input";
+import { Label } from "@mcpjam/design-system/label";
+import { Textarea } from "@mcpjam/design-system/textarea";
+import { Badge } from "@mcpjam/design-system/badge";
+import { Separator } from "@mcpjam/design-system/separator";
 import { PassCriteriaSelector } from "../pass-criteria-selector";
 import { cn } from "@/lib/utils";
 import type { ModelDefinition } from "@/shared/types";
@@ -153,7 +153,7 @@ export function ReviewStep({
                   className={cn(
                     "rounded-md border p-3",
                     template.isNegativeTest
-                      ? "bg-orange-50/5 border-orange-500/30"
+                      ? "bg-info/50 border-info/50"
                       : "bg-muted/30",
                   )}
                 >
@@ -161,7 +161,7 @@ export function ReviewStep({
                     {template.isNegativeTest && (
                       <Badge
                         variant="outline"
-                        className="bg-orange-500/10 text-orange-600 border-orange-500/30 text-xs"
+                        className="bg-info/50 text-foreground border-info/50 text-xs"
                       >
                         <ShieldX className="h-3 w-3 mr-1" />
                         Negative
@@ -172,7 +172,7 @@ export function ReviewStep({
                     </p>
                   </div>
                   {template.isNegativeTest && template.scenario && (
-                    <p className="mt-1 text-xs text-orange-600/80 italic">
+                    <p className="mt-1 text-xs text-foreground italic">
                       Scenario: {template.scenario}
                     </p>
                   )}
@@ -188,6 +188,10 @@ export function ReviewStep({
                     <span>
                       {template.runs} run{template.runs === 1 ? "" : "s"}
                     </span>
+                    {template.promptTurns &&
+                      template.promptTurns.length > 1 && (
+                        <span>Turns: {template.promptTurns.length}</span>
+                      )}
                     {!template.isNegativeTest &&
                       template.expectedToolCalls.length > 0 && (
                         <span>
@@ -198,7 +202,7 @@ export function ReviewStep({
                         </span>
                       )}
                     {template.isNegativeTest && (
-                      <span className="text-orange-600">
+                      <span className="text-foreground">
                         Expected: No tools triggered
                       </span>
                     )}

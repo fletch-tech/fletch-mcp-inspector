@@ -1,13 +1,13 @@
 import { useMemo } from "react";
-import { useAuth } from "@/lib/auth/jwt-auth-context";
+import { useAuth } from "@workos-inc/authkit-react";
 import { useConvexAuth, useQuery } from "convex/react";
-import { RotateCw } from "lucide-react";
-import { Button } from "@/components/ui/button";
+import { RotateCw, Server } from "lucide-react";
+import { Button } from "@mcpjam/design-system/button";
 import {
   Tooltip,
   TooltipContent,
   TooltipTrigger,
-} from "@/components/ui/tooltip";
+} from "@mcpjam/design-system/tooltip";
 import { aggregateSuite } from "./helpers";
 import type { EvalSuite, EvalCase, EvalIteration } from "./types";
 
@@ -63,9 +63,7 @@ export function SuiteRow({
     );
   }, [suite, suiteDetails]);
 
-  const testCount = Array.isArray(suite.config?.tests)
-    ? suite.config.tests.length
-    : 0;
+  const testCount = suiteDetails?.testCases.length ?? 0;
 
   const serverTags = useMemo(() => {
     if (!Array.isArray(servers)) return [] as string[];
@@ -103,12 +101,14 @@ export function SuiteRow({
     return "bg-destructive/50";
   };
 
-  // Check if all servers are connected
+  // Rerun is allowed when the suite has configured servers. Disconnected
+  // servers are reconnected just-in-time by the handler.
   const suiteServers = Array.isArray(servers) ? servers : [];
+  const hasServersConfigured = suiteServers.length > 0;
   const missingServers = suiteServers.filter(
     (server) => !connectedServerNames.has(server),
   );
-  const canRerun = missingServers.length === 0;
+  const canRerun = hasServersConfigured;
   const isRerunning = rerunningSuiteId === suite._id;
 
   const handleRerunClick = (e: React.MouseEvent) => {
@@ -134,8 +134,20 @@ export function SuiteRow({
               hour12: true,
             })}
           </div>
-          <div className="text-xs text-muted-foreground">
-            {serverTags.length > 0 ? serverTags.join(", ") : "No servers"}
+          <div className="mt-1 flex flex-wrap gap-1">
+            {serverTags.length > 0 ? (
+              serverTags.map((tag) => (
+                <span
+                  key={tag}
+                  className="inline-flex items-center gap-1 rounded-md border border-border/60 bg-muted/60 px-1.5 py-0.5 text-[11px] font-medium text-muted-foreground"
+                >
+                  {!tag.startsWith("+") && <Server className="h-2.5 w-2.5 shrink-0" />}
+                  {tag}
+                </span>
+              ))
+            ) : (
+              <span className="text-xs text-muted-foreground/60">No servers</span>
+            )}
           </div>
         </div>
         <div className="text-sm text-muted-foreground">
@@ -171,8 +183,10 @@ export function SuiteRow({
             </span>
           </TooltipTrigger>
           <TooltipContent>
-            {!canRerun
-              ? `Connect the following servers: ${missingServers.join(", ")}`
+            {!hasServersConfigured
+              ? "No MCP servers are configured for this suite."
+              : missingServers.length > 0
+                ? "Connect and run."
               : "Run all tests"}
           </TooltipContent>
         </Tooltip>

@@ -1,8 +1,11 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen } from "@testing-library/react";
+import type { ReactElement } from "react";
 import { MessageView } from "../thread/message-view";
 import type { UIMessage } from "@ai-sdk/react";
 import type { ModelDefinition } from "@/shared/types";
+import { ChatboxHostStyleProvider } from "@/contexts/chatbox-client-style-context";
+import { PreferencesStoreProvider } from "@/stores/preferences/preferences-provider";
 
 // Mock PartSwitch
 vi.mock("../thread/part-switch", () => ({
@@ -23,16 +26,9 @@ vi.mock("../thread/user-message-bubble", () => ({
 // Mock thread-helpers
 vi.mock("../thread/thread-helpers", () => ({
   groupAssistantPartsIntoSteps: (parts: any[]) => [parts],
-}));
-
-// Mock preferences store
-vi.mock("@/stores/preferences/preferences-provider", () => ({
-  usePreferencesStore: () => "light",
-}));
-
-// Mock chat-helpers
-vi.mock("../shared/chat-helpers", () => ({
-  getProviderLogoFromModel: () => null,
+  isHiddenInternalMessage: (message: { id?: string }) =>
+    message.id?.startsWith("widget-state-") === true ||
+    message.id?.startsWith("model-context-") === true,
 }));
 
 describe("MessageView", () => {
@@ -71,6 +67,13 @@ describe("MessageView", () => {
     vi.clearAllMocks();
   });
 
+  const renderMessageView = (ui: ReactElement) =>
+    render(
+      <PreferencesStoreProvider themeMode="light" themePreset="default">
+        {ui}
+      </PreferencesStoreProvider>,
+    );
+
   describe("user messages", () => {
     it("renders user message in bubble", () => {
       const message = createMessage({
@@ -78,7 +81,7 @@ describe("MessageView", () => {
         parts: [{ type: "text", text: "Hello world" }],
       });
 
-      render(<MessageView {...defaultProps} message={message} />);
+      renderMessageView(<MessageView {...defaultProps} message={message} />);
 
       expect(screen.getByTestId("user-message-bubble")).toBeInTheDocument();
     });
@@ -89,7 +92,7 @@ describe("MessageView", () => {
         parts: [{ type: "text", text: "Hello" }],
       });
 
-      render(<MessageView {...defaultProps} message={message} />);
+      renderMessageView(<MessageView {...defaultProps} message={message} />);
 
       expect(screen.getByTestId("part-text")).toBeInTheDocument();
       expect(screen.getByTestId("part-text")).toHaveAttribute(
@@ -107,10 +110,69 @@ describe("MessageView", () => {
         ],
       });
 
-      render(<MessageView {...defaultProps} message={message} />);
+      renderMessageView(<MessageView {...defaultProps} message={message} />);
 
       const textParts = screen.getAllByTestId("part-text");
       expect(textParts).toHaveLength(2);
+    });
+
+    it("renders renderUserMessageActions slot below the bubble when provided", () => {
+      const message = createMessage({
+        id: "msg-row-test",
+        role: "user",
+        parts: [{ type: "text", text: "Save me" }],
+      });
+      const renderActions = vi.fn(() => (
+        <button data-testid="save-as-test-case-stub">save</button>
+      ));
+
+      renderMessageView(
+        <MessageView
+          {...defaultProps}
+          message={message}
+          renderUserMessageActions={renderActions}
+        />,
+      );
+
+      expect(renderActions).toHaveBeenCalledTimes(1);
+      expect(renderActions).toHaveBeenCalledWith(
+        expect.objectContaining({ id: "msg-row-test" }),
+      );
+      expect(
+        screen.getByTestId("save-as-test-case-stub"),
+      ).toBeInTheDocument();
+    });
+
+    it("does not render the actions slot when no renderer is provided", () => {
+      const message = createMessage({
+        role: "user",
+        parts: [{ type: "text", text: "no actions" }],
+      });
+      renderMessageView(<MessageView {...defaultProps} message={message} />);
+      expect(
+        screen.queryByTestId("save-as-test-case-stub"),
+      ).not.toBeInTheDocument();
+    });
+
+    it("does not render the actions slot for assistant messages", () => {
+      const message = createMessage({
+        role: "assistant",
+        parts: [{ type: "text", text: "assistant reply" }],
+      });
+      const renderActions = vi.fn(() => (
+        <button data-testid="save-as-test-case-stub">save</button>
+      ));
+      renderMessageView(
+        <MessageView
+          {...defaultProps}
+          message={message}
+          renderUserMessageActions={renderActions}
+        />,
+      );
+      expect(renderActions).not.toHaveBeenCalled();
+      expect(
+        screen.queryByTestId("save-as-test-case-stub"),
+      ).not.toBeInTheDocument();
     });
   });
 
@@ -121,7 +183,7 @@ describe("MessageView", () => {
         parts: [{ type: "text", text: "Hi there!" }],
       });
 
-      render(<MessageView {...defaultProps} message={message} />);
+      renderMessageView(<MessageView {...defaultProps} message={message} />);
 
       expect(
         screen.queryByTestId("user-message-bubble"),
@@ -135,13 +197,43 @@ describe("MessageView", () => {
         parts: [{ type: "text", text: "Hello" }],
       });
 
-      render(<MessageView {...defaultProps} message={message} />);
+      renderMessageView(<MessageView {...defaultProps} message={message} />);
 
       expect(screen.getByTestId("part-text")).toBeInTheDocument();
       expect(screen.getByTestId("part-text")).toHaveAttribute(
         "data-role",
         "assistant",
       );
+    });
+
+    it("renders a leading assistant avatar outside host-style contexts", () => {
+      const message = createMessage({
+        role: "assistant",
+        parts: [{ type: "text", text: "Hello" }],
+      });
+
+      renderMessageView(<MessageView {...defaultProps} message={message} />);
+
+      expect(screen.getByRole("img")).toBeInTheDocument();
+      expect(screen.getByLabelText("GPT-4 assistant")).toBeInTheDocument();
+    });
+
+    it("hides the leading assistant avatar in chatbox host-style contexts", () => {
+      const message = createMessage({
+        role: "assistant",
+        parts: [{ type: "text", text: "Hello" }],
+      });
+
+      renderMessageView(
+        <ChatboxHostStyleProvider value="claude">
+          <MessageView {...defaultProps} message={message} />
+        </ChatboxHostStyleProvider>,
+      );
+
+      expect(screen.queryByRole("img")).not.toBeInTheDocument();
+      expect(
+        screen.queryByLabelText("GPT-4 assistant"),
+      ).not.toBeInTheDocument();
     });
   });
 
@@ -153,7 +245,7 @@ describe("MessageView", () => {
         parts: [{ type: "text", text: "Widget state" }],
       });
 
-      const { container } = render(
+      const { container } = renderMessageView(
         <MessageView {...defaultProps} message={message} />,
       );
 
@@ -167,7 +259,7 @@ describe("MessageView", () => {
         parts: [{ type: "text", text: "Model context" }],
       });
 
-      const { container } = render(
+      const { container } = renderMessageView(
         <MessageView {...defaultProps} message={message} />,
       );
 
@@ -180,7 +272,7 @@ describe("MessageView", () => {
         parts: [{ type: "text", text: "System message" }],
       });
 
-      const { container } = render(
+      const { container } = renderMessageView(
         <MessageView {...defaultProps} message={message} />,
       );
 
@@ -195,7 +287,7 @@ describe("MessageView", () => {
         parts: [{ type: "text", text: "Hello" }],
       });
 
-      render(<MessageView {...defaultProps} message={message} />);
+      renderMessageView(<MessageView {...defaultProps} message={message} />);
 
       expect(screen.getByTestId("part-text")).toHaveTextContent("Hello");
     });
@@ -206,7 +298,7 @@ describe("MessageView", () => {
         parts: [],
       });
 
-      render(<MessageView {...defaultProps} message={message} />);
+      renderMessageView(<MessageView {...defaultProps} message={message} />);
 
       expect(screen.getByTestId("user-message-bubble")).toBeInTheDocument();
     });
@@ -217,7 +309,7 @@ describe("MessageView", () => {
         parts: undefined,
       });
 
-      render(<MessageView {...defaultProps} message={message} />);
+      renderMessageView(<MessageView {...defaultProps} message={message} />);
 
       expect(screen.getByTestId("user-message-bubble")).toBeInTheDocument();
     });
@@ -231,7 +323,7 @@ describe("MessageView", () => {
         parts: [{ type: "text", text: "Hello" }],
       });
 
-      render(
+      renderMessageView(
         <MessageView
           {...defaultProps}
           message={message}
@@ -249,7 +341,7 @@ describe("MessageView", () => {
         parts: [{ type: "text", text: "Hello" }],
       });
 
-      render(
+      renderMessageView(
         <MessageView
           {...defaultProps}
           message={message}
@@ -268,7 +360,7 @@ describe("MessageView", () => {
         parts: [{ type: "text", text: "Hello" }],
       });
 
-      render(
+      renderMessageView(
         <MessageView
           {...defaultProps}
           message={message}

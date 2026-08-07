@@ -1,0 +1,280 @@
+/**
+ * `OfficialSdkClientAdapter` — passthrough wrapper around upstream
+ * `@modelcontextprotocol/client@2.0.0-alpha.2` `Client`. Used when the
+ * resolved `mcpProtocolVersion` is absent or stateful (per
+ * `isStatelessProtocolVersion`). Behavior is byte-identical to direct
+ * upstream usage; this wrapper exists only so `MCPClientManager` can
+ * type its client state as `ManagedMcpClient` and the
+ * `StatelessMcpHttpPreviewClient` can slot in via the same factory.
+ *
+ * **No translation, no defaults.** Every method forwards arguments
+ * verbatim — translating would silently change behavior on edge cases
+ * (e.g. progress handler currying, zod schema `.passthrough()`,
+ * `RequestOptions.maxTotalTimeout` reset semantics).
+ *
+ * `onerror` / `onclose` are forwarded through getters/setters so the
+ * manager's existing `client.onclose = () => ...` pattern keeps working
+ * without ever holding a reference to the wrapper instead of the
+ * underlying Client.
+ */
+
+import type {
+  Client,
+  Request,
+  RequestOptions,
+  StandardSchemaV1,
+} from "@modelcontextprotocol/client";
+import type {
+  ManagedMcpClient,
+  ManagedMcpClientConnectOptions,
+  ManagedMcpClientNotificationHandler,
+  ManagedMcpClientNotificationMethod,
+  ManagedMcpClientRequestHandler,
+  ManagedMcpClientRequestMethod,
+} from "./managed-mcp-client.js";
+import { TasksExtNotificationMethod } from "./tasks-ext.js";
+
+/**
+ * Notification methods MCPJam registers that live outside both spec codecs.
+ *
+ * Upstream 2.0.0 tightened the two-argument `setNotificationHandler(method,
+ * handler)` overload to `isSpecNotificationMethod(method)` and throws a
+ * `TypeError` otherwise, so an extension method must go through the
+ * three-argument schema form. Only the tasks extension's `notifications/tasks`
+ * (SEP-2663) qualifies today: the legacy `notifications/tasks/status` is
+ * 2025-11-25 spec and stays on the two-argument path.
+ */
+const EXTENSION_NOTIFICATION_METHODS: ReadonlySet<string> = new Set([
+  TasksExtNotificationMethod,
+]);
+
+function isExtensionNotificationMethod(method: string): boolean {
+  return EXTENSION_NOTIFICATION_METHODS.has(method);
+}
+
+/**
+ * Params schema for the three-argument form above. Upstream has no wire schema
+ * for an extension payload — validating `notifications/tasks` is MCPJam's job
+ * (`tasks-ext-guards.ts`, which the coordinator and manager already run on
+ * delivery) — so this only satisfies the overload and forwards params verbatim.
+ * Anything narrower would drop extension members before our own guards see them.
+ */
+const PassthroughNotificationParamsSchema: StandardSchemaV1<
+  Record<string, unknown>,
+  Record<string, unknown>
+> = {
+  "~standard": {
+    version: 1,
+    vendor: "mcpjam",
+    validate: (value: unknown) => ({ value: value as Record<string, unknown> }),
+  },
+};
+
+export class OfficialSdkClientAdapter implements ManagedMcpClient {
+  readonly inner: Client;
+
+  constructor(client: Client) {
+    this.inner = client;
+  }
+
+  // ---- Lifecycle ----
+  connect(
+    transport: Parameters<Client["connect"]>[0],
+    options?: ManagedMcpClientConnectOptions,
+  ): Promise<void> {
+    // Upstream `Client.connect` accepts `RequestOptions`. Our
+    // `ManagedMcpClientConnectOptions` is a strict subset; widen at the
+    // boundary rather than re-shape the manager call site.
+    return this.inner.connect(transport, options as never);
+  }
+  close(): Promise<void> {
+    return this.inner.close();
+  }
+  get onerror(): ((error: Error) => void) | undefined {
+    return this.inner.onerror;
+  }
+  set onerror(handler: ((error: Error) => void) | undefined) {
+    this.inner.onerror = handler as never;
+  }
+  get onclose(): (() => void) | undefined {
+    return this.inner.onclose;
+  }
+  set onclose(handler: (() => void) | undefined) {
+    this.inner.onclose = handler as never;
+  }
+
+  // ---- Capability / identity getters ----
+  getServerCapabilities() {
+    return this.inner.getServerCapabilities();
+  }
+  getServerVersion() {
+    return this.inner.getServerVersion();
+  }
+  getInstructions() {
+    return this.inner.getInstructions();
+  }
+  getProtocolEra() {
+    // Upstream `Client.getProtocolEra()` returns the negotiated era once
+    // `initialize` completes (`undefined` before). Pure pass-through.
+    return this.inner.getProtocolEra();
+  }
+  getNegotiatedProtocolVersion() {
+    // Upstream `Client.getNegotiatedProtocolVersion()` returns the negotiated
+    // wire literal once `initialize` completes. Pure pass-through.
+    return this.inner.getNegotiatedProtocolVersion();
+  }
+
+  // ---- RPC ----
+  listTools(
+    params?: Parameters<Client["listTools"]>[0],
+    options?: Parameters<Client["listTools"]>[1],
+  ) {
+    return this.inner.listTools(params, options) as ReturnType<
+      ManagedMcpClient["listTools"]
+    >;
+  }
+  callTool(
+    params: Parameters<Client["callTool"]>[0],
+    options?: Parameters<Client["callTool"]>[1],
+  ) {
+    return this.inner.callTool(params, options) as ReturnType<
+      ManagedMcpClient["callTool"]
+    >;
+  }
+  request<T = unknown>(req: Request, options?: RequestOptions): Promise<T> {
+    // upstream `Client.request` is method-dispatched and typed against
+    // RequestTypeMap; beta.4 also overloaded it with an explicit-result-schema
+    // form. We're a generic boundary — the caller has narrowed to a method
+    // literal it understands, so cast to the pass-through form.
+    return this.inner.request(req as never, options as never) as Promise<T>;
+  }
+  requestWithSchema<TSchema extends StandardSchemaV1>(
+    req: Request,
+    resultSchema: TSchema,
+    options?: RequestOptions,
+  ): Promise<StandardSchemaV1.InferOutput<TSchema>> {
+    // Upstream `Protocol.request`'s explicit-result-schema overload
+    // (`request(request, resultSchema, options)`). Pure pass-through: the
+    // schema validates a complete result and lets a non-complete
+    // `input_required` result surface untouched.
+    return this.inner.request(
+      req as never,
+      resultSchema as never,
+      options as never,
+    ) as Promise<StandardSchemaV1.InferOutput<TSchema>>;
+  }
+  listResources(
+    params?: Parameters<Client["listResources"]>[0],
+    options?: Parameters<Client["listResources"]>[1],
+  ) {
+    return this.inner.listResources(params, options) as ReturnType<
+      ManagedMcpClient["listResources"]
+    >;
+  }
+  readResource(
+    params: Parameters<Client["readResource"]>[0],
+    options?: Parameters<Client["readResource"]>[1],
+  ) {
+    return this.inner.readResource(params, options) as ReturnType<
+      ManagedMcpClient["readResource"]
+    >;
+  }
+  listResourceTemplates(
+    params?: Parameters<Client["listResourceTemplates"]>[0],
+    options?: Parameters<Client["listResourceTemplates"]>[1],
+  ) {
+    return this.inner.listResourceTemplates(params, options) as ReturnType<
+      ManagedMcpClient["listResourceTemplates"]
+    >;
+  }
+  listPrompts(
+    params?: Parameters<Client["listPrompts"]>[0],
+    options?: Parameters<Client["listPrompts"]>[1],
+  ) {
+    return this.inner.listPrompts(params, options) as ReturnType<
+      ManagedMcpClient["listPrompts"]
+    >;
+  }
+  getPrompt(
+    params: Parameters<Client["getPrompt"]>[0],
+    options?: Parameters<Client["getPrompt"]>[1],
+  ) {
+    return this.inner.getPrompt(params, options) as ReturnType<
+      ManagedMcpClient["getPrompt"]
+    >;
+  }
+  complete(
+    params: Parameters<Client["complete"]>[0],
+    options?: Parameters<Client["complete"]>[1],
+  ) {
+    return this.inner.complete(params, options) as ReturnType<
+      ManagedMcpClient["complete"]
+    >;
+  }
+  ping(options?: Parameters<Client["ping"]>[0]) {
+    return this.inner.ping(options) as ReturnType<ManagedMcpClient["ping"]>;
+  }
+  discover(options?: Parameters<Client["discover"]>[0]) {
+    return this.inner.discover(options);
+  }
+  subscribeResource(
+    params: Parameters<Client["subscribeResource"]>[0],
+    options?: Parameters<Client["subscribeResource"]>[1],
+  ) {
+    return this.inner.subscribeResource(params, options) as ReturnType<
+      ManagedMcpClient["subscribeResource"]
+    >;
+  }
+  unsubscribeResource(
+    params: Parameters<Client["unsubscribeResource"]>[0],
+    options?: Parameters<Client["unsubscribeResource"]>[1],
+  ) {
+    return this.inner.unsubscribeResource(params, options) as ReturnType<
+      ManagedMcpClient["unsubscribeResource"]
+    >;
+  }
+  listen(
+    filter: Parameters<Client["listen"]>[0],
+    options?: Parameters<Client["listen"]>[1],
+  ) {
+    return this.inner.listen(filter, options);
+  }
+  async setLoggingLevel(
+    level: Parameters<Client["setLoggingLevel"]>[0],
+    options?: Parameters<Client["setLoggingLevel"]>[1],
+  ): Promise<void> {
+    // Upstream returns `EmptyResult`; manager doesn't use it. Discard so
+    // adapter signatures stay aligned with the void interface contract.
+    await this.inner.setLoggingLevel(level, options);
+  }
+
+  // ---- Handlers ----
+  setNotificationHandler(
+    method: ManagedMcpClientNotificationMethod,
+    handler: ManagedMcpClientNotificationHandler,
+  ): void {
+    if (isExtensionNotificationMethod(method)) {
+      // Three-argument form: the handler is called with the validated params,
+      // so drop them and forward the raw notification the manager expects.
+      this.inner.setNotificationHandler(
+        method as never,
+        { params: PassthroughNotificationParamsSchema } as never,
+        ((_params: unknown, notification: unknown) =>
+          handler(notification as never)) as never,
+      );
+      return;
+    }
+    // beta.4 overloaded this (typed `NotificationMethod` vs Standard-Schema).
+    // The manager keys by method string; cast to the pass-through form.
+    this.inner.setNotificationHandler(method as never, handler as never);
+  }
+  setRequestHandler(
+    method: ManagedMcpClientRequestMethod,
+    handler: ManagedMcpClientRequestHandler,
+  ): void {
+    this.inner.setRequestHandler(method as never, handler as never);
+  }
+  removeRequestHandler(method: ManagedMcpClientRequestMethod): void {
+    this.inner.removeRequestHandler(method as never);
+  }
+}

@@ -15,8 +15,13 @@ node_modules/
 # testing
 /coverage
 
+# playwright
+playwright-report/
+test-results/
+.playwright/
 
-# production  
+
+# production
 /build
 /dist
 cli/build/
@@ -49,8 +54,6 @@ yarn-error.log*
 # env files (can opt-in for committing if needed)
 .env
 .env.development
-.env.production
-.env.local
 client/.env
 client/.env.*
 
@@ -65,8 +68,8 @@ next-env.d.ts
 # vite
 .vite/
 
-# convex: ignore only generated output; track schema and functions
-convex/_generated/
+# convex (generated client code)
+convex/
 
 # Sentry Config File
 .env.sentry-build-plugin
@@ -77,3 +80,8 @@ sdk/node_modules/
 sdk/mcp-client-manager/node_modules/
 sdk/mcp-client-manager/dist/
 .idea/
+
+.env.local
+
+# local-only dev artifacts
+.local/

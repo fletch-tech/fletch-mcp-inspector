@@ -1,9 +1,10 @@
-import type { HttpServerConfig, MCPServerConfig } from "@mcpjam/sdk";
+import type { HttpServerConfig, MCPServerConfig } from "@mcpjam/sdk/browser";
 import type { ServerFormData } from "@/shared/types.js";
 
 export function toMCPConfig(formData: ServerFormData): MCPServerConfig {
   const baseConfig = {
     timeout: formData.requestTimeout,
+    clientCapabilities: formData.clientCapabilities,
   };
 
   if (formData.type === "stdio") {
@@ -18,7 +19,19 @@ export function toMCPConfig(formData: ServerFormData): MCPServerConfig {
   const httpConfig: HttpServerConfig = {
     ...baseConfig,
     url: formData.url!,
-    requestInit: { headers: formData.headers || {} },
+    ...(formData.headers
+      ? {
+          requestInit: { headers: formData.headers },
+        }
+      : {}),
+    // A 2026-07-28 OAuth mode implies the sessionless 2026 wire era (OAuth and
+    // transport ship together). Stamp it so the first connect/probe — which
+    // runs before the new server lands in app state — pins the wire era rather
+    // than falling back to the 2025 initialize handshake. An explicit
+    // per-server wire override still wins in the connection-defaults resolver.
+    ...(formData.oauthProtocolMode === "2026-07-28"
+      ? { mcpProtocolVersion: "2026-07-28" as const }
+      : {}),
   };
 
   return httpConfig;

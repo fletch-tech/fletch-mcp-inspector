@@ -7,14 +7,29 @@ import {
   fetchOAuthMetadata,
   OAuthProxyError,
 } from "../../utils/oauth-proxy.js";
-import {
-  assertBearerToken,
-  ErrorCode,
-  WebRouteError,
-  mapRuntimeError,
-} from "./errors.js";
+import { ErrorCode, WebRouteError, mapRuntimeError } from "./errors.js";
+import { bearerAuthMiddleware } from "../../middleware/bearer-auth.js";
+import { guestRateLimitMiddleware } from "../../middleware/guest-rate-limit.js";
+import { getRequestLogger } from "../../utils/request-logger.js";
+import { classifyError } from "../../utils/error-classify.js";
 
 const oauthWeb = new Hono();
+const OAUTH_UPSTREAM_URL_HEADER = "X-MCPJam-OAuth-Upstream-URL";
+
+function safeHostname(url: string | undefined): string {
+  if (!url) return "unknown";
+  try {
+    return new URL(url).hostname || url;
+  } catch {
+    return url;
+  }
+}
+
+// Require some form of bearer token (guest or WorkOS) on all OAuth proxy routes
+oauthWeb.use("*", bearerAuthMiddleware);
+
+// Rate limit guest users on OAuth proxy routes
+oauthWeb.use("*", guestRateLimitMiddleware);
 
 function statusToErrorCode(status: number): ErrorCode {
   if (status === 400) return ErrorCode.VALIDATION_ERROR;
@@ -55,18 +70,53 @@ function toRouteError(error: unknown): WebRouteError {
   return mapRuntimeError(error);
 }
 
+function getConvexHttpUrl(): string {
+  const convexUrl = process.env.CONVEX_HTTP_URL;
+  if (!convexUrl) {
+    throw new WebRouteError(
+      500,
+      ErrorCode.INTERNAL_ERROR,
+      "Server missing CONVEX_HTTP_URL configuration",
+    );
+  }
+
+  return convexUrl;
+}
+
+async function proxyConvexOAuthPost(c: Context, path: string) {
+  const convexUrl = getConvexHttpUrl();
+  const authorization = c.req.header("authorization");
+  const payload = await c.req.json();
+  const response = await fetch(`${convexUrl}${path}`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      ...(authorization ? { Authorization: authorization } : {}),
+    },
+    body: JSON.stringify(payload),
+  });
+
+  const bodyText = await response.text();
+  return new Response(bodyText, {
+    status: response.status,
+    headers: {
+      "Content-Type": response.headers.get("content-type") ?? "application/json",
+    },
+  });
+}
+
 /**
  * Proxy OAuth token exchange and client registration requests.
  * POST /api/web/oauth/proxy
  *
- * Mirrors /api/mcp/oauth/proxy but requires bearer JWT authentication.
+ * Mirrors /api/mcp/oauth/proxy with HTTPS-only + private IP blocking.
  * Body: { url: string, method?: string, body?: object, headers?: object }
  */
 oauthWeb.post("/proxy", async (c) => {
+  let proxyUrl: string | undefined;
   try {
-    assertBearerToken(c);
-
     const { url, method, body, headers } = await c.req.json();
+    proxyUrl = url;
     const result = await executeOAuthProxy({
       url,
       method,
@@ -74,8 +124,15 @@ oauthWeb.post("/proxy", async (c) => {
       headers,
       httpsOnly: true,
     });
+    c.header(OAUTH_UPSTREAM_URL_HEADER, result.finalUrl);
     return c.json(result);
   } catch (error) {
+    getRequestLogger(c, "routes.web.oauth").event("mcp.oauth.proxy.failed", {
+      targetUrlHost: safeHostname(proxyUrl),
+      oauthPhase: "proxy",
+      errorCode: classifyError(error),
+      ...(error instanceof OAuthProxyError ? { statusCode: error.status } : {}),
+    });
     return webErrorCompat(c, toRouteError(error));
   }
 });
@@ -84,14 +141,12 @@ oauthWeb.post("/proxy", async (c) => {
  * Proxy OAuth metadata discovery requests.
  * GET /api/web/oauth/metadata?url=https://...
  *
- * Mirrors /api/mcp/oauth/metadata but requires bearer JWT authentication.
+ * Mirrors /api/mcp/oauth/metadata with HTTPS-only + private IP blocking.
  */
 oauthWeb.get("/metadata", async (c) => {
+  const metadataUrl = c.req.query("url");
   try {
-    assertBearerToken(c);
-
-    const url = c.req.query("url");
-    if (!url) {
+    if (!metadataUrl) {
       throw new WebRouteError(
         400,
         ErrorCode.VALIDATION_ERROR,
@@ -99,7 +154,7 @@ oauthWeb.get("/metadata", async (c) => {
       );
     }
 
-    const result = await fetchOAuthMetadata(url, true);
+    const result = await fetchOAuthMetadata(metadataUrl, true);
     if ("status" in result && result.status !== undefined) {
       throw new WebRouteError(
         result.status,
@@ -108,7 +163,45 @@ oauthWeb.get("/metadata", async (c) => {
       );
     }
 
+    c.header(OAUTH_UPSTREAM_URL_HEADER, result.finalUrl);
     return c.json(result.metadata);
+  } catch (error) {
+    getRequestLogger(c, "routes.web.oauth").event("mcp.oauth.proxy.failed", {
+      targetUrlHost: safeHostname(metadataUrl),
+      oauthPhase: "metadata",
+      errorCode: classifyError(error),
+      ...(error instanceof OAuthProxyError ? { statusCode: error.status } : {}),
+    });
+    return webErrorCompat(c, toRouteError(error));
+  }
+});
+
+// Pure pass-through proxies to the matching Convex /web/oauth/* endpoints.
+// Each handler is identical apart from the path, so register them in a loop
+// rather than copy-pasting the try/catch shell four times.
+const CONVEX_OAUTH_PROXY_PATHS = [
+  "session",
+  "tokens",
+  "import-tokens",
+  "client-secret",
+] as const;
+
+for (const path of CONVEX_OAUTH_PROXY_PATHS) {
+  oauthWeb.post(`/${path}`, async (c) => {
+    try {
+      return await proxyConvexOAuthPost(c, `/web/oauth/${path}`);
+    } catch (error) {
+      return webErrorCompat(c, toRouteError(error));
+    }
+  });
+}
+
+// Local-mode token import — see backend `/web/oauth/import-tokens` for shape.
+// The local CLI's `MCPOAuthProvider` uses this to push browser-side
+// PKCE-exchanged tokens into Convex so the resolver can read them.
+oauthWeb.post("/import-tokens", async (c) => {
+  try {
+    return await proxyConvexOAuthPost(c, "/web/oauth/import-tokens");
   } catch (error) {
     return webErrorCompat(c, toRouteError(error));
   }
@@ -118,14 +211,17 @@ oauthWeb.get("/metadata", async (c) => {
  * Debug proxy for OAuth flow visualization (hosted mode).
  * POST /api/web/oauth/debug/proxy
  *
- * Mirrors /api/mcp/oauth/debug/proxy but requires bearer JWT and HTTPS only.
+ * Mirrors /api/mcp/oauth/debug/proxy with HTTPS-only + private IP blocking.
  * Body: { url: string, method?: string, body?: object, headers?: object }
  */
 oauthWeb.post("/debug/proxy", async (c) => {
+  let proxyUrl: string | undefined;
   try {
-    assertBearerToken(c);
-
     const { url, method, body, headers } = await c.req.json();
+    proxyUrl = url;
+    // Note: no `redirect` option here — this route is always httpsOnly, and the
+    // SDK proxy forces `redirect: "manual"` under httpsOnly, so passing one
+    // would be dead code. The mcp route (not httpsOnly) is where it applies.
     const result = await executeDebugOAuthProxy({
       url,
       method,
@@ -135,6 +231,12 @@ oauthWeb.post("/debug/proxy", async (c) => {
     });
     return c.json(result);
   } catch (error) {
+    getRequestLogger(c, "routes.web.oauth").event("mcp.oauth.proxy.failed", {
+      targetUrlHost: safeHostname(proxyUrl),
+      oauthPhase: "proxy",
+      errorCode: classifyError(error),
+      ...(error instanceof OAuthProxyError ? { statusCode: error.status } : {}),
+    });
     return webErrorCompat(c, toRouteError(error));
   }
 });

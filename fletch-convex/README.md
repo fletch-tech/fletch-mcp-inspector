@@ -65,6 +65,20 @@ The backend container must receive the same JWT configuration as your app. Set t
 
 Values must match the app that connects to this Convex deployment (e.g. `mcpjam-inspector/.env.production` or `.env.local`).
 
+### Playground / evals finish with 0 tokens and 0 tool calls
+
+Hosted models go through Convex `POST /stream` (`mcpjam-inspector/convex/stream.ts`). That handler reads provider keys from the **backend container environment** (self-hosted has no separate Convex dashboard env store by default):
+
+| Model prefix | Env var |
+|--------------|---------|
+| `openai/…` | `OPENAI_API_KEY` |
+| `anthropic/…` | `ANTHROPIC_API_KEY` |
+| `google/…` | `GOOGLE_GENERATIVE_AI_API_KEY` |
+| `deepseek/…` | `DEEPSEEK_API_KEY` |
+| `meta-llama/…` | `LLAMA_API_KEY` (or `META_LLAMA_API_KEY`) |
+
+Set the keys your suites use on **both** cloud and site Convex tasks (same as JWT vars), restart, then re-run. Click a failed iteration in the Inspector — the error text is usually `OPENAI_API_KEY is not set on the Convex backend` (or similar).
+
 ### Still getting 1011 after setting JWT env?
 
 **1. Set `CONVEX_CLOUD_ORIGIN` (and `CONVEX_SITE_ORIGIN`) to the public URL**

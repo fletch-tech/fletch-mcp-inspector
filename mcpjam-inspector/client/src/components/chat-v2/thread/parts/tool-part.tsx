@@ -1,49 +1,73 @@
-import { useEffect, useMemo, useRef, useState, type MouseEvent } from "react";
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type KeyboardEvent,
+  type MouseEvent,
+} from "react";
 import {
   Box,
   Check,
   ChevronDown,
   Database,
-  Layers,
   Loader2,
   Maximize2,
   MessageCircle,
+  Pencil,
   PictureInPicture2,
+  Play,
+  RotateCcw,
   Shield,
   ShieldCheck,
   ShieldX,
-  X,
+  Terminal,
 } from "lucide-react";
 import { UITools, ToolUIPart, DynamicToolUIPart } from "ai";
 
-import { usePostHog } from "posthog-js/react";
+import { track } from "@/lib/analytics";
 import { type DisplayMode } from "@/stores/ui-playground-store";
 import { usePreferencesStore } from "@/stores/preferences/preferences-provider";
 import { useWidgetDebugStore } from "@/stores/widget-debug-store";
 import { UIType } from "@/lib/mcp-ui/mcp-apps-utils";
+import { useAppToolAttribution } from "../mcp-apps/app-tools-registry";
 import {
   getToolNameFromType,
   getToolStateMeta,
   type ToolState,
   isDynamicTool,
 } from "../thread-helpers";
-import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
+import { Badge } from "@mcpjam/design-system/badge";
 import {
   Tooltip,
   TooltipContent,
   TooltipTrigger,
-} from "@/components/ui/tooltip";
-import { CspDebugPanel } from "../csp-debug-panel";
+} from "@mcpjam/design-system/tooltip";
+import {
+  ToggleGroup,
+  ToggleGroupItem,
+} from "@mcpjam/design-system/toggle-group";
+import { CspWorkbench } from "../csp-workbench";
 import { JsonEditor } from "@/components/ui/json-editor";
 import { cn } from "@/lib/chat-utils";
+import {
+  getMcpToolResultImageRenderPlacement,
+  type McpToolResultImageRenderingPolicy,
+} from "@/lib/client-config-v2";
+import { filterSafeExternalLinkUrls } from "@/lib/safe-external-url";
+import { TextPart } from "./text-part";
+import { useHostContextStore } from "@/stores/client-context-store";
+import { extractHostDisplayModes } from "@/lib/client-config";
+import { useChatboxHostTheme } from "@/contexts/chatbox-client-style-context";
+import { useMcpToolResultImagePreviews } from "@/components/chat-v2/shared/mcp-tool-result-image-preview";
+import { McpToolResultImagePreviewGrid } from "@/components/chat-v2/shared/mcp-tool-result-image-preview-grid";
 
 type ApprovalVisualState = "pending" | "approved" | "denied";
-const SAVE_VIEW_BUTTON_USED_KEY = "mcpjam-save-view-button-used";
-const SAVE_VIEW_REDIRECTED_KEY = "mcpjam-save-view-redirected";
+type TraceDisplayMode = "markdown" | "json-markdown";
 
 export function ToolPart({
   part,
+  chatSessionId,
   uiType,
   displayMode,
   pipWidgetId,
@@ -57,13 +81,28 @@ export function ToolPart({
   approvalId,
   onApprove,
   onDeny,
-  onSaveView,
-  canSaveView,
-  saveDisabledReason,
-  isSaving,
+  allowInlineEdit,
+  isEditing,
+  onToggleEdit,
+  onInputChange,
+  onOutputChange,
+  onInputValidityChange,
+  inputValue,
+  outputValue,
+  hasEdits,
+  onRevert,
+  onRun,
+  isRunning,
+  canRun,
+  runDisabledReason,
+  editVersion,
   minimalMode = false,
+  serverId,
+  mcpToolResultImageRendering,
+  rawOutput,
 }: {
   part: ToolUIPart<UITools> | DynamicToolUIPart;
+  chatSessionId?: string;
   uiType?: UIType | null;
   displayMode?: DisplayMode;
   pipWidgetId?: string | null;
@@ -78,22 +117,52 @@ export function ToolPart({
   approvalId?: string;
   onApprove?: (id: string) => void;
   onDeny?: (id: string) => void;
-  /** Callback to save this tool execution as a view */
-  onSaveView?: () => void | Promise<void>;
-  /** Whether the save view button should be enabled */
-  canSaveView?: boolean;
-  /** Reason why save is disabled (for tooltip) */
-  saveDisabledReason?: string;
-  /** Whether the view is currently being saved */
-  isSaving?: boolean;
+  /** Whether the inline Edit affordance is available for this card. */
+  allowInlineEdit?: boolean;
+  /** Whether the input/output editors are currently editable. */
+  isEditing?: boolean;
+  /** Toggle edit mode on/off. */
+  onToggleEdit?: () => void;
+  /** Lift edited tool input (valid JSON only) to the parent. */
+  onInputChange?: (value: unknown) => void;
+  /** Lift edited tool output (valid JSON only) to the parent. */
+  onOutputChange?: (value: unknown) => void;
+  /** Report the input editor's parse state (true = valid JSON). */
+  onInputValidityChange?: (valid: boolean) => void;
+  /** Effective input shown in the editor — exactly what the widget receives. */
+  inputValue?: unknown;
+  /** Effective output shown in the editor — exactly what the widget receives. */
+  outputValue?: unknown;
+  /** Whether there are uncommitted edits (enables Revert). */
+  hasEdits?: boolean;
+  /** Discard edits back to the original input/output. */
+  onRevert?: () => void;
+  /** Re-run the tool with the edited input (server round-trip). */
+  onRun?: () => void;
+  /** Whether a Run is in flight. */
+  isRunning?: boolean;
+  /** Whether Run is available (server connected, input valid). */
+  canRun?: boolean;
+  /** Tooltip text explaining why Run is disabled, if it is. */
+  runDisabledReason?: string;
+  /** Bumped by the parent to remount + reseed the editors on a hard reset. */
+  editVersion?: number;
   minimalMode?: boolean;
+  serverId?: string;
+  mcpToolResultImageRendering?: McpToolResultImageRenderingPolicy;
+  rawOutput?: unknown;
 }) {
-  const posthog = usePostHog();
   const hasTrackedSkillLoad = useRef(false);
 
   const label = isDynamicTool(part)
     ? part.toolName
     : getToolNameFromType((part as any).type);
+
+  // SEP-1865 App-Provided Tools: opaque `app_<hash>` aliases are resolved
+  // through the shared app-tool registry/log helper so UI never leaks the
+  // model-facing alias when a human-readable tool name is available.
+  const appToolAttribution = useAppToolAttribution(label, chatSessionId);
+  const displayLabel = appToolAttribution?.rawName ?? label;
 
   const toolCallId = (part as any).toolCallId as string | undefined;
   const state = part.state as ToolState | undefined;
@@ -107,39 +176,91 @@ export function ToolPart({
       state === "output-available"
     ) {
       hasTrackedSkillLoad.current = true;
-      posthog.capture("skill_loaded", {
+      track("skill_loaded", {
+        location: "chat_tool_part",
         skill_name: (part as any).input?.name ?? "unknown",
       });
     }
-  }, [state, label, posthog, toolCallId, part]);
+  }, [state, label, toolCallId, part]);
   const toolState = getToolStateMeta(state);
   const StatusIcon = toolState?.Icon;
   const themeMode = usePreferencesStore((s) => s.themeMode);
+  const chatboxHostTheme = useChatboxHostTheme();
+  const resolvedThemeMode = chatboxHostTheme ?? themeMode;
   const mcpIconClassName =
-    themeMode === "dark" ? "h-3 w-3 filter invert" : "h-3 w-3";
+    resolvedThemeMode === "dark" ? "h-3 w-3 filter invert" : "h-3 w-3";
   const needsApproval = state === "approval-requested" && !!approvalId;
   const [approvalVisualState, setApprovalVisualState] =
     useState<ApprovalVisualState>("pending");
   const isDenied =
     approvalVisualState === "denied" || state === "output-denied";
   const hideDiagnosticsUI = minimalMode;
-  const hideAppControls = isDenied || needsApproval;
+  const hideAppControls = isDenied;
   const [userExpanded, setUserExpanded] = useState(false);
-  const isExpanded = needsApproval || (!hideDiagnosticsUI && userExpanded);
+  const [paramsExpanded, setParamsExpanded] = useState(false);
+  const isExpanded = !hideDiagnosticsUI && userExpanded;
   const [activeDebugTab, setActiveDebugTab] = useState<
-    "data" | "state" | "csp" | "context" | null
+    "data" | "state" | "sandbox" | "context" | null
   >("data");
-  const [hasUsedSaveViewButton, setHasUsedSaveViewButton] = useState(true);
+  const [resultImageMode, setResultImageMode] = useState<"images" | "raw">(
+    "images"
+  );
 
   const inputData = (part as any).input;
   const outputData = (part as any).output;
+  const rawResultData = rawOutput ?? outputData;
+  const resultDisplayData =
+    outputValue !== undefined ? outputValue : rawResultData;
+  const imagePreviewData = rawResultData;
+  const imageRenderPlacement = getMcpToolResultImageRenderPlacement(
+    mcpToolResultImageRendering
+  );
+  const showInlineImagePreview = imageRenderPlacement === "inline";
+  const showPanelImagePreview = imageRenderPlacement === "collapsed";
+  const canRenderToolImages =
+    showInlineImagePreview || (showPanelImagePreview && isExpanded);
+  const resultImageState = useMcpToolResultImagePreviews(
+    canRenderToolImages ? imagePreviewData : undefined,
+    { serverId, renderingPolicy: mcpToolResultImageRendering }
+  );
+  // Editors render the effective values (what the widget sees) when the parent
+  // supplies them; fall back to the raw part data otherwise (non-widget branch).
+  const editInputValue = inputValue !== undefined ? inputValue : inputData;
+  const editOutputValue = resultDisplayData;
+  const editorKeyVersion = editVersion ?? 0;
   const errorText = (part as any).errorText ?? (part as any).error;
+  const traceDisplayText =
+    typeof (part as unknown as { traceDisplayText?: unknown })
+      .traceDisplayText === "string"
+      ? (part as unknown as { traceDisplayText: string }).traceDisplayText
+      : undefined;
+  const traceDisplayMode = (part as { traceDisplayMode?: TraceDisplayMode })
+    .traceDisplayMode;
+  const hasAttachedTraceDisplay = Boolean(
+    traceDisplayText &&
+      (traceDisplayMode === "markdown" || traceDisplayMode === "json-markdown")
+  );
   const hasInput = inputData !== undefined && inputData !== null;
-  const hasOutput = outputData !== undefined && outputData !== null;
+  const paramCount = useMemo(() => {
+    if (!hasInput) return 0;
+    if (Array.isArray(inputData)) return inputData.length;
+    if (typeof inputData === "object") {
+      return Object.keys(inputData as Record<string, unknown>).length;
+    }
+    return 1;
+  }, [hasInput, inputData]);
+  const hasOutput =
+    resultDisplayData !== undefined && resultDisplayData !== null;
   const hasError = state === "output-error" && !!errorText;
+  const showRawResult = hasOutput && !hasAttachedTraceDisplay;
 
   const widgetDebugInfo = useWidgetDebugStore((s) =>
-    toolCallId ? s.widgets.get(toolCallId) : undefined,
+    toolCallId ? s.widgets.get(toolCallId) : undefined
+  );
+  const hostContext = useHostContextStore((s) => s.draftHostContext);
+  const hostAvailableDisplayModes = useMemo(
+    () => extractHostDisplayModes(hostContext),
+    [hostContext]
   );
   const hasWidgetDebug = !!widgetDebugInfo;
   const hasWidgetDebugUI = !hideDiagnosticsUI && hasWidgetDebug;
@@ -149,6 +270,10 @@ export function ToolPart({
     onDisplayModeChange !== undefined &&
     !hideAppControls;
   const showDebugControls = hasWidgetDebugUI && !hideAppControls;
+
+  useEffect(() => {
+    setResultImageMode("images");
+  }, [imagePreviewData]);
 
   const displayModeOptions: {
     mode: DisplayMode;
@@ -162,7 +287,7 @@ export function ToolPart({
 
   const debugOptions = useMemo(() => {
     const options: {
-      tab: "data" | "state" | "csp" | "context";
+      tab: "data" | "state" | "sandbox" | "context";
       icon: typeof Database;
       label: string;
       badge?: number;
@@ -182,9 +307,9 @@ export function ToolPart({
     }
 
     options.push({
-      tab: "csp",
+      tab: "sandbox",
       icon: Shield,
-      label: "CSP",
+      label: "Sandbox",
       badge: widgetDebugInfo?.csp?.violations?.length,
     });
 
@@ -195,7 +320,7 @@ export function ToolPart({
     widgetDebugInfo?.modelContext,
   ]);
 
-  const handleDebugClick = (tab: "data" | "state" | "csp" | "context") => {
+  const handleDebugClick = (tab: "data" | "state" | "sandbox" | "context") => {
     if (activeDebugTab === tab) {
       setActiveDebugTab(null);
       setUserExpanded(false);
@@ -226,43 +351,21 @@ export function ToolPart({
     onDisplayModeChange?.(mode);
   };
 
-  useEffect(() => {
-    if (typeof window === "undefined") return;
-    setHasUsedSaveViewButton(
-      localStorage.getItem(SAVE_VIEW_BUTTON_USED_KEY) === "true",
-    );
-  }, []);
-
-  const handleSaveViewClick = (e: MouseEvent<HTMLButtonElement>) => {
+  // Enter/exit inline edit. Always open the Data tab so the editors are visible.
+  const handleEditClick = (e: MouseEvent<HTMLButtonElement>) => {
     e.stopPropagation();
-    if (!onSaveView || !canSaveView || isSaving) return;
-
-    if (typeof window === "undefined") {
-      void Promise.resolve(onSaveView());
-      return;
-    }
-
-    const shouldRedirectAfterSave =
-      localStorage.getItem(SAVE_VIEW_REDIRECTED_KEY) !== "true";
-
-    if (!hasUsedSaveViewButton) {
-      setHasUsedSaveViewButton(true);
-      localStorage.setItem(SAVE_VIEW_BUTTON_USED_KEY, "true");
-    }
-
-    void Promise.resolve(onSaveView()).then(() => {
-      if (!shouldRedirectAfterSave) return;
-      localStorage.setItem(SAVE_VIEW_REDIRECTED_KEY, "true");
-      window.location.hash = "views";
-    });
+    onToggleEdit?.();
+    setActiveDebugTab("data");
+    setUserExpanded(true);
   };
 
   const renderDisplayModeOptionButtons = () =>
     displayModeOptions.map(({ mode, icon: Icon }) => {
       const isActive = displayMode === mode;
       const isDisabled =
-        appSupportedDisplayModes !== undefined &&
-        !appSupportedDisplayModes.includes(mode);
+        !hostAvailableDisplayModes.includes(mode) ||
+        (appSupportedDisplayModes !== undefined &&
+          !appSupportedDisplayModes.includes(mode));
       const buttonLabel =
         mode === "inline" ? "Inline" : mode === "pip" ? "PiP" : "Fullscreen";
       return (
@@ -281,8 +384,8 @@ export function ToolPart({
                 isDisabled
                   ? "text-muted-foreground/30 cursor-not-allowed"
                   : isActive
-                    ? "bg-background text-foreground shadow-sm cursor-pointer"
-                    : "text-muted-foreground/60 hover:text-muted-foreground hover:bg-background/50 cursor-pointer"
+                  ? "bg-background text-foreground shadow-sm cursor-pointer"
+                  : "text-muted-foreground/60 hover:text-muted-foreground hover:bg-background/50 cursor-pointer"
               }`}
             >
               <Icon className="h-3.5 w-3.5" />
@@ -304,18 +407,18 @@ export function ToolPart({
         tab === "data"
           ? "Data"
           : tab === "state"
-            ? "State"
-            : tab === "csp"
-              ? "CSP"
-              : "Context";
+          ? "State"
+          : tab === "sandbox"
+          ? "Sandbox"
+          : "Context";
       const tooltipLabel =
         tab === "data"
           ? "Data"
           : tab === "state"
-            ? "Widget State"
-            : tab === "csp"
-              ? "CSP"
-              : "Model Context";
+          ? "Widget State"
+          : tab === "sandbox"
+          ? "Sandbox"
+          : "Model Context";
 
       return (
         <Tooltip key={tab}>
@@ -331,8 +434,8 @@ export function ToolPart({
                 activeDebugTab === tab
                   ? "bg-background text-foreground shadow-sm"
                   : badge && badge > 0
-                    ? "text-destructive hover:text-destructive hover:bg-destructive/10"
-                    : "text-muted-foreground/60 hover:text-muted-foreground hover:bg-background/50"
+                  ? "text-destructive hover:text-destructive hover:bg-destructive/10"
+                  : "text-muted-foreground/60 hover:text-muted-foreground hover:bg-background/50"
               }`}
             >
               <Icon className="h-3.5 w-3.5" />
@@ -356,81 +459,463 @@ export function ToolPart({
       );
     });
 
-  const saveViewAriaLabel = isSaving
-    ? "Saving view"
-    : canSaveView
-      ? "Save as View"
-      : saveDisabledReason || "No output to save";
-
-  const renderSaveViewButton = () => (
-    <span className="relative inline-flex items-center">
-      {canSaveView &&
-        !isSaving &&
-        !hasUsedSaveViewButton &&
-        displayMode !== "fullscreen" && (
-          <span className="absolute right-0 bottom-full z-50 mb-2 whitespace-nowrap rounded-xl border border-primary/70 bg-primary px-2.5 py-1 text-[10px] font-semibold normal-case text-primary-foreground shadow-md shadow-primary/30 ring-1 ring-primary/40">
-            <span className="absolute -bottom-1 right-2 z-50 h-2.5 w-2.5 rotate-45 border-b border-r border-primary/70 bg-primary" />
-            <span className="relative z-10">Like how it looks? Save it.</span>
-          </span>
-        )}
+  const renderEditControls = () => (
+    <span className="relative inline-flex items-center gap-1">
       <Tooltip>
         <TooltipTrigger asChild>
           <button
             type="button"
-            aria-label={saveViewAriaLabel}
-            disabled={!canSaveView || isSaving}
-            onClick={handleSaveViewClick}
-            className={`inline-flex items-center gap-1 px-1.5 py-1 rounded transition-colors ${
-              canSaveView && !isSaving
-                ? "border border-border/50 bg-background text-foreground shadow-sm hover:bg-background/80 cursor-pointer"
-                : "border border-border/30 text-muted-foreground/30 cursor-not-allowed"
+            aria-label={isEditing ? "Done editing" : "Edit input and output"}
+            onClick={handleEditClick}
+            className={`inline-flex items-center gap-1 px-1.5 py-1 rounded border transition-colors cursor-pointer ${
+              isEditing
+                ? "border-primary/50 bg-primary/10 text-primary"
+                : "border-border/50 bg-background text-foreground shadow-sm hover:bg-background/80"
             }`}
           >
-            {isSaving ? (
-              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+            {isEditing ? (
+              <Check className="h-3.5 w-3.5" />
             ) : (
-              <Layers className="h-3.5 w-3.5" />
+              <Pencil className="h-3.5 w-3.5" />
             )}
             <span className="text-[9px] leading-none hidden @[33rem]:inline">
-              Save View
+              {isEditing ? "Done" : "Edit"}
             </span>
           </button>
         </TooltipTrigger>
         <TooltipContent>
-          <p className="font-medium">Save View</p>
+          <p className="font-medium">
+            {isEditing ? "Done editing" : "Edit input & output"}
+          </p>
         </TooltipContent>
       </Tooltip>
+
+      {isEditing && (
+        <>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <button
+                type="button"
+                aria-label="Run tool with edited input"
+                disabled={!canRun}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  if (canRun) onRun?.();
+                }}
+                className={`inline-flex items-center gap-1 px-1.5 py-1 rounded border transition-colors ${
+                  canRun
+                    ? "border-border/50 bg-background text-foreground shadow-sm hover:bg-background/80 cursor-pointer"
+                    : "border-border/30 text-muted-foreground/30 cursor-not-allowed"
+                }`}
+              >
+                {isRunning ? (
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                ) : (
+                  <Play className="h-3.5 w-3.5" />
+                )}
+                <span className="text-[9px] leading-none hidden @[33rem]:inline">
+                  Run
+                </span>
+              </button>
+            </TooltipTrigger>
+            <TooltipContent>
+              <p className="font-medium">
+                {canRun
+                  ? "Re-run tool with edited input"
+                  : runDisabledReason ?? "Re-run tool with edited input"}
+              </p>
+            </TooltipContent>
+          </Tooltip>
+
+          {hasEdits && (
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <button
+                  type="button"
+                  aria-label="Revert edits"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onRevert?.();
+                  }}
+                  className="inline-flex items-center gap-1 px-1.5 py-1 rounded border border-border/50 bg-background text-muted-foreground hover:text-foreground hover:bg-background/80 transition-colors cursor-pointer"
+                >
+                  <RotateCcw className="h-3.5 w-3.5" />
+                  <span className="text-[9px] leading-none hidden @[33rem]:inline">
+                    Revert
+                  </span>
+                </button>
+              </TooltipTrigger>
+              <TooltipContent>
+                <p className="font-medium">Revert edits</p>
+              </TooltipContent>
+            </Tooltip>
+          )}
+        </>
+      )}
     </span>
   );
 
+  const toggleExpanded = () => {
+    if (hideDiagnosticsUI) {
+      return;
+    }
+    setUserExpanded((prev) => {
+      const willExpand = !prev;
+      if (willExpand && activeDebugTab === null) {
+        setActiveDebugTab("data");
+      }
+      return willExpand;
+    });
+  };
+
+  const handleHeaderKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
+    if (event.key !== "Enter" && event.key !== " ") return;
+    event.preventDefault();
+    toggleExpanded();
+  };
+
+  const renderToolInput = () =>
+    hasInput ? (
+      <div className="space-y-1">
+        <div className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground/70">
+          Input
+        </div>
+        <div className="rounded-md border border-border/30 bg-muted/20 max-h-[300px] overflow-auto">
+          <JsonEditor
+            key={`tool-input-${editorKeyVersion}`}
+            height="100%"
+            value={editInputValue}
+            className="p-2 text-[11px]"
+            collapsible
+            defaultExpandDepth={2}
+            {...(isEditing && !isRunning && onInputChange
+              ? {
+                  mode: "edit" as const,
+                  onModeChange: () => {},
+                  showModeToggle: false,
+                  onChange: onInputChange,
+                  onValidationError: (error: string | null) =>
+                    onInputValidityChange?.(error === null),
+                }
+              : { viewOnly: true })}
+          />
+        </div>
+      </div>
+    ) : null;
+
+  const renderAttachedTraceDisplay = () =>
+    hasAttachedTraceDisplay && traceDisplayText ? (
+      <div className="space-y-1">
+        <div className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground/70">
+          Result
+        </div>
+        <div
+          data-testid="tool-part-readable-result"
+          className="rounded-md border border-border/30 bg-muted/20 max-h-[300px] overflow-auto px-3 py-2"
+        >
+          <TextPart text={traceDisplayText} role="assistant" />
+        </div>
+      </div>
+    ) : null;
+
+  const renderToolResult = () =>
+    showRawResult ? (
+      <div className="space-y-1">
+        <div className="flex items-center justify-between gap-2">
+          <div className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground/70">
+            Result
+          </div>
+          {showPanelImagePreview &&
+            resultImageState.status === "ready" &&
+            resultImageState.previews.length > 0 && (
+              <ToggleGroup
+                type="single"
+                value={resultImageMode}
+                onValueChange={(value) => {
+                  if (value) setResultImageMode(value as "images" | "raw");
+                }}
+                className="gap-0.5"
+              >
+                <ToggleGroupItem
+                  value="images"
+                  aria-label="Images"
+                  className="h-6 px-2 text-[10px]"
+                >
+                  Images
+                </ToggleGroupItem>
+                <ToggleGroupItem
+                  value="raw"
+                  aria-label="Raw"
+                  className="h-6 px-2 text-[10px]"
+                >
+                  Raw
+                </ToggleGroupItem>
+              </ToggleGroup>
+            )}
+        </div>
+        {showPanelImagePreview &&
+        resultImageState.hasCandidate &&
+        (resultImageState.status === "idle" ||
+          resultImageState.status === "loading") ? (
+          <div className="rounded-md border border-border/30 bg-muted/20 min-h-[120px] flex items-center justify-center">
+            <div className="flex items-center gap-2 text-[11px] text-muted-foreground">
+              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              Resolving images...
+            </div>
+          </div>
+        ) : showPanelImagePreview &&
+          resultImageState.status === "ready" &&
+          resultImageState.previews.length > 0 &&
+          resultImageMode === "images" ? (
+          <div className="rounded-md border border-border/30 bg-muted/20 max-h-[300px] overflow-auto p-2">
+            <McpToolResultImagePreviewGrid
+              previews={resultImageState.previews}
+              className="grid-cols-1"
+              tileClassName="min-h-[120px]"
+              imageClassName="max-h-[260px]"
+            />
+          </div>
+        ) : (
+          <div className="rounded-md border border-border/30 bg-muted/20 max-h-[300px] overflow-auto">
+            <JsonEditor
+              key={`tool-result-${editorKeyVersion}`}
+              height="100%"
+              value={editOutputValue}
+              className="p-2 text-[11px]"
+              collapsible
+              defaultExpandDepth={2}
+              {...(isEditing && !isRunning && onOutputChange
+                ? {
+                    mode: "edit" as const,
+                    onModeChange: () => {},
+                    showModeToggle: false,
+                    onChange: onOutputChange,
+                  }
+                : { viewOnly: true })}
+            />
+          </div>
+        )}
+      </div>
+    ) : null;
+
+  const renderInlineImagePreview = () => {
+    if (!showRawResult || !showInlineImagePreview) return null;
+    if (
+      resultImageState.hasCandidate &&
+      (resultImageState.status === "idle" ||
+        resultImageState.status === "loading")
+    ) {
+      return (
+        <div className="px-3 pb-3">
+          <div className="rounded-md border border-border/30 bg-muted/20 min-h-[120px] flex items-center justify-center">
+            <div className="flex items-center gap-2 text-[11px] text-muted-foreground">
+              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              Resolving images...
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    if (
+      resultImageState.status !== "ready" ||
+      resultImageState.previews.length === 0
+    ) {
+      return null;
+    }
+
+    return (
+      <div className="px-3 pb-3">
+        <McpToolResultImagePreviewGrid
+          previews={resultImageState.previews}
+          className="grid-cols-1"
+          tileClassName="min-h-[160px]"
+          imageClassName="max-h-[360px]"
+        />
+      </div>
+    );
+  };
+
+  // Device-flow login URLs surfaced by the computer `bash` tool (e.g. from
+  // `gh auth login`). The tool lifts them into a structured `authUrls` field
+  // so the user can click instead of hunting through scrollback. Tool output
+  // is UNTRUSTED, so each candidate is re-validated to a safe http(s) link
+  // here — never render `javascript:`/`data:`/etc. as a clickable link.
+  const renderAuthUrls = () => {
+    const urls = filterSafeExternalLinkUrls(
+      (resultDisplayData as { authUrls?: unknown })?.authUrls
+    );
+    if (urls.length === 0) return null;
+    return (
+      <div className="space-y-1" data-testid="tool-part-auth-urls">
+        <div className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground/70">
+          Sign-in {urls.length > 1 ? "links" : "link"}
+        </div>
+        <ul className="space-y-1">
+          {urls.map((url) => (
+            <li key={url}>
+              <a
+                href={url}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-xs text-primary underline underline-offset-2 break-all"
+              >
+                {url}
+              </a>
+            </li>
+          ))}
+        </ul>
+      </div>
+    );
+  };
+
+  const renderToolError = () =>
+    hasError ? (
+      <div className="space-y-1">
+        <div className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground/70">
+          Error
+        </div>
+        <div className="rounded border border-destructive/40 bg-destructive/10 p-2 text-destructive">
+          {errorText}
+        </div>
+      </div>
+    ) : null;
+
+  const renderToolData = () => {
+    if (!hasInput && !showRawResult && !hasError && !hasAttachedTraceDisplay) {
+      return (
+        <div className="text-muted-foreground/70">
+          No tool details available.
+        </div>
+      );
+    }
+
+    return (
+      <div className="space-y-4">
+        {renderToolInput()}
+        {renderAttachedTraceDisplay()}
+        {renderAuthUrls()}
+        {renderToolResult()}
+        {renderToolError()}
+      </div>
+    );
+  };
+
+  if (needsApproval) {
+    return (
+      <div className="text-xs">
+        <div className="flex flex-col gap-2 w-full">
+          <div
+            className={cn(
+              "flex w-full items-center gap-3 pl-3.5 pr-1.5 py-1.5 rounded-full border",
+              approvalVisualState === "approved"
+                ? "border-success/40 bg-success/10"
+                : approvalVisualState === "denied"
+                ? "border-destructive/40 bg-destructive/10"
+                : "border-border/60 bg-muted/30"
+            )}
+          >
+            <span className="inline-flex items-center gap-1.5 text-muted-foreground text-[12px] shrink-0">
+              <Terminal className="h-3 w-3" />
+              <span>Run</span>
+            </span>
+            <span className="font-mono text-[13px] text-foreground truncate min-w-0">
+              {displayLabel}
+            </span>
+            {appToolAttribution && (
+              <span className="inline-flex items-center rounded-full bg-foreground/5 px-1.5 py-0.5 text-[10.5px] text-muted-foreground shrink-0">
+                from {appToolAttribution.appName}
+              </span>
+            )}
+
+            {approvalVisualState === "pending" && (
+              <>
+                {paramCount > 0 ? (
+                  <button
+                    type="button"
+                    onClick={() => setParamsExpanded((v) => !v)}
+                    className="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[12px] text-muted-foreground hover:bg-foreground/5 hover:text-foreground transition-colors cursor-pointer shrink-0"
+                    aria-expanded={paramsExpanded}
+                  >
+                    {paramCount} parameter{paramCount === 1 ? "" : "s"}
+                    <ChevronDown
+                      className={cn(
+                        "h-3 w-3 transition-transform",
+                        paramsExpanded && "rotate-180"
+                      )}
+                    />
+                  </button>
+                ) : (
+                  <span className="px-2 text-[12px] text-muted-foreground/60 shrink-0">
+                    no parameters
+                  </span>
+                )}
+                <span className="ml-auto h-4 w-px bg-border/60 shrink-0" />
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (!approvalId) return;
+                    setApprovalVisualState("approved");
+                    onApprove?.(approvalId);
+                  }}
+                  className="inline-flex items-center gap-1 rounded-full bg-primary px-3 py-1 text-[12px] font-semibold text-primary-foreground hover:brightness-110 transition cursor-pointer"
+                >
+                  <Check className="h-3 w-3" />
+                  Approve
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (!approvalId) return;
+                    setApprovalVisualState("denied");
+                    onDeny?.(approvalId);
+                  }}
+                  className="inline-flex items-center rounded-full px-3 py-1 text-[12px] font-medium text-muted-foreground hover:bg-destructive/10 hover:text-destructive transition cursor-pointer"
+                >
+                  Deny
+                </button>
+              </>
+            )}
+
+            {approvalVisualState === "approved" && (
+              <span className="inline-flex items-center gap-1 px-2 text-[12px] font-medium text-success">
+                <ShieldCheck className="h-3 w-3" />
+                Approved
+              </span>
+            )}
+            {approvalVisualState === "denied" && (
+              <span className="inline-flex items-center gap-1 px-2 text-[12px] font-medium text-destructive">
+                <ShieldX className="h-3 w-3" />
+                Denied
+              </span>
+            )}
+          </div>
+
+          {paramsExpanded && hasInput && approvalVisualState === "pending" && (
+            <div className="w-full rounded-lg border border-border/40 bg-muted/20 max-h-[300px] overflow-auto">
+              <JsonEditor
+                height="100%"
+                viewOnly
+                value={inputData}
+                className="p-2 text-[11px]"
+                collapsible
+                defaultExpandDepth={2}
+              />
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  }
+
   return (
-    <div
-      className={cn(
-        "@container rounded-lg border text-xs",
-        needsApproval && approvalVisualState === "pending"
-          ? "border-pending/40 bg-pending/5"
-          : needsApproval && approvalVisualState === "approved"
-            ? "border-success/40 bg-success/5"
-            : needsApproval && approvalVisualState === "denied"
-              ? "border-destructive/40 bg-destructive/5"
-              : "border-border/50 bg-background/70",
-      )}
-    >
-      <button
-        type="button"
+    <div className="@container rounded-lg border text-xs border-border/50 bg-background/70">
+      <div
+        role="button"
+        tabIndex={hideDiagnosticsUI ? -1 : 0}
         className="flex w-full items-center justify-between gap-2 px-3 py-2 text-left text-[11px] font-semibold uppercase tracking-wide text-muted-foreground cursor-pointer"
-        onClick={() => {
-          if (hideDiagnosticsUI && !needsApproval) {
-            return;
-          }
-          setUserExpanded((prev) => {
-            const willExpand = !prev;
-            if (willExpand && activeDebugTab === null) {
-              setActiveDebugTab("data");
-            }
-            return willExpand;
-          });
-        }}
+        onClick={toggleExpanded}
+        onKeyDown={handleHeaderKeyDown}
         aria-expanded={isExpanded}
       >
         <span className="inline-flex items-center gap-2 font-medium normal-case text-foreground min-w-0">
@@ -443,26 +928,14 @@ export function ToolPart({
               className={`${mcpIconClassName} shrink-0`}
             />
             <span className="font-mono text-xs tracking-tight text-muted-foreground/80 truncate">
-              {label}
+              {displayLabel}
             </span>
+            {appToolAttribution && (
+              <span className="inline-flex items-center rounded-full bg-foreground/5 px-1.5 py-0.5 text-[10px] text-muted-foreground/80 shrink-0">
+                from {appToolAttribution.appName}
+              </span>
+            )}
           </span>
-          {needsApproval && approvalVisualState === "pending" && (
-            <span className="text-[11px] font-medium text-pending-foreground dark:text-pending">
-              Approve tool call?
-            </span>
-          )}
-          {needsApproval && approvalVisualState === "approved" && (
-            <span className="flex items-center gap-1 text-[11px] font-medium text-success dark:text-success">
-              <ShieldCheck className="h-3.5 w-3.5" />
-              Approved
-            </span>
-          )}
-          {needsApproval && approvalVisualState === "denied" && (
-            <span className="flex items-center gap-1 text-[11px] font-medium text-destructive">
-              <ShieldX className="h-3.5 w-3.5" />
-              Denied
-            </span>
-          )}
         </span>
         <span className="inline-flex items-center gap-1.5 text-muted-foreground">
           {showDisplayModeControls && (
@@ -488,24 +961,24 @@ export function ToolPart({
               </span>
             </>
           )}
-          {!hideDiagnosticsUI &&
-            onSaveView &&
-            uiType &&
-            uiType !== UIType.MCP_UI && (
-              <>
-                {hasWidgetDebugUI && <div className="h-4 w-px bg-border/40" />}
-                {renderSaveViewButton()}
-              </>
-            )}
-          {toolState && StatusIcon && (
-            <span
-              className="inline-flex h-5 w-5 items-center justify-center"
-              title={toolState.label}
-            >
-              <StatusIcon className={toolState.className} />
-              <span className="sr-only">{toolState.label}</span>
-            </span>
+          {!hideDiagnosticsUI && allowInlineEdit && (
+            <>
+              {hasWidgetDebugUI && <div className="h-4 w-px bg-border/40" />}
+              {renderEditControls()}
+            </>
           )}
+          {toolState &&
+            StatusIcon &&
+            state !== "output-available" &&
+            state !== "input-available" && (
+              <span
+                className="inline-flex h-5 w-5 items-center justify-center"
+                title={toolState.label}
+              >
+                <StatusIcon className={toolState.className} />
+                <span className="sr-only">{toolState.label}</span>
+              </span>
+            )}
           {!needsApproval && !hideDiagnosticsUI && (
             <ChevronDown
               className={`h-4 w-4 transition-transform duration-150 ${
@@ -514,65 +987,15 @@ export function ToolPart({
             />
           )}
         </span>
-      </button>
+      </div>
+
+      {renderInlineImagePreview()}
 
       {isExpanded && (
         <div className="border-t border-border/40 px-3 py-3">
           {!hideDiagnosticsUI && (
             <>
-              {hasWidgetDebug && activeDebugTab === "data" && (
-                <div className="space-y-4">
-                  {hasInput && (
-                    <div className="space-y-1">
-                      <div className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground/70">
-                        Input
-                      </div>
-                      <div className="rounded-md border border-border/30 bg-muted/20 max-h-[300px] overflow-auto">
-                        <JsonEditor
-                          height="100%"
-                          viewOnly
-                          value={inputData}
-                          className="p-2 text-[11px]"
-                          collapsible
-                          defaultExpandDepth={2}
-                        />
-                      </div>
-                    </div>
-                  )}
-                  {hasOutput && (
-                    <div className="space-y-1">
-                      <div className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground/70">
-                        Result
-                      </div>
-                      <div className="rounded-md border border-border/30 bg-muted/20 max-h-[300px] overflow-auto">
-                        <JsonEditor
-                          height="100%"
-                          viewOnly
-                          value={outputData}
-                          className="p-2 text-[11px]"
-                          collapsible
-                          defaultExpandDepth={2}
-                        />
-                      </div>
-                    </div>
-                  )}
-                  {hasError && (
-                    <div className="space-y-1">
-                      <div className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground/70">
-                        Error
-                      </div>
-                      <div className="rounded border border-destructive/40 bg-destructive/10 p-2 text-destructive">
-                        {errorText}
-                      </div>
-                    </div>
-                  )}
-                  {!hasInput && !hasOutput && !hasError && (
-                    <div className="text-muted-foreground/70">
-                      No tool details available.
-                    </div>
-                  )}
-                </div>
-              )}
+              {hasWidgetDebug && activeDebugTab === "data" && renderToolData()}
               {hasWidgetDebug && activeDebugTab === "state" && (
                 <div className="space-y-2">
                   <div className="flex items-center justify-between">
@@ -606,9 +1029,19 @@ export function ToolPart({
                   </div>
                 </div>
               )}
-              {hasWidgetDebug && activeDebugTab === "csp" && (
-                <CspDebugPanel
-                  cspInfo={widgetDebugInfo.csp}
+              {hasWidgetDebug && activeDebugTab === "sandbox" && (
+                <CspWorkbench
+                  sandboxInfo={
+                    widgetDebugInfo.csp
+                      ? {
+                          ...widgetDebugInfo.csp,
+                          applied: widgetDebugInfo.applied,
+                          lifecycle: widgetDebugInfo.lifecycle,
+                          mounts: widgetDebugInfo.mounts,
+                          hostInfo: widgetDebugInfo.hostInfo ?? null,
+                        }
+                      : undefined
+                  }
                   protocol={widgetDebugInfo.protocol}
                 />
               )}
@@ -622,7 +1055,7 @@ export function ToolPart({
                       <div className="text-[9px] text-muted-foreground/50">
                         Updated:{" "}
                         {new Date(
-                          widgetDebugInfo.modelContext.updatedAt,
+                          widgetDebugInfo.modelContext.updatedAt
                         ).toLocaleTimeString()}
                       </div>
                     )}
@@ -681,99 +1114,8 @@ export function ToolPart({
                   )}
                 </div>
               )}
-              {!hasWidgetDebug && (
-                <div className="space-y-4">
-                  {hasInput && (
-                    <div className="space-y-1">
-                      <div className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground/70">
-                        Input
-                      </div>
-                      <div className="rounded-md border border-border/30 bg-muted/20 max-h-[300px] overflow-auto">
-                        <JsonEditor
-                          height="100%"
-                          viewOnly
-                          value={inputData}
-                          className="p-2 text-[11px]"
-                          collapsible
-                          defaultExpandDepth={2}
-                        />
-                      </div>
-                    </div>
-                  )}
-
-                  {hasOutput && (
-                    <div className="space-y-1">
-                      <div className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground/70">
-                        Result
-                      </div>
-                      <div className="rounded-md border border-border/30 bg-muted/20 max-h-[300px] overflow-auto">
-                        <JsonEditor
-                          height="100%"
-                          viewOnly
-                          value={outputData}
-                          className="p-2 text-[11px]"
-                          collapsible
-                          defaultExpandDepth={2}
-                        />
-                      </div>
-                    </div>
-                  )}
-
-                  {hasError && (
-                    <div className="space-y-1">
-                      <div className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground/70">
-                        Error
-                      </div>
-                      <div className="rounded border border-destructive/40 bg-destructive/10 p-2 text-destructive">
-                        {errorText}
-                      </div>
-                    </div>
-                  )}
-
-                  {!hasInput && !hasOutput && !hasError && (
-                    <div className="text-muted-foreground/70">
-                      No tool details available.
-                    </div>
-                  )}
-                </div>
-              )}
+              {!hasWidgetDebug && renderToolData()}
             </>
-          )}
-          {needsApproval && approvalVisualState === "pending" && (
-            <div className="flex items-center gap-2 pt-2 border-t border-border/40 mt-3">
-              <Button
-                type="button"
-                size="sm"
-                variant="outline"
-                className="h-7 px-3 text-xs border-success/40 text-success hover:bg-success/10"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  if (!approvalId) return;
-                  setApprovalVisualState("approved");
-                  setUserExpanded(false);
-                  onApprove?.(approvalId);
-                }}
-              >
-                <Check className="h-3 w-3 mr-1" />
-                Approve
-              </Button>
-              <Button
-                type="button"
-                size="sm"
-                variant="outline"
-                className="h-7 px-3 text-xs border-destructive/40 text-destructive hover:bg-destructive/10"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  if (!approvalId) return;
-                  setApprovalVisualState("denied");
-                  setUserExpanded(false);
-                  onDeny?.(approvalId);
-                }}
-              >
-                <X className="h-3 w-3 mr-1" />
-                Deny
-              </Button>
-            </div>
           )}
         </div>
       )}

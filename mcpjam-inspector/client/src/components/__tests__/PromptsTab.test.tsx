@@ -1,7 +1,19 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import {
+  act,
+  render,
+  screen,
+  fireEvent,
+  waitFor,
+} from "@testing-library/react";
 import { PromptsTab } from "../PromptsTab";
-import type { MCPServerConfig } from "@mcpjam/sdk";
+import type { MCPServerConfig } from "@mcpjam/sdk/browser";
+
+const { mockJsonEditor } = vi.hoisted(() => ({
+  mockJsonEditor: vi.fn((props: any) => (
+    <div data-testid="json-editor">{JSON.stringify(props.value)}</div>
+  )),
+}));
 
 // Mock APIs
 const mockListPrompts = vi.fn();
@@ -29,10 +41,14 @@ vi.mock("../logger-view", () => ({
 }));
 
 // Mock ScrollArea
-vi.mock("../ui/scroll-area", () => ({
+vi.mock("@mcpjam/design-system/scroll-area", () => ({
   ScrollArea: ({ children }: { children: React.ReactNode }) => (
     <div data-testid="scroll-area">{children}</div>
   ),
+}));
+
+vi.mock("@/components/ui/json-editor", () => ({
+  JsonEditor: (props: any) => mockJsonEditor(props),
 }));
 
 describe("PromptsTab", () => {
@@ -45,6 +61,7 @@ describe("PromptsTab", () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    mockJsonEditor.mockClear();
     mockListPrompts.mockResolvedValue([]);
     mockGetPrompt.mockResolvedValue({ content: null });
   });
@@ -81,8 +98,103 @@ describe("PromptsTab", () => {
       );
 
       await waitFor(() => {
-        expect(mockListPrompts).toHaveBeenCalledWith("test-server");
+        expect(mockListPrompts).toHaveBeenCalledWith("test-server", {
+          refresh: false,
+        });
       });
+    });
+
+    it("does not fetch prompts when the server is disconnected", () => {
+      const serverConfig = createServerConfig();
+
+      render(
+        <PromptsTab
+          serverConfig={serverConfig}
+          serverName="test-server"
+          serverConnectionStatus="disconnected"
+        />,
+      );
+
+      expect(mockListPrompts).not.toHaveBeenCalled();
+      expect(
+        screen.getByText("Connect this server to load prompts."),
+      ).toBeInTheDocument();
+    });
+
+    it("clears loaded prompts when the selected server disconnects", async () => {
+      const serverConfig = createServerConfig();
+
+      mockListPrompts.mockResolvedValue([
+        { name: "greeting", description: "A greeting prompt" },
+      ]);
+
+      const { rerender } = render(
+        <PromptsTab
+          serverConfig={serverConfig}
+          serverName="test-server"
+          serverConnectionStatus="connected"
+        />,
+      );
+
+      await waitFor(() => {
+        expect(screen.getByText("greeting")).toBeInTheDocument();
+      });
+      expect(mockListPrompts).toHaveBeenCalledTimes(1);
+
+      rerender(
+        <PromptsTab
+          serverConfig={serverConfig}
+          serverName="test-server"
+          serverConnectionStatus="disconnected"
+        />,
+      );
+
+      await waitFor(() => {
+        expect(screen.queryByText("greeting")).not.toBeInTheDocument();
+      });
+      expect(
+        screen.getByText("Connect this server to load prompts."),
+      ).toBeInTheDocument();
+      expect(mockListPrompts).toHaveBeenCalledTimes(1);
+    });
+
+    it("ignores a stale prompts response after the selected server disconnects", async () => {
+      const serverConfig = createServerConfig();
+      let resolvePrompts!: (value: Array<Record<string, unknown>>) => void;
+      mockListPrompts.mockReturnValue(
+        new Promise((resolve) => {
+          resolvePrompts = resolve;
+        }),
+      );
+
+      const { rerender } = render(
+        <PromptsTab
+          serverConfig={serverConfig}
+          serverName="test-server"
+          serverConnectionStatus="connected"
+        />,
+      );
+
+      await waitFor(() => {
+        expect(mockListPrompts).toHaveBeenCalledTimes(1);
+      });
+
+      rerender(
+        <PromptsTab
+          serverConfig={serverConfig}
+          serverName="test-server"
+          serverConnectionStatus="disconnected"
+        />,
+      );
+
+      await act(async () => {
+        resolvePrompts([{ name: "late-prompt" }]);
+      });
+
+      expect(screen.queryByText("late-prompt")).not.toBeInTheDocument();
+      expect(
+        screen.getByText("Connect this server to load prompts."),
+      ).toBeInTheDocument();
     });
 
     it("displays prompts after fetching", async () => {
@@ -178,9 +290,42 @@ describe("PromptsTab", () => {
       // Click prompt-b in the list
       fireEvent.click(screen.getByText("prompt-b"));
 
-      // After selection, the SelectedToolHeader should show with "Click to change tool"
+      // After selection, the SelectedToolHeader shows a switch-tool control
       await waitFor(() => {
-        expect(screen.getByTitle("Click to change tool")).toBeInTheDocument();
+        expect(screen.getByTitle("Switch tool")).toBeInTheDocument();
+      });
+    });
+  });
+
+  describe("prompt switching via list selection", () => {
+    it("auto-runs zero-arg prompt when selected from the list", async () => {
+      const serverConfig = createServerConfig();
+
+      mockListPrompts.mockResolvedValue([
+        { name: "prompt-a", arguments: [{ name: "x", required: true }] },
+        { name: "prompt-b", arguments: [] },
+      ]);
+
+      mockGetPrompt.mockResolvedValue({ content: "Result from prompt-b" });
+
+      render(
+        <PromptsTab serverConfig={serverConfig} serverName="test-server" />,
+      );
+
+      // Wait for list to load
+      await waitFor(() => {
+        expect(screen.getByText("prompt-b")).toBeInTheDocument();
+      });
+
+      // Click prompt-b (zero args) — should auto-run
+      fireEvent.click(screen.getByText("prompt-b"));
+
+      await waitFor(() => {
+        expect(mockGetPrompt).toHaveBeenCalledWith(
+          "test-server",
+          "prompt-b",
+          {},
+        );
       });
     });
   });
@@ -254,6 +399,106 @@ describe("PromptsTab", () => {
       await waitFor(() => {
         expect(screen.getByText("Prompt not found")).toBeInTheDocument();
       });
+    });
+
+    it("renders JSON string responses with JsonEditor", async () => {
+      const serverConfig = createServerConfig();
+
+      mockListPrompts.mockResolvedValue([{ name: "json-prompt" }]);
+      mockGetPrompt.mockResolvedValue({
+        content: '{"users":[{"id":"1"}],"hasNextPage":false}',
+      });
+
+      render(
+        <PromptsTab serverConfig={serverConfig} serverName="test-server" />,
+      );
+
+      await waitFor(() => {
+        expect(screen.getByText("json-prompt")).toBeInTheDocument();
+      });
+
+      fireEvent.click(screen.getByText("json-prompt"));
+
+      await waitFor(() => {
+        expect(mockJsonEditor).toHaveBeenCalled();
+      });
+
+      expect(mockJsonEditor.mock.calls.at(-1)?.[0]).toMatchObject({
+        value: { users: [{ id: "1" }], hasNextPage: false },
+      });
+    });
+
+    it("keeps plain text prompt responses as text", async () => {
+      const serverConfig = createServerConfig();
+
+      mockListPrompts.mockResolvedValue([{ name: "text-prompt" }]);
+      mockGetPrompt.mockResolvedValue({ content: "Hello from prompt" });
+
+      render(
+        <PromptsTab serverConfig={serverConfig} serverName="test-server" />,
+      );
+
+      await waitFor(() => {
+        expect(screen.getByText("text-prompt")).toBeInTheDocument();
+      });
+
+      fireEvent.click(screen.getByText("text-prompt"));
+
+      await waitFor(() => {
+        expect(screen.getByText("Hello from prompt")).toBeInTheDocument();
+      });
+
+      expect(screen.queryByTestId("json-editor")).not.toBeInTheDocument();
+    });
+
+    it("preserves whitespace-only prompt responses as text", async () => {
+      const serverConfig = createServerConfig();
+
+      mockListPrompts.mockResolvedValue([{ name: "blank-prompt" }]);
+      mockGetPrompt.mockResolvedValue({ content: "   \n\n" });
+
+      const { container } = render(
+        <PromptsTab serverConfig={serverConfig} serverName="test-server" />,
+      );
+
+      await waitFor(() => {
+        expect(screen.getByText("blank-prompt")).toBeInTheDocument();
+      });
+
+      fireEvent.click(screen.getByText("blank-prompt"));
+
+      await waitFor(() => {
+        const pre = container.querySelector("pre");
+        expect(pre).not.toBeNull();
+        expect(pre?.textContent).toBe("   \n\n");
+      });
+
+      expect(screen.queryByTestId("json-editor")).not.toBeInTheDocument();
+    });
+
+    it("preserves empty-string prompt responses as text", async () => {
+      const serverConfig = createServerConfig();
+
+      mockListPrompts.mockResolvedValue([{ name: "empty-prompt" }]);
+      mockGetPrompt.mockResolvedValue({ content: "" });
+
+      const { container } = render(
+        <PromptsTab serverConfig={serverConfig} serverName="test-server" />,
+      );
+
+      await waitFor(() => {
+        expect(screen.getByText("empty-prompt")).toBeInTheDocument();
+      });
+
+      fireEvent.click(screen.getByText("empty-prompt"));
+
+      await waitFor(() => {
+        const pre = container.querySelector("pre");
+        expect(pre).not.toBeNull();
+        expect(pre?.textContent).toBe("");
+      });
+
+      expect(screen.queryByTestId("json-editor")).not.toBeInTheDocument();
     });
   });
 

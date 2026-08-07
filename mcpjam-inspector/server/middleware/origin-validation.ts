@@ -9,30 +9,128 @@
  */
 
 import type { Context, Next } from "hono";
-import { corsOriginCheck } from "../config.js";
+import { corsOriginCheck, SERVER_PORT } from "../config.js";
 import { logger as appLogger } from "../utils/logger.js";
 
 /**
+ * Get the list of allowed origins.
+ * Can be overridden via ALLOWED_ORIGINS environment variable.
+ */
+function getAllowedOrigins(): string[] {
+  // Allow override via environment variable
+  if (process.env.ALLOWED_ORIGINS) {
+    const origins = process.env.ALLOWED_ORIGINS.split(",").map((o) => o.trim());
+
+    // Wildcard origins (e.g. https://*.up.railway.app) are only safe behind
+    // non-prod lockdown.  Reject them in production to prevent accidental
+    // misconfiguration from weakening origin checks.
+    if (process.env.MCPJAM_NONPROD_LOCKDOWN !== "true") {
+      const wildcards = origins.filter((o) => o.includes("*"));
+      if (wildcards.length > 0) {
+        appLogger.warn(
+          `[Security] Wildcard ALLOWED_ORIGINS rejected outside non-prod lockdown: ${wildcards.join(", ")}`,
+        );
+        return origins.filter((o) => !o.includes("*"));
+      }
+    }
+
+    return origins;
+  }
+
+  // Default: localhost origins on common dev ports
+  const clientPort = parseInt(process.env.CLIENT_PORT || "5173", 10);
+  const ports = [SERVER_PORT, clientPort, 8080];
+  const origins: string[] = [];
+
+  for (const port of ports) {
+    origins.push(`http://localhost:${port}`);
+    origins.push(`http://127.0.0.1:${port}`);
+  }
+
+  return origins;
+}
+
+/**
+ * Check whether an origin matches the allowed list.
+ *
+ * Supports `*` anywhere in the host portion of the pattern, e.g.:
+ *   - `https://*.up.railway.app`                  (subdomain wildcard)
+ *   - `https://mcp-inspector-pr-*.up.railway.app` (mid-host wildcard for PR previews)
+ *
+ * Each `*` matches one or more host-safe characters (`[A-Za-z0-9-]+`);
+ * it never crosses a dot, never matches the empty string, and never
+ * matches scheme/port/path delimiters — so `*` cannot widen the
+ * allowlist beyond the intended host shape.
+ */
+function matchesAllowedOrigin(
+  origin: string,
+  allowedOrigins: string[],
+): boolean {
+  for (const allowed of allowedOrigins) {
+    if (allowed.includes("*")) {
+      const schemeEnd = allowed.indexOf("://");
+      if (schemeEnd === -1) continue;
+      const scheme = allowed.slice(0, schemeEnd + 3); // "https://"
+      const pattern = allowed.slice(schemeEnd + 3); // "mcp-inspector-pr-*.up.railway.app"
+
+      if (!origin.startsWith(scheme)) continue;
+      const originHost = origin.slice(scheme.length); // "mcp-inspector-pr-2246.up.railway.app"
+
+      // Compile pattern: escape regex meta-chars, then expand `*` into
+      // a host-segment-safe character class. We deliberately exclude `.`
+      // and `:` so wildcards can't widen to cross-domain or cross-port.
+      const escaped = pattern.replace(/[.+?^${}()|[\]\\]/g, "\\$&");
+      const regex = new RegExp(`^${escaped.replace(/\*/g, "[A-Za-z0-9-]+")}$`);
+      if (regex.test(originHost)) {
+        return true;
+      }
+    } else if (origin === allowed) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
  * Origin validation middleware.
- * Blocks requests from origins not in the CORS allowlist.
- * Supports exact matches and wildcard domain patterns (e.g. *.fletch.co).
+ * Blocks requests from non-localhost origins.
  */
 export async function originValidationMiddleware(
   c: Context,
   next: Next,
 ): Promise<Response | void> {
+  // Allow CORS preflight requests through
   if (c.req.method === "OPTIONS") {
+    return next();
+  }
+
+  // Static assets contain no sensitive data and are already excluded from
+  // session auth.  Vite emits <script type="module" crossorigin> and
+  // <link rel="stylesheet" crossorigin>, which cause the browser to attach
+  // an Origin header.  Blocking them here breaks every preview deploy.
+  const path = c.req.path;
+  if (path.startsWith("/assets/")) {
     return next();
   }
 
   const origin = c.req.header("Origin");
 
   // No origin header = same-origin request or non-browser client (curl, etc.)
+  // Most routes still require valid token; OAuth proxy routes rely on HTTPS-only + private IP blocking
   if (!origin) {
     return next();
   }
 
-  if (!corsOriginCheck(origin)) {
+  // Share CORS allowlist (ALLOWED_ORIGINS / WEB_ALLOWED_ORIGINS /
+  // CORS_WILDCARD_DOMAINS like *.fletch.co). Without this, hosted browser
+  // POSTs to /relay and /api fail with 403 even when CORS would allow them.
+  if (corsOriginCheck(origin)) {
+    return next();
+  }
+
+  const allowedOrigins = getAllowedOrigins();
+
+  if (!matchesAllowedOrigin(origin, allowedOrigins)) {
     appLogger.warn(`[Security] Blocked request from origin: ${origin}`);
     return c.json(
       {

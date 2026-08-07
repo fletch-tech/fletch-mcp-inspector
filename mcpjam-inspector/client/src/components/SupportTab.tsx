@@ -7,8 +7,8 @@ import {
   CardDescription,
   CardHeader,
   CardTitle,
-} from "@/components/ui/card";
-import { Button } from "@/components/ui/button";
+} from "@mcpjam/design-system/card";
+import { Button } from "@mcpjam/design-system/button";
 
 const supportLinks = [
   {
@@ -70,10 +70,7 @@ export function SupportTab() {
             })}
           </div>
           <p className="text-center text-sm text-muted-foreground">
-            or email us at{" "}
-            <a className="underline" href="mailto:founders@mcpjam.com">
-              founders@mcpjam.com
-            </a>
+            For self-hosted deployments, contact your Fletch administrator.
           </p>
         </div>
       </div>

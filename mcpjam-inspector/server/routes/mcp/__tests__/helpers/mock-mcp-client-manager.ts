@@ -1,5 +1,7 @@
 import { vi } from "vitest";
 
+type MockFn = ReturnType<typeof vi.fn>;
+
 /**
  * Type for the mock MCPClientManager - all methods are vi.fn() mocks
  */
@@ -8,42 +10,69 @@ export type MockMCPClientManager = ReturnType<
 >;
 
 /**
- * Default mock implementations for MCPClientManager methods.
- * Each method returns a sensible default that can be overridden.
+ * Default implementations for MCPClientManager methods.
+ *
+ * Defined as plain functions (not vi.fn() instances) so the factory can
+ * install them via vi.fn(impl) on each call. mockReturnValue/mockResolvedValue
+ * do NOT register an implementation visible to getMockImplementation(), so
+ * copying defaults that way silently drops every default to undefined.
  */
-const defaultMocks = {
+const defaultImplementations = {
   // Connection management
-  connectToServer: vi.fn().mockResolvedValue(undefined),
-  disconnectServer: vi.fn().mockResolvedValue(undefined),
-  removeServer: vi.fn(),
-  getClient: vi.fn().mockReturnValue({}),
-  hasServer: vi.fn().mockReturnValue(false),
-  listServers: vi.fn().mockReturnValue([]),
-  getServerSummaries: vi.fn().mockReturnValue([]),
-  getConnectionStatus: vi.fn().mockReturnValue("connected"),
-  getInitializationInfo: vi.fn().mockReturnValue(null),
+  connectToServer: async () => undefined,
+  disconnectServer: async () => undefined,
+  removeServer: () => undefined,
+  getClient: () => ({}),
+  getManagedClient: () => ({}),
+  hasServer: () => true,
+  listServers: () => [],
+  getServerSummaries: () => [],
+  getConnectionStatus: () => "connected",
+  getInitializationInfo: () => null,
+  addNotificationHandler: () => undefined,
+  onLogMessage: () => undefined,
+  setLoggingLevel: async () => undefined,
+  setPerRequestLogLevel: () => undefined,
+  getLoggingMechanism: () => "none" as const,
 
   // Tools
-  listTools: vi.fn().mockResolvedValue({ tools: [] }),
-  executeTool: vi.fn().mockResolvedValue({
+  listTools: async () => ({ tools: [] }),
+  getToolsForAiSdk: async () => ({}),
+  executeTool: async () => ({
     content: [{ type: "text", text: "Tool executed successfully" }],
   }),
-  getAllToolsMetadata: vi.fn().mockReturnValue({}),
-  setElicitationHandler: vi.fn(),
-  clearElicitationHandler: vi.fn(),
+  getAllToolsMetadata: () => ({}),
+  setElicitationHandler: () => undefined,
+  clearElicitationHandler: () => undefined,
 
   // Resources
-  listResources: vi.fn().mockResolvedValue({
+  listResources: async () => ({
     resources: [],
     nextCursor: undefined,
   }),
-  readResource: vi.fn().mockResolvedValue({
+  readResource: async () => ({
     contents: [],
   }),
 
+  // Tasks (wire dispatch): the default double speaks the 2025-11-25 wire,
+  // matching the tasks tests' expectations.
+  getTasksWire: () => "legacy" as const,
+  getTasksSupport: () => ({
+    wire: "legacy" as const,
+    toolCalls: true,
+    list: true,
+    cancel: true,
+    update: false,
+    inlineResult: false,
+  }),
+
   // Prompts
-  listPrompts: vi.fn().mockResolvedValue({ prompts: [] }),
-  getPrompt: vi.fn().mockResolvedValue({ messages: [] }),
+  listPrompts: async () => ({ prompts: [] }),
+  getPrompt: async () => ({ messages: [] }),
+} satisfies Record<string, (...args: any[]) => any>;
+
+type DefaultMocks = {
+  [K in keyof typeof defaultImplementations]: MockFn;
 };
 
 /**
@@ -68,20 +97,20 @@ const defaultMocks = {
  * manager.listTools.mockResolvedValue({ tools: [{ name: "custom" }] });
  */
 export function createMockMcpClientManager(
-  overrides: Partial<
-    Record<keyof typeof defaultMocks, ReturnType<typeof vi.fn>>
-  > = {},
-) {
+  overrides: Partial<Record<keyof typeof defaultImplementations, MockFn>> = {}
+): DefaultMocks {
+  const freshMocks = Object.fromEntries(
+    (
+      Object.keys(defaultImplementations) as Array<
+        keyof typeof defaultImplementations
+      >
+    ).map((key) => [key, vi.fn(defaultImplementations[key] as any)])
+  ) as DefaultMocks;
+
   return {
-    ...Object.fromEntries(
-      Object.entries(defaultMocks).map(([key, mockFn]) => [
-        key,
-        // Create a fresh mock for each call to avoid state pollution
-        vi.fn().mockImplementation(mockFn.getMockImplementation()),
-      ]),
-    ),
+    ...freshMocks,
     ...overrides,
-  } as typeof defaultMocks;
+  };
 }
 
 /**
@@ -92,7 +121,7 @@ export const mockFactories = {
    * Creates a manager with tools configured
    */
   withTools: (
-    tools: Array<{ name: string; description?: string; inputSchema?: object }>,
+    tools: Array<{ name: string; description?: string; inputSchema?: object }>
   ) =>
     createMockMcpClientManager({
       listTools: vi.fn().mockResolvedValue({ tools }),
@@ -103,7 +132,7 @@ export const mockFactories = {
    * Creates a manager with resources configured
    */
   withResources: (
-    resources: Array<{ uri: string; name: string; mimeType?: string }>,
+    resources: Array<{ uri: string; name: string; mimeType?: string }>
   ) =>
     createMockMcpClientManager({
       listResources: vi
@@ -115,7 +144,7 @@ export const mockFactories = {
    * Creates a manager with prompts configured
    */
   withPrompts: (
-    prompts: Array<{ name: string; description?: string; arguments?: any[] }>,
+    prompts: Array<{ name: string; description?: string; arguments?: any[] }>
   ) =>
     createMockMcpClientManager({
       listPrompts: vi.fn().mockResolvedValue({ prompts }),
@@ -125,7 +154,7 @@ export const mockFactories = {
    * Creates a manager with servers configured
    */
   withServers: (
-    servers: Array<{ id: string; status: string; config: object }>,
+    servers: Array<{ id: string; status: string; config: object }>
   ) =>
     createMockMcpClientManager({
       getServerSummaries: vi.fn().mockReturnValue(servers),

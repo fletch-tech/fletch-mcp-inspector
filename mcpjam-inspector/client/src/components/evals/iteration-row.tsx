@@ -1,9 +1,9 @@
-import { Button } from "@/components/ui/button";
+import { Button } from "@mcpjam/design-system/button";
 import { cn } from "@/lib/utils";
 import { ChevronDown, ChevronRight, Loader2 } from "lucide-react";
 import { EvalIteration, EvalCase } from "./types";
-import { IterationDetails } from "./iteration-details";
-import { formatRunId } from "./helpers";
+import { evalStatusLeftBorderClasses, formatRunId } from "./helpers";
+import { parseIterationPredicates } from "./predicates-list";
 
 interface IterationRowProps {
   iteration: EvalIteration;
@@ -11,7 +11,6 @@ interface IterationRowProps {
   iterationTestCase?: EvalCase | null;
   iterationRun?: { _id: string } | null;
   onViewRun?: (runId: string) => void;
-  getIterationBorderColor: (result: string) => string;
   formatTime: (ts?: number) => string;
   formatDuration: (ms: number) => string;
   isOpen?: boolean;
@@ -24,8 +23,7 @@ export function CompactIterationRow({
   iterationTestCase,
   iterationRun,
   onViewRun,
-  getIterationBorderColor,
-  formatTime,
+  formatTime: _formatTime,
   formatDuration,
   isOpen = false,
   onToggle,
@@ -36,20 +34,30 @@ export function CompactIterationRow({
     startedAt && completedAt ? Math.max(completedAt - startedAt, 0) : null;
   const isPending = iteration.result === "pending";
 
-  const runTimestamp = iterationRun
-    ? formatTime(iterationRun._id ? undefined : iteration.createdAt)
-    : null;
-
   const actualToolCalls = iteration.actualToolCalls || [];
 
+  // X/Y checks passed badge — read from the same parsed predicate verdicts
+  // PredicatesList renders. User-facing wording is "checks"; the internal
+  // data is `metadata.predicates` (the SDK-defined PredicateResult[] shape).
+  const predicates = parseIterationPredicates(iteration.metadata);
+  const checksBadge =
+    predicates && predicates.length > 0
+      ? {
+          total: predicates.length,
+          passed: predicates.filter((p) => p.passed).length,
+        }
+      : null;
+  const allChecksPassed =
+    checksBadge !== null && checksBadge.passed === checksBadge.total;
+
   return (
-    <div className={cn("relative overflow-hidden", isPending && "opacity-60")}>
-      <div
-        className={cn(
-          "absolute left-0 top-0 h-full w-1",
-          getIterationBorderColor(iteration.result),
-        )}
-      />
+    <div
+      className={cn(
+        "relative overflow-hidden border-l-2",
+        evalStatusLeftBorderClasses(isPending ? "running" : iteration.result),
+        isPending && "opacity-60",
+      )}
+    >
       <div className="flex items-center gap-6 w-full">
         <div className="pl-3">
           {isOpen ? (
@@ -67,7 +75,7 @@ export function CompactIterationRow({
           </span>
           <span className="text-xs text-muted-foreground min-w-[140px] max-w-[140px] truncate">
             {iteration.testCaseSnapshot?.model ||
-              iterationTestCase?.model ||
+              iterationTestCase?.models?.[0]?.model ||
               "—"}
           </span>
           <span className="text-xs font-mono text-muted-foreground min-w-[60px] max-w-[60px] text-right">
@@ -79,6 +87,19 @@ export function CompactIterationRow({
           <span className="text-xs text-muted-foreground font-mono min-w-[70px] max-w-[70px] text-right">
             {durationMs !== null ? formatDuration(durationMs) : "—"}
           </span>
+          {checksBadge ? (
+            <span
+              className={cn(
+                "text-[10px] font-semibold rounded px-1.5 py-0.5 min-w-[100px] max-w-[110px] text-center",
+                allChecksPassed
+                  ? "bg-green-500/15 text-green-700 dark:text-green-300"
+                  : "bg-red-500/15 text-red-700 dark:text-red-300",
+              )}
+              title={`${checksBadge.passed} of ${checksBadge.total} deterministic checks passed`}
+            >
+              {checksBadge.passed} / {checksBadge.total} checks
+            </span>
+          ) : null}
           {isPending && (
             <div className="flex items-center min-w-[40px]">
               <Loader2 className="h-3.5 w-3.5 animate-spin text-warning" />

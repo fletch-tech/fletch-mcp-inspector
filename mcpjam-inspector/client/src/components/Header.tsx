@@ -1,25 +1,43 @@
-// import { AuthUpperArea } from "./auth/auth-upper-area";
-import { SidebarTrigger } from "./ui/sidebar";
-// import { useHeaderIpc } from "./ipc/use-header-ipc";
-// import { ActiveServerSelectorProps } from "./ActiveServerSelector";
+import { AuthUpperArea } from "./auth/auth-upper-area";
+import { SidebarTrigger, useSidebar } from "./ui/sidebar";
+import { useHeaderIpc } from "./ipc/use-header-ipc";
+import { ActiveServerSelectorProps } from "./ActiveServerSelector";
 
-// interface HeaderProps {
-//   activeServerSelectorProps?: ActiveServerSelectorProps;
-// }
+export interface GlobalHostBarProps {
+  projectId: string;
+  onEditHost: (hostId: string) => void;
+  // Provided only while the host canvas is open. Re-targets it when the
+  // dropdown's active host changes, so picking a host updates the diagram
+  // instead of only the preview pointer used by chat/evals.
+  onCanvasReplaceHost?: (hostId: string) => void;
+}
 
-// export const Header = ({ activeServerSelectorProps }: HeaderProps) => {
-export const Header = () => {
-  // const { activeIpc, dismissActiveIpc } = useHeaderIpc();
+interface HeaderProps {
+  activeServerSelectorProps?: ActiveServerSelectorProps;
+  globalHostBarProps?: GlobalHostBarProps;
+}
+
+export const Header = ({
+  activeServerSelectorProps,
+  globalHostBarProps,
+}: HeaderProps) => {
+  const { activeIpc, dismissActiveIpc } = useHeaderIpc();
+  const { isMobile } = useSidebar();
 
   return (
     <header className="flex shrink-0 flex-col border-b transition-[width,height] ease-linear">
       <div className="flex h-12 shrink-0 items-center gap-2 px-4 lg:px-6 drag">
-        <div className="flex items-center gap-1 lg:gap-2 no-drag">
-          <SidebarTrigger className="-ml-1" />
-        </div>
-        {/* <AuthUpperArea activeServerSelectorProps={activeServerSelectorProps} /> */}
+        {isMobile ? (
+          <div className="flex items-center gap-1 lg:gap-2 no-drag">
+            <SidebarTrigger className="-ml-1" aria-label="Open menu" />
+          </div>
+        ) : null}
+        <AuthUpperArea
+          activeServerSelectorProps={activeServerSelectorProps}
+          globalHostBarProps={globalHostBarProps}
+        />
       </div>
-      {/* {activeIpc && activeIpc.render({ dismiss: dismissActiveIpc })} */}
+      {activeIpc && activeIpc.render({ dismiss: dismissActiveIpc })}
     </header>
   );
 };

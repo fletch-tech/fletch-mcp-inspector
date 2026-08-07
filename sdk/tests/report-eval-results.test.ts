@@ -1,0 +1,898 @@
+const sentryMocks = vi.hoisted(() => ({
+  addBreadcrumb: vi.fn().mockResolvedValue(undefined),
+  captureEvalReportingFailure: vi.fn().mockResolvedValue(undefined),
+}));
+
+vi.mock("../src/sentry", () => ({
+  addBreadcrumb: sentryMocks.addBreadcrumb,
+  captureEvalReportingFailure: sentryMocks.captureEvalReportingFailure,
+}));
+
+import {
+  reportEvalResults,
+  reportEvalResultsSafely,
+} from "../src/report-eval-results";
+import { EvalReportingError } from "../src/errors";
+
+const successSummary = {
+  total: 1,
+  passed: 1,
+  failed: 0,
+  passRate: 1,
+};
+
+function okResponse(body: Record<string, unknown>): any {
+  return {
+    ok: true,
+    status: 200,
+    statusText: "OK",
+    json: async () => ({ ok: true, ...body }),
+  };
+}
+
+function errorResponse(status: number, message: string): any {
+  return {
+    ok: false,
+    status,
+    statusText: "Error",
+    json: async () => ({ ok: false, error: message }),
+  };
+}
+
+describe("reportEvalResults", () => {
+  const originalFetch = global.fetch;
+  const originalMcpjamBaseUrl = process.env.MCPJAM_BASE_URL;
+
+  afterEach(() => {
+    global.fetch = originalFetch;
+    if (originalMcpjamBaseUrl === undefined) {
+      delete process.env.MCPJAM_BASE_URL;
+    } else {
+      process.env.MCPJAM_BASE_URL = originalMcpjamBaseUrl;
+    }
+    sentryMocks.addBreadcrumb.mockClear();
+    sentryMocks.captureEvalReportingFailure.mockClear();
+    vi.restoreAllMocks();
+  });
+
+  it("uses app.mcpjam.com when no baseUrl override is provided", async () => {
+    delete process.env.MCPJAM_BASE_URL;
+
+    const fetchMock = vi.fn().mockResolvedValue(
+      okResponse({
+        suiteId: "suite_1",
+        runId: "run_1",
+        status: "completed",
+        result: "passed",
+        summary: successSummary,
+      })
+    );
+    global.fetch = fetchMock as any;
+
+    await reportEvalResults({
+      apiKey: "sk_test_key",
+      suiteName: "SDK smoke",
+      results: [{ caseTitle: "happy-path", passed: true }],
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls[0][0]).toBe(
+      "https://app.mcpjam.com/api/v1/projects/default/eval-ingest/report"
+    );
+  });
+
+  it("files results under an explicit project id when provided", async () => {
+    delete process.env.MCPJAM_BASE_URL;
+    delete process.env.MCPJAM_PROJECT_ID;
+
+    const fetchMock = vi.fn().mockResolvedValue(
+      okResponse({
+        suiteId: "suite_1",
+        runId: "run_1",
+        status: "completed",
+        result: "passed",
+        summary: successSummary,
+      })
+    );
+    global.fetch = fetchMock as any;
+
+    await reportEvalResults({
+      apiKey: "sk_test_key",
+      project: "jd7abc123",
+      suiteName: "SDK smoke",
+      results: [{ caseTitle: "happy-path", passed: true }],
+    });
+
+    expect(fetchMock.mock.calls[0][0]).toBe(
+      "https://app.mcpjam.com/api/v1/projects/jd7abc123/eval-ingest/report"
+    );
+  });
+
+  it("falls back to MCPJAM_PROJECT_ID from the environment", async () => {
+    delete process.env.MCPJAM_BASE_URL;
+    const prevProjectId = process.env.MCPJAM_PROJECT_ID;
+    process.env.MCPJAM_PROJECT_ID = "jd7envproj";
+
+    const fetchMock = vi.fn().mockResolvedValue(
+      okResponse({
+        suiteId: "suite_1",
+        runId: "run_1",
+        status: "completed",
+        result: "passed",
+        summary: successSummary,
+      })
+    );
+    global.fetch = fetchMock as any;
+
+    try {
+      await reportEvalResults({
+        apiKey: "sk_test_key",
+        suiteName: "SDK smoke",
+        results: [{ caseTitle: "happy-path", passed: true }],
+      });
+    } finally {
+      if (prevProjectId === undefined) {
+        delete process.env.MCPJAM_PROJECT_ID;
+      } else {
+        process.env.MCPJAM_PROJECT_ID = prevProjectId;
+      }
+    }
+
+    expect(fetchMock.mock.calls[0][0]).toBe(
+      "https://app.mcpjam.com/api/v1/projects/jd7envproj/eval-ingest/report"
+    );
+  });
+
+  it("uses MCPJAM_BASE_URL when no baseUrl override is provided", async () => {
+    process.env.MCPJAM_BASE_URL = "https://tough-cassowary-291.convex.site";
+
+    const fetchMock = vi.fn().mockResolvedValue(
+      okResponse({
+        suiteId: "suite_1",
+        runId: "run_1",
+        status: "completed",
+        result: "passed",
+        summary: successSummary,
+      })
+    );
+    global.fetch = fetchMock as any;
+
+    await reportEvalResults({
+      apiKey: "sk_test_key",
+      suiteName: "SDK smoke",
+      results: [{ caseTitle: "happy-path", passed: true }],
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls[0][0]).toBe(
+      "https://tough-cassowary-291.convex.site/api/v1/projects/default/eval-ingest/report"
+    );
+  });
+
+  it("uses one-shot /report for small payloads", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      okResponse({
+        suiteId: "suite_1",
+        runId: "run_1",
+        status: "completed",
+        result: "passed",
+        summary: successSummary,
+      })
+    );
+    global.fetch = fetchMock as any;
+
+    const result = await reportEvalResults({
+      apiKey: "sk_test_key",
+      baseUrl: "https://example.com",
+      suiteName: "SDK smoke",
+      results: [{ caseTitle: "happy-path", passed: true }],
+    });
+
+    expect(result.runId).toBe("run_1");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls[0][0]).toBe(
+      "https://example.com/api/v1/projects/default/eval-ingest/report"
+    );
+  });
+
+  it("forwards serverReplayConfigs in one-shot reports", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      okResponse({
+        suiteId: "suite_1",
+        runId: "run_1",
+        status: "completed",
+        result: "passed",
+        summary: successSummary,
+      })
+    );
+    global.fetch = fetchMock as any;
+
+    await reportEvalResults({
+      apiKey: "sk_test_key",
+      baseUrl: "https://example.com",
+      suiteName: "SDK smoke",
+      serverNames: ["asana"],
+      agent: {
+        getServerReplayConfigs: vi.fn().mockReturnValue([
+          {
+            serverId: "agent",
+            url: "https://agent.example.com/mcp",
+            accessToken: "at_agent",
+          },
+        ]),
+      },
+      mcpClientManager: {
+        getServerReplayConfigs: vi.fn().mockReturnValue([
+          {
+            serverId: "manager",
+            url: "https://manager.example.com/mcp",
+            accessToken: "at_manager",
+          },
+        ]),
+      } as any,
+      serverReplayConfigs: [
+        {
+          serverId: "remote",
+          url: "https://example.com/mcp",
+          accessToken: "at_123",
+        },
+      ],
+      results: [{ caseTitle: "happy-path", passed: true }],
+    });
+
+    const requestBody = JSON.parse(fetchMock.mock.calls[0][1].body as string);
+    expect(requestBody.serverReplayConfigs).toEqual([
+      {
+        serverId: "remote",
+        url: "https://example.com/mcp",
+        accessToken: "at_123",
+      },
+    ]);
+  });
+
+  it("filters inferred replay configs by serverNames in one-shot reports", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      okResponse({
+        suiteId: "suite_1",
+        runId: "run_1",
+        status: "completed",
+        result: "passed",
+        summary: successSummary,
+      })
+    );
+    global.fetch = fetchMock as any;
+
+    const agent = {
+      getServerReplayConfigs: vi.fn().mockReturnValue([
+        {
+          serverId: "asana",
+          url: "https://asana.example.com/mcp",
+          accessToken: "at_asana",
+        },
+        {
+          serverId: "github",
+          url: "https://github.example.com/mcp",
+          accessToken: "at_github",
+        },
+      ]),
+    };
+
+    await reportEvalResults({
+      apiKey: "sk_test_key",
+      baseUrl: "https://example.com",
+      suiteName: "SDK smoke",
+      serverNames: ["asana"],
+      agent,
+      results: [{ caseTitle: "happy-path", passed: true }],
+    });
+
+    const requestBody = JSON.parse(fetchMock.mock.calls[0][1].body as string);
+    expect(requestBody.serverReplayConfigs).toEqual([
+      {
+        serverId: "asana",
+        url: "https://asana.example.com/mcp",
+        accessToken: "at_asana",
+      },
+    ]);
+  });
+
+  it("resolves replay configs from agent in one-shot reports", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      okResponse({
+        suiteId: "suite_1",
+        runId: "run_1",
+        status: "completed",
+        result: "passed",
+        summary: successSummary,
+      })
+    );
+    global.fetch = fetchMock as any;
+
+    const agent = {
+      getServerReplayConfigs: vi.fn().mockReturnValue([
+        {
+          serverId: "agent",
+          url: "https://agent.example.com/mcp",
+          accessToken: "at_agent",
+        },
+      ]),
+    };
+
+    await reportEvalResults({
+      apiKey: "sk_test_key",
+      baseUrl: "https://example.com",
+      suiteName: "SDK smoke",
+      agent,
+      results: [{ caseTitle: "happy-path", passed: true }],
+    });
+
+    expect(agent.getServerReplayConfigs).toHaveBeenCalledTimes(1);
+    const requestBody = JSON.parse(fetchMock.mock.calls[0][1].body as string);
+    expect(requestBody.serverReplayConfigs).toEqual([
+      {
+        serverId: "agent",
+        url: "https://agent.example.com/mcp",
+        accessToken: "at_agent",
+      },
+    ]);
+  });
+
+  it("prefers agent replay configs over mcpClientManager", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      okResponse({
+        suiteId: "suite_1",
+        runId: "run_1",
+        status: "completed",
+        result: "passed",
+        summary: successSummary,
+      })
+    );
+    global.fetch = fetchMock as any;
+
+    const agent = {
+      getServerReplayConfigs: vi.fn().mockReturnValue([
+        {
+          serverId: "agent",
+          url: "https://agent.example.com/mcp",
+          accessToken: "at_agent",
+        },
+      ]),
+    };
+    const mcpClientManager = {
+      getServerReplayConfigs: vi.fn().mockReturnValue([
+        {
+          serverId: "manager",
+          url: "https://manager.example.com/mcp",
+          accessToken: "at_manager",
+        },
+      ]),
+    };
+
+    await reportEvalResults({
+      apiKey: "sk_test_key",
+      baseUrl: "https://example.com",
+      suiteName: "SDK smoke",
+      agent,
+      mcpClientManager: mcpClientManager as any,
+      results: [{ caseTitle: "happy-path", passed: true }],
+    });
+
+    expect(agent.getServerReplayConfigs).toHaveBeenCalledTimes(1);
+    expect(mcpClientManager.getServerReplayConfigs).not.toHaveBeenCalled();
+    const requestBody = JSON.parse(fetchMock.mock.calls[0][1].body as string);
+    expect(requestBody.serverReplayConfigs).toEqual([
+      {
+        serverId: "agent",
+        url: "https://agent.example.com/mcp",
+        accessToken: "at_agent",
+      },
+    ]);
+  });
+
+  it("falls back to mcpClientManager replay configs when agent has none", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      okResponse({
+        suiteId: "suite_1",
+        runId: "run_1",
+        status: "completed",
+        result: "passed",
+        summary: successSummary,
+      })
+    );
+    global.fetch = fetchMock as any;
+
+    const agent = {
+      getServerReplayConfigs: vi.fn().mockReturnValue([]),
+    };
+    const mcpClientManager = {
+      getServerReplayConfigs: vi.fn().mockReturnValue([
+        {
+          serverId: "manager",
+          url: "https://manager.example.com/mcp",
+          accessToken: "at_manager",
+        },
+      ]),
+    };
+
+    await reportEvalResults({
+      apiKey: "sk_test_key",
+      baseUrl: "https://example.com",
+      suiteName: "SDK smoke",
+      agent,
+      mcpClientManager: mcpClientManager as any,
+      results: [{ caseTitle: "happy-path", passed: true }],
+    });
+
+    expect(agent.getServerReplayConfigs).toHaveBeenCalledTimes(1);
+    expect(mcpClientManager.getServerReplayConfigs).toHaveBeenCalledTimes(1);
+    const requestBody = JSON.parse(fetchMock.mock.calls[0][1].body as string);
+    expect(requestBody.serverReplayConfigs).toEqual([
+      {
+        serverId: "manager",
+        url: "https://manager.example.com/mcp",
+        accessToken: "at_manager",
+      },
+    ]);
+  });
+
+  it("resolves replay configs from mcpClientManager when agent is absent", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      okResponse({
+        suiteId: "suite_1",
+        runId: "run_1",
+        status: "completed",
+        result: "passed",
+        summary: successSummary,
+      })
+    );
+    global.fetch = fetchMock as any;
+
+    const mcpClientManager = {
+      getServerReplayConfigs: vi.fn().mockReturnValue([
+        {
+          serverId: "manager",
+          url: "https://manager.example.com/mcp",
+          accessToken: "at_manager",
+        },
+      ]),
+    };
+
+    await reportEvalResults({
+      apiKey: "sk_test_key",
+      baseUrl: "https://example.com",
+      suiteName: "SDK smoke",
+      mcpClientManager: mcpClientManager as any,
+      results: [{ caseTitle: "happy-path", passed: true }],
+    });
+
+    expect(mcpClientManager.getServerReplayConfigs).toHaveBeenCalledTimes(1);
+    const requestBody = JSON.parse(fetchMock.mock.calls[0][1].body as string);
+    expect(requestBody.serverReplayConfigs).toEqual([
+      {
+        serverId: "manager",
+        url: "https://manager.example.com/mcp",
+        accessToken: "at_manager",
+      },
+    ]);
+  });
+
+  it("adds external run and iteration ids for one-shot idempotency", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      okResponse({
+        suiteId: "suite_1",
+        runId: "run_1",
+        status: "completed",
+        result: "passed",
+        summary: {
+          total: 2,
+          passed: 2,
+          failed: 0,
+          passRate: 1,
+        },
+      })
+    );
+    global.fetch = fetchMock as any;
+
+    await reportEvalResults({
+      apiKey: "sk_test_key",
+      baseUrl: "https://example.com",
+      suiteName: "one-shot-idempotent",
+      results: [
+        { caseTitle: "case-1", passed: true },
+        { caseTitle: "case-2", passed: true },
+      ],
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const requestBody = JSON.parse(fetchMock.mock.calls[0][1].body as string);
+    expect(requestBody.externalRunId).toEqual(expect.any(String));
+    expect(requestBody.results[0].externalIterationId).toBe(
+      `${requestBody.externalRunId}-1`
+    );
+    expect(requestBody.results[1].externalIterationId).toBe(
+      `${requestBody.externalRunId}-2`
+    );
+  });
+
+  it("uses chunked flow when payload exceeds one-shot thresholds", async () => {
+    const fetchMock = jest
+      .fn()
+      .mockResolvedValueOnce(
+        okResponse({
+          suiteId: "suite_1",
+          runId: "run_1",
+          status: "running",
+          result: "pending",
+        })
+      )
+      .mockResolvedValueOnce(
+        okResponse({ inserted: 200, skipped: 0, total: 200 })
+      )
+      .mockResolvedValueOnce(okResponse({ inserted: 1, skipped: 0, total: 1 }))
+      .mockResolvedValueOnce(
+        okResponse({
+          suiteId: "suite_1",
+          runId: "run_1",
+          status: "completed",
+          result: "passed",
+          summary: {
+            total: 201,
+            passed: 201,
+            failed: 0,
+            passRate: 1,
+          },
+        })
+      );
+    global.fetch = fetchMock as any;
+
+    const results = Array.from({ length: 201 }, (_, index) => ({
+      caseTitle: `case-${index + 1}`,
+      passed: true,
+    }));
+
+    const output = await reportEvalResults({
+      apiKey: "sk_test_key",
+      baseUrl: "https://example.com",
+      suiteName: "chunked",
+      results,
+    });
+
+    expect(output.summary.total).toBe(201);
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+    expect(fetchMock.mock.calls[0][0]).toBe(
+      "https://example.com/api/v1/projects/default/eval-ingest/runs/start"
+    );
+    expect(fetchMock.mock.calls[3][0]).toBe(
+      "https://example.com/api/v1/projects/default/eval-ingest/runs/finalize"
+    );
+  });
+
+  it("forwards serverReplayConfigs when starting chunked runs", async () => {
+    const fetchMock = jest
+      .fn()
+      .mockResolvedValueOnce(
+        okResponse({
+          suiteId: "suite_1",
+          runId: "run_1",
+          status: "running",
+          result: "pending",
+        })
+      )
+      .mockResolvedValueOnce(okResponse({ inserted: 1, skipped: 0, total: 1 }))
+      .mockResolvedValueOnce(
+        okResponse({
+          suiteId: "suite_1",
+          runId: "run_1",
+          status: "completed",
+          result: "passed",
+          summary: successSummary,
+        })
+      );
+    global.fetch = fetchMock as any;
+
+    const largeTrace = "x".repeat(1024 * 1024);
+
+    await reportEvalResults({
+      apiKey: "sk_test_key",
+      baseUrl: "https://example.com",
+      suiteName: "chunked-replay",
+      serverReplayConfigs: [
+        {
+          serverId: "remote",
+          url: "https://example.com/mcp",
+          refreshToken: "rt_123",
+          clientId: "cid_123",
+        },
+      ],
+      results: [{ caseTitle: "case-1", passed: true, trace: largeTrace }],
+    });
+
+    const startBody = JSON.parse(fetchMock.mock.calls[0][1].body as string);
+    expect(startBody.serverReplayConfigs).toEqual([
+      {
+        serverId: "remote",
+        url: "https://example.com/mcp",
+        refreshToken: "rt_123",
+        clientId: "cid_123",
+      },
+    ]);
+  });
+
+  it("uploads widget snapshots before reporting results", async () => {
+    const fetchMock = jest
+      .fn()
+      .mockResolvedValueOnce(
+        okResponse({
+          uploadUrl: "https://upload.example.com/widget-1",
+        })
+      )
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        statusText: "OK",
+        json: async () => ({ storageId: "storage_1" }),
+      })
+      .mockResolvedValueOnce(
+        okResponse({
+          suiteId: "suite_1",
+          runId: "run_1",
+          status: "completed",
+          result: "passed",
+          summary: successSummary,
+        })
+      );
+    global.fetch = fetchMock as any;
+
+    await reportEvalResults({
+      apiKey: "sk_test_key",
+      baseUrl: "https://example.com",
+      suiteName: "widget-snapshots",
+      results: [
+        {
+          caseTitle: "happy-path",
+          passed: true,
+          widgetSnapshots: [
+            {
+              toolCallId: "call-1",
+              toolName: "create_view",
+              protocol: "mcp-apps",
+              serverId: "server-1",
+              resourceUri: "ui://widget/create-view.html",
+              toolMetadata: {
+                ui: { resourceUri: "ui://widget/create-view.html" },
+              },
+              widgetCsp: null,
+              widgetPermissions: null,
+              widgetPermissive: true,
+              prefersBorder: true,
+              widgetHtml: "<html>cached</html>",
+            },
+          ],
+        },
+      ],
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(fetchMock.mock.calls[0][0]).toBe(
+      "https://example.com/api/v1/projects/default/eval-ingest/artifacts/upload-url"
+    );
+    expect(fetchMock.mock.calls[1][0]).toBe(
+      "https://upload.example.com/widget-1"
+    );
+    expect(fetchMock.mock.calls[2][0]).toBe(
+      "https://example.com/api/v1/projects/default/eval-ingest/report"
+    );
+
+    const requestBody = JSON.parse(fetchMock.mock.calls[2][1].body as string);
+    expect(requestBody.results[0].widgetSnapshots[0]).toEqual(
+      expect.objectContaining({
+        toolCallId: "call-1",
+        widgetHtmlBlobId: "storage_1",
+      })
+    );
+    expect(
+      requestBody.results[0].widgetSnapshots[0].widgetHtml
+    ).toBeUndefined();
+  });
+
+  it("warns and continues when widget snapshot upload fails", async () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const fetchMock = jest
+      .fn()
+      .mockResolvedValueOnce(
+        okResponse({
+          uploadUrl: "https://upload.example.com/widget-1",
+        })
+      )
+      .mockResolvedValueOnce(errorResponse(400, "upload failed"))
+      .mockResolvedValueOnce(
+        okResponse({
+          suiteId: "suite_1",
+          runId: "run_1",
+          status: "completed",
+          result: "passed",
+          summary: successSummary,
+        })
+      );
+    global.fetch = fetchMock as any;
+
+    const result = await reportEvalResults({
+      apiKey: "sk_test_key",
+      baseUrl: "https://example.com",
+      suiteName: "widget-snapshots-best-effort",
+      results: [
+        {
+          caseTitle: "happy-path",
+          passed: true,
+          widgetSnapshots: [
+            {
+              toolCallId: "call-1",
+              toolName: "create_view",
+              protocol: "mcp-apps",
+              serverId: "server-1",
+              resourceUri: "ui://widget/create-view.html",
+              toolMetadata: {
+                ui: { resourceUri: "ui://widget/create-view.html" },
+              },
+              widgetCsp: null,
+              widgetPermissions: null,
+              widgetPermissive: true,
+              prefersBorder: true,
+              widgetHtml: "<html>cached</html>",
+            },
+          ],
+        },
+      ],
+    });
+
+    expect(result.runId).toBe("run_1");
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.stringContaining(
+        'skipped widget snapshot upload for "create_view"'
+      )
+    );
+
+    const requestBody = JSON.parse(fetchMock.mock.calls[2][1].body as string);
+    expect(requestBody.results[0].widgetSnapshots[0]).toEqual(
+      expect.objectContaining({
+        toolCallId: "call-1",
+        toolName: "create_view",
+        widgetHtml: "<html>cached</html>",
+      })
+    );
+    expect(
+      requestBody.results[0].widgetSnapshots[0].widgetHtmlBlobId
+    ).toBeUndefined();
+    expect(sentryMocks.addBreadcrumb).toHaveBeenCalledWith(
+      expect.objectContaining({
+        category: "eval-reporting.widget-upload",
+        level: "warning",
+      })
+    );
+    expect(sentryMocks.captureEvalReportingFailure).not.toHaveBeenCalled();
+  });
+
+  it("wraps reporting failures in EvalReportingError and captures once", async () => {
+    const fetchMock = jest
+      .fn()
+      .mockResolvedValue(errorResponse(404, "Not Found"));
+    global.fetch = fetchMock as any;
+
+    await expect(
+      reportEvalResults({
+        apiKey: "sk_test_key",
+        baseUrl: "https://example.com",
+        suiteName: "direct-failure",
+        results: [{ caseTitle: "case-1", passed: true }],
+      })
+    ).rejects.toMatchObject({
+      attemptCount: 1,
+      code: "EVAL_REPORTING_ERROR",
+      endpoint: "/api/v1/projects/default/eval-ingest/report",
+      statusCode: 404,
+    });
+
+    expect(sentryMocks.captureEvalReportingFailure).toHaveBeenCalledTimes(1);
+    expect(sentryMocks.captureEvalReportingFailure).toHaveBeenCalledWith(
+      expect.any(EvalReportingError),
+      expect.objectContaining({
+        apiKey: "sk_test_key",
+        baseUrl: "https://example.com",
+        entrypoint: "reportEvalResults",
+        framework: undefined,
+        resultCount: 1,
+        suiteName: "direct-failure",
+      })
+    );
+    expect(
+      sentryMocks.captureEvalReportingFailure.mock.calls[0][1]
+    ).not.toHaveProperty("serverReplayConfigs");
+  });
+
+  it("prints a clean eval quota error and does not retry", async () => {
+    const convexError =
+      'Uncaught ConvexError: {"code":"billing_limit_reached","message":"Limit \\"maxEvalIterationsPerMonth\\" reached on the team plan.","limit":"maxEvalIterationsPerMonth","gateKey":"maxEvalIterationsPerMonth","plan":"team","source":"subscription","currentValue":5001,"allowedValue":5000,"upgradePlan":"enterprise","enforcementState":"enforcing","resetsAt":1793491200000,"windowKind":"month"}\n' +
+      "    at reserveEvalIterations (../../convex/lib/tierLimits.ts:333:12)";
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(errorResponse(500, convexError));
+    global.fetch = fetchMock as any;
+
+    await expect(
+      reportEvalResults({
+        apiKey: "sk_test_key",
+        baseUrl: "https://example.com",
+        suiteName: "quota-failure",
+        results: [{ caseTitle: "case-1", passed: true }],
+      })
+    ).rejects.toMatchObject({
+      message:
+        "Eval iteration limit reached. Resets at 2026-11-01T00:00:00.000Z.",
+      attemptCount: 1,
+      code: "EVAL_REPORTING_ERROR",
+      endpoint: "/api/v1/projects/default/eval-ingest/report",
+      statusCode: 500,
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not retry billing-limit errors after message normalization", async () => {
+    const convexError =
+      'Uncaught ConvexError: {"code":"billing_limit_reached","message":"Team plan billing limit reached.","limit":"someOtherLimit","gateKey":"someOtherLimit"}';
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(errorResponse(500, convexError));
+    global.fetch = fetchMock as any;
+
+    await expect(
+      reportEvalResults({
+        apiKey: "sk_test_key",
+        baseUrl: "https://example.com",
+        suiteName: "quota-failure",
+        results: [{ caseTitle: "case-1", passed: true }],
+      })
+    ).rejects.toMatchObject({
+      message: "Team plan billing limit reached.",
+      attemptCount: 1,
+      code: "EVAL_REPORTING_ERROR",
+      endpoint: "/api/v1/projects/default/eval-ingest/report",
+      statusCode: 500,
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("returns null in safe mode when strict is false and captures once", async () => {
+    const fetchMock = jest
+      .fn()
+      .mockResolvedValue(errorResponse(500, "backend down"));
+    global.fetch = fetchMock as any;
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const output = await reportEvalResultsSafely({
+      apiKey: "sk_test_key",
+      baseUrl: "https://example.com",
+      suiteName: "safe-mode",
+      strict: false,
+      results: [{ caseTitle: "case-1", passed: true }],
+    });
+
+    expect(output).toBeNull();
+    expect(warnSpy).toHaveBeenCalled();
+    expect(sentryMocks.captureEvalReportingFailure).toHaveBeenCalledTimes(1);
+    expect(sentryMocks.captureEvalReportingFailure).toHaveBeenCalledWith(
+      expect.any(EvalReportingError),
+      expect.objectContaining({
+        apiKey: "sk_test_key",
+        baseUrl: "https://example.com",
+        entrypoint: "reportEvalResultsSafely",
+        resultCount: 1,
+        suiteName: "safe-mode",
+      })
+    );
+    expect(
+      sentryMocks.captureEvalReportingFailure.mock.calls[0][1]
+    ).not.toHaveProperty("serverReplayConfigs");
+  });
+});
