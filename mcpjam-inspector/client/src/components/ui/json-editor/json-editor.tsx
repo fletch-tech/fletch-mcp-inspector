@@ -1,11 +1,12 @@
-import { useState, useCallback, useEffect, useRef } from "react";
+import { useState, useCallback, useEffect, useRef, useMemo } from "react";
 import { AlertTriangle } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { copyToClipboard } from "@/lib/clipboard";
-import { ErrorBoundary } from "@/components/evals/ErrorBoundary";
-import { useJsonEditor } from "./use-json-editor";
+import { ErrorBoundary } from "@/components/ui/error-boundary";
+import { expandJsonStringsInValue, useJsonEditor } from "./use-json-editor";
 import { JsonEditorView } from "./json-editor-view";
 import { JsonEditorEdit } from "./json-editor-edit";
+import { CodeMirrorJsonEditor } from "./codemirror-json-editor";
 import { JsonEditorToolbar } from "./json-editor-toolbar";
 import { JsonEditorStatusBar } from "./json-editor-status-bar";
 import type { JsonEditorProps, JsonEditorMode } from "./types";
@@ -55,9 +56,13 @@ export function JsonEditor({
   expandJsonStrings = false,
   autoFormatOnEdit = true,
   wrapLongLinesInEdit = false,
+  editSurface = "codemirror",
+  wrapLongLinesInView = true,
   showLineNumbers = true,
   toolbarLeftContent,
   toolbarRightContent,
+  error,
+  showValidationErrorInStatusBar = true,
 }: JsonEditorProps) {
   // Determine if we're in raw mode (string content) vs parsed mode
   const isRawMode = rawContent !== undefined;
@@ -82,6 +87,13 @@ export function JsonEditor({
   const hasUnsavedChanges = editor.content !== sourceContent;
   const previousModeRef = useRef<JsonEditorMode>(mode);
   const hasMountedRef = useRef(false);
+  const viewValue = useMemo(() => {
+    if (isRawMode) {
+      return editor.getParsedValue();
+    }
+
+    return expandJsonStrings ? expandJsonStringsInValue(value) : value;
+  }, [editor.content, expandJsonStrings, isRawMode, value]);
 
   useEffect(() => {
     const previousMode = previousModeRef.current;
@@ -167,7 +179,7 @@ export function JsonEditor({
     return (
       <ErrorBoundary fallback={<JsonEditorErrorFallback />}>
         <JsonEditorView
-          value={value}
+          value={viewValue}
           className={className}
           height={height ?? "100%"}
           maxHeight={maxHeight}
@@ -177,6 +189,7 @@ export function JsonEditor({
           onCollapseChange={onCollapseChange}
           showLineNumbers={showLineNumbers}
           collapseStringsAfterLength={collapseStringsAfterLength}
+          wrapLongLinesInView={wrapLongLinesInView}
         />
       </ErrorBoundary>
     );
@@ -226,6 +239,7 @@ export function JsonEditor({
             isValid={editor.isValid}
             leftContent={toolbarLeftContent}
             rightContent={toolbarRightContent}
+            error={error}
           />
         )}
 
@@ -233,7 +247,7 @@ export function JsonEditor({
         <div className="flex-1 min-h-0 h-full">
           {mode === "view" ? (
             <JsonEditorView
-              value={isRawMode ? editor.getParsedValue() : value}
+              value={viewValue}
               height={height ?? "100%"}
               collapsible={collapsible}
               defaultExpandDepth={defaultExpandDepth}
@@ -241,6 +255,21 @@ export function JsonEditor({
               onCollapseChange={onCollapseChange}
               showLineNumbers={showLineNumbers}
               collapseStringsAfterLength={collapseStringsAfterLength}
+              wrapLongLinesInView={wrapLongLinesInView}
+            />
+          ) : editSurface === "codemirror" ? (
+            <CodeMirrorJsonEditor
+              content={editor.content}
+              onChange={editor.setContent}
+              onCursorChange={editor.setCursorPosition}
+              onUndo={editor.undo}
+              onRedo={editor.redo}
+              onEscape={handleEscape}
+              isValid={editor.isValid}
+              height={height ?? "100%"}
+              maxHeight={isMaximized ? undefined : maxHeight}
+              showLineNumbers={showLineNumbers}
+              wrapLongLines={wrapLongLinesInEdit}
             />
           ) : (
             <JsonEditorEdit
@@ -255,6 +284,7 @@ export function JsonEditor({
               maxHeight={isMaximized ? undefined : maxHeight}
               showLineNumbers={showLineNumbers}
               wrapLongLinesInEdit={wrapLongLinesInEdit}
+              wrapLongLinesInView={wrapLongLinesInView}
             />
           )}
         </div>
@@ -263,9 +293,10 @@ export function JsonEditor({
         {mode === "edit" && (
           <JsonEditorStatusBar
             cursorPosition={editor.cursorPosition}
-            isValid={editor.isValid}
-            validationError={editor.validationError}
             characterCount={editor.content.length}
+            validationError={
+              showValidationErrorInStatusBar ? editor.validationError : null
+            }
           />
         )}
       </div>

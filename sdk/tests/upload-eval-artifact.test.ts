@@ -1,0 +1,78 @@
+const sentryMocks = vi.hoisted(() => ({
+  captureEvalReportingFailure: vi.fn().mockResolvedValue(undefined),
+}));
+
+vi.mock("../src/sentry", () => ({
+  captureEvalReportingFailure: sentryMocks.captureEvalReportingFailure,
+}));
+
+import { uploadEvalArtifact } from "../src/upload-eval-artifact";
+import { EvalReportingError } from "../src/errors";
+
+function errorResponse(status: number, message: string): any {
+  return {
+    ok: false,
+    status,
+    statusText: "Error",
+    json: async () => ({ ok: false, error: message }),
+  };
+}
+
+describe("uploadEvalArtifact", () => {
+  const originalFetch = global.fetch;
+
+  afterEach(() => {
+    global.fetch = originalFetch;
+    sentryMocks.captureEvalReportingFailure.mockClear();
+    vi.restoreAllMocks();
+  });
+
+  it("captures once when artifact parsing fails", async () => {
+    await expect(
+      uploadEvalArtifact({
+        apiKey: "sk_test_key",
+        artifact: "{}",
+        format: "custom",
+        suiteName: "parse-failure",
+      })
+    ).rejects.toThrow("customParser is required when format is 'custom'");
+
+    expect(sentryMocks.captureEvalReportingFailure).toHaveBeenCalledTimes(1);
+    expect(sentryMocks.captureEvalReportingFailure).toHaveBeenCalledWith(
+      expect.any(Error),
+      expect.objectContaining({
+        apiKey: "sk_test_key",
+        artifactFormat: "custom",
+        entrypoint: "uploadEvalArtifact",
+        suiteName: "parse-failure",
+      })
+    );
+  });
+
+  it("captures once when reporting parsed artifact results fails", async () => {
+    global.fetch = jest
+      .fn()
+      .mockResolvedValue(errorResponse(404, "Not Found")) as any;
+
+    await expect(
+      uploadEvalArtifact({
+        apiKey: "sk_test_key",
+        artifact: {},
+        customParser: () => [{ caseTitle: "case-1", passed: true }],
+        format: "custom",
+        suiteName: "report-failure",
+      })
+    ).rejects.toBeInstanceOf(EvalReportingError);
+
+    expect(sentryMocks.captureEvalReportingFailure).toHaveBeenCalledTimes(1);
+    expect(sentryMocks.captureEvalReportingFailure).toHaveBeenCalledWith(
+      expect.any(EvalReportingError),
+      expect.objectContaining({
+        apiKey: "sk_test_key",
+        artifactFormat: "custom",
+        entrypoint: "uploadEvalArtifact",
+        suiteName: "report-failure",
+      })
+    );
+  });
+});

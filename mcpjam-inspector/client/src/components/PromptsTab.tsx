@@ -1,16 +1,16 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
-import { Button } from "./ui/button";
-import { Input } from "./ui/input";
-import { Textarea } from "./ui/textarea";
-import { Badge } from "./ui/badge";
-import { ScrollArea } from "./ui/scroll-area";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Button } from "@mcpjam/design-system/button";
+import { Input } from "@mcpjam/design-system/input";
+import { Textarea } from "@mcpjam/design-system/textarea";
+import { Badge } from "@mcpjam/design-system/badge";
+import { ScrollArea } from "@mcpjam/design-system/scroll-area";
 import {
   Select,
   SelectContent,
   SelectItem,
   SelectTrigger,
   SelectValue,
-} from "./ui/select";
+} from "@mcpjam/design-system/select";
 import {
   MessageSquare,
   Play,
@@ -20,17 +20,94 @@ import {
 } from "lucide-react";
 import { EmptyState } from "./ui/empty-state";
 import { ThreePanelLayout } from "./ui/three-panel-layout";
+import { MrtrElicitationHost } from "./elicitation/MrtrElicitationHost";
+import { HostedMrtrHost } from "./elicitation/HostedMrtrHost";
 import { JsonEditor } from "@/components/ui/json-editor";
-import { MCPServerConfig, type MCPPrompt } from "@mcpjam/sdk";
+import { extractDisplayFromValue } from "@/components/chat-v2/shared/tool-result-text";
+import type { MCPPrompt, MCPServerConfig } from "@mcpjam/sdk/browser";
+import type { ServerWithName } from "@/state/app-types";
 import {
   getPrompt as getPromptApi,
   listPrompts as listPromptsApi,
 } from "@/lib/apis/mcp-prompts-api";
+import {
+  CacheProvenanceBadge,
+  type ServedFromCache,
+} from "@/components/ui/cache-provenance-badge";
 import { SelectedToolHeader } from "./ui-playground/SelectedToolHeader";
+import type { ConnectionStatus } from "@/state/app-types";
+import { boundedJsonByteLength } from "@/lib/webmcp/bounded-size";
+import { useSurfaceAgentBridge } from "@/lib/webmcp/use-surface-agent-bridge";
+import { createInspectorCommandClientError } from "@/lib/inspector-command-handlers";
+import { clampText } from "@/lib/webmcp/groups/shared";
+import {
+  resetScopeStepUp,
+  runWithScopeStepUp,
+} from "@/lib/scope-step-up";
+import {
+  claimPendingDirectScopeStepUpReplay,
+  clearPendingDirectScopeStepUpReplay,
+  savePendingDirectScopeStepUpReplay,
+} from "@/lib/scope-step-up-replay";
+import type { GetPromptInspectorCommand } from "@/shared/inspector-command.js";
+
+/** Cap the list of prompts a snapshot enumerates (names/titles only). */
+const PROMPT_SNAPSHOT_MAX_ITEMS = 30;
+/** Cap how many rendered messages a get returns to the transcript. */
+const PROMPT_MESSAGE_MAX_BLOCKS = 20;
+
+/**
+ * Build a transcript-safe view of a rendered prompt: each message's text is
+ * capped with the group's `clampText`; non-text parts are never inlined
+ * (metadata only). The whole tool result is additionally clamped by
+ * `fromActionResult` in the group, so this is the inner, per-message bound.
+ */
+function capPromptContentForTranscript(content: unknown): {
+  description?: string;
+  messages: unknown[];
+  truncated: boolean;
+} {
+  const src = content as any;
+  const messages = Array.isArray(src?.messages) ? (src.messages as any[]) : [];
+  let truncated = false;
+  const out = messages.slice(0, PROMPT_MESSAGE_MAX_BLOCKS).map((m) => {
+    const part = m?.content;
+    if (part && typeof part.text === "string") {
+      const capped = clampText(part.text);
+      if (capped !== part.text) truncated = true;
+      return { role: m?.role, type: part.type ?? "text", text: capped };
+    }
+    return {
+      role: m?.role,
+      type: part?.type ?? "unknown",
+      note: "Non-text content omitted for the transcript.",
+    };
+  });
+  if (messages.length > PROMPT_MESSAGE_MAX_BLOCKS) truncated = true;
+  let description: string | undefined;
+  if (typeof src?.description === "string") {
+    description = clampText(src.description);
+    // A clamped description is also truncation — flag it so the agent doesn't
+    // read `truncated: false` and treat the shortened text as complete.
+    if (description !== src.description) truncated = true;
+  }
+  return {
+    ...(description !== undefined ? { description } : {}),
+    messages: out,
+    truncated,
+  };
+}
 
 interface PromptsTabProps {
   serverConfig?: MCPServerConfig;
   serverName?: string;
+  /**
+   * The resolved server entry, needed to drive a SEP-2350 scope step-up on a
+   * `403 insufficient_scope`. Optional: without it a failure just surfaces the
+   * error.
+   */
+  server?: ServerWithName;
+  serverConnectionStatus?: ConnectionStatus;
 }
 
 type PromptArgument = NonNullable<MCPPrompt["arguments"]>[number];
@@ -46,25 +123,63 @@ interface FormField {
   maximum?: number;
 }
 
-export function PromptsTab({ serverConfig, serverName }: PromptsTabProps) {
+export function PromptsTab({
+  serverConfig,
+  serverName,
+  server,
+  serverConnectionStatus,
+}: PromptsTabProps) {
   const [prompts, setPrompts] = useState<MCPPrompt[]>([]);
   const [selectedPrompt, setSelectedPrompt] = useState<string>("");
   const [formFields, setFormFields] = useState<FormField[]>([]);
   const [promptContent, setPromptContent] = useState<any>(null);
   const [loading, setLoading] = useState(false);
   const [fetchingPrompts, setFetchingPrompts] = useState(false);
+  const [promptsServedFromCache, setPromptsServedFromCache] = useState<
+    ServedFromCache | undefined
+  >(undefined);
   const [error, setError] = useState<string>("");
   const [isSidebarVisible, setIsSidebarVisible] = useState(true);
+  const promptsFetchVersionRef = useRef(0);
+  const promptGetVersionRef = useRef(0);
+  const isServerConnected =
+    serverConnectionStatus === undefined ||
+    serverConnectionStatus === "connected";
 
   const selectedPromptData = useMemo(() => {
     return prompts.find((prompt) => prompt.name === selectedPrompt) ?? null;
   }, [prompts, selectedPrompt]);
+  const promptDisplay = extractDisplayFromValue(promptContent);
+
+  const resetLoadedPromptState = (
+    invalidateRequests = true,
+    stopLoading = true,
+  ) => {
+    if (invalidateRequests) {
+      promptsFetchVersionRef.current += 1;
+      promptGetVersionRef.current += 1;
+    }
+    if (stopLoading) {
+      setLoading(false);
+      setFetchingPrompts(false);
+    }
+    setPrompts([]);
+    setSelectedPrompt("");
+    setFormFields([]);
+    setPromptContent(null);
+    setError("");
+    // SEP-2549 provenance describes the currently displayed prompt list; clear
+    // it whenever that list is emptied so the badge cannot outlive its data.
+    setPromptsServedFromCache(undefined);
+  };
 
   useEffect(() => {
-    if (serverConfig && serverName) {
-      fetchPrompts();
+    if (!serverConfig || !serverName || !isServerConnected) {
+      resetLoadedPromptState();
+      return;
     }
-  }, [serverConfig, serverName]);
+    fetchPrompts();
+  }, [serverConfig, serverName, isServerConnected]);
 
   useEffect(() => {
     if (selectedPromptData?.arguments) {
@@ -74,15 +189,24 @@ export function PromptsTab({ serverConfig, serverName }: PromptsTabProps) {
     }
   }, [selectedPromptData]);
 
-  const fetchPrompts = async () => {
+  const fetchPrompts = async (forceRefresh = false) => {
     if (!serverName) return;
+    if (!isServerConnected) {
+      resetLoadedPromptState();
+      return;
+    }
 
     setFetchingPrompts(true);
     setError("");
+    const fetchVersion = ++promptsFetchVersionRef.current;
 
     try {
-      const serverPrompts = await listPromptsApi(serverName);
+      const serverPrompts = await listPromptsApi(serverName, {
+        refresh: forceRefresh,
+      });
+      if (fetchVersion !== promptsFetchVersionRef.current) return;
       setPrompts(serverPrompts);
+      setPromptsServedFromCache(serverPrompts.servedFromCache);
 
       // Clear selection if the selected prompt no longer exists
       if (
@@ -93,11 +217,14 @@ export function PromptsTab({ serverConfig, serverName }: PromptsTabProps) {
         setPromptContent(null);
       }
     } catch (err) {
+      if (fetchVersion !== promptsFetchVersionRef.current) return;
       const message =
         err instanceof Error ? err.message : `Could not fetch prompts: ${err}`;
       setError(message);
     } finally {
-      setFetchingPrompts(false);
+      if (fetchVersion === promptsFetchVersionRef.current) {
+        setFetchingPrompts(false);
+      }
     }
   };
 
@@ -160,34 +287,107 @@ export function PromptsTab({ serverConfig, serverName }: PromptsTabProps) {
     async (promptName?: string, params?: Record<string, string>) => {
       const targetPrompt = promptName ?? selectedPrompt;
       if (!targetPrompt || !serverName) return;
+      if (!isServerConnected) {
+        setError("Connect this server before running prompts.");
+        return;
+      }
 
       setLoading(true);
       setError("");
+      const getVersion = ++promptGetVersionRef.current;
 
       try {
         const resolvedParams = params ?? buildParameters();
-        const data = await getPromptApi(
-          serverName,
-          targetPrompt,
-          resolvedParams,
+        // SEP-2350: the wrapper owns the whole step-up lifecycle — reset the
+        // bounded budget on success, drive the union-scope re-authorization on
+        // a `403 insufficient_scope`, re-throw everything else untouched.
+        const data = await runWithScopeStepUp(
+          server,
+          { method: "prompts/get", operation: targetPrompt },
+          () => getPromptApi(serverName, targetPrompt, resolvedParams),
+          {
+            beforeStepUp: () =>
+              savePendingDirectScopeStepUpReplay({
+                operation: {
+                  resourceUrl: String(
+                    (server?.config as any)?.url ?? serverName,
+                  ),
+                  method: "prompts/get",
+                  operation: targetPrompt,
+                },
+                descriptor: {
+                  kind: "prompt",
+                  surface: "prompts",
+                  serverName,
+                  promptName: targetPrompt,
+                  arguments: resolvedParams,
+                },
+              }),
+          },
         );
+        if (getVersion !== promptGetVersionRef.current) return;
         setPromptContent(data.content);
       } catch (err) {
+        if (getVersion !== promptGetVersionRef.current) return;
         const message =
           err instanceof Error ? err.message : `Error getting prompt: ${err}`;
         setError(message);
       } finally {
-        setLoading(false);
+        if (getVersion === promptGetVersionRef.current) {
+          setLoading(false);
+        }
       }
     },
-    [selectedPrompt, serverName, buildParameters],
+    [
+      selectedPrompt,
+      serverName,
+      isServerConnected,
+      buildParameters,
+      server,
+    ],
   );
+
+  useEffect(() => {
+    if (!serverName || !isServerConnected) return;
+    const pending = claimPendingDirectScopeStepUpReplay({
+      serverName,
+      surface: "prompts",
+    });
+    if (!pending || pending.descriptor.kind !== "prompt") return;
+    const descriptor = pending.descriptor;
+    setSelectedPrompt(descriptor.promptName);
+    setLoading(true);
+    setError("");
+    void getPromptApi(
+      descriptor.serverName,
+      descriptor.promptName,
+      descriptor.arguments,
+    )
+      .then((data) => {
+        setPromptContent(data.content);
+        resetScopeStepUp(server, {
+          method: "prompts/get",
+          operation: descriptor.promptName,
+        });
+      })
+      .catch((error) => {
+        setError(
+          `Authorization finished, but the prompt could not be replayed: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+      })
+      .finally(() => {
+        setLoading(false);
+        clearPendingDirectScopeStepUpReplay();
+      });
+  }, [isServerConnected, server, serverName]);
 
   const promptNames = prompts.map((prompt) => prompt.name);
 
   // Handle Enter key in input fields
   const handleInputKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
-    if (e.key === "Enter" && !loading) {
+    if (e.key === "Enter" && isServerConnected && !loading) {
       e.preventDefault();
       getPrompt();
     }
@@ -196,7 +396,13 @@ export function PromptsTab({ serverConfig, serverName }: PromptsTabProps) {
   // Handle Enter key to get prompt globally
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === "Enter" && !e.shiftKey && selectedPrompt && !loading) {
+      if (
+        e.key === "Enter" &&
+        !e.shiftKey &&
+        selectedPrompt &&
+        isServerConnected &&
+        !loading
+      ) {
         const target = e.target as HTMLElement;
         const tagName = target.tagName;
         const isEditable = target.isContentEditable;
@@ -212,7 +418,137 @@ export function PromptsTab({ serverConfig, serverName }: PromptsTabProps) {
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [selectedPrompt, loading, getPrompt]);
+  }, [selectedPrompt, isServerConnected, loading, getPrompt]);
+
+  // Agent bridge: one mount-scoped tool (ui_get_prompt) plus a redacted
+  // snapshot. Registered here — PromptsTab owns the prompt list and the
+  // getPromptApi path the Run button uses. Must run before any early return
+  // (rules of hooks); the handler throws when no server is selected.
+  useSurfaceAgentBridge({
+    surfaceId: "prompts",
+    handlers: {
+      getPrompt: async (command) => {
+        if (!serverName) {
+          throw createInspectorCommandClientError(
+            "unsupported_in_mode",
+            "No server is selected on the Prompts screen — select and connect one first.",
+          );
+        }
+        if (!isServerConnected) {
+          throw createInspectorCommandClientError(
+            "unsupported_in_mode",
+            "The selected server is not connected — connect it before rendering prompts.",
+          );
+        }
+        const { payload } = command as GetPromptInspectorCommand;
+        const key = payload?.prompt?.trim();
+        if (!key) {
+          throw createInspectorCommandClientError(
+            "invalid_request",
+            "'prompt' is required (a prompt name as shown on the screen).",
+          );
+        }
+        const matches = prompts.filter(
+          (p) => p.name === key || p.title === key,
+        );
+        if (matches.length === 0) {
+          throw createInspectorCommandClientError(
+            "invalid_request",
+            `No prompt matches "${key}". Use a prompt name from this screen (list them with ui_snapshot_app).`,
+          );
+        }
+        if (matches.length > 1) {
+          throw createInspectorCommandClientError(
+            "invalid_request",
+            `"${key}" is ambiguous — pass the exact prompt name.`,
+          );
+        }
+        const target = matches[0];
+        const providedArgs = payload.arguments ?? {};
+        // Reflect the selection on screen, like clicking the prompt does.
+        setSelectedPrompt(target.name);
+        setError("");
+        setPromptContent(null);
+        // Claim the render-version (same ref the on-screen Run path bumps) so a
+        // slower render can't overwrite a newer selection's result.
+        const getVersion = ++promptGetVersionRef.current;
+        try {
+          // SAME api AND the same step-up lifecycle as the Run button — an
+          // agent-triggered `403 insufficient_scope` must be able to start a
+          // re-authorization, and an agent-triggered success must clear the
+          // budget, exactly as the on-screen path does.
+          const data = await runWithScopeStepUp(
+            server,
+            { method: "prompts/get", operation: target.name },
+            () => getPromptApi(serverName, target.name, providedArgs),
+            {
+              beforeStepUp: () =>
+                savePendingDirectScopeStepUpReplay({
+                  operation: {
+                    resourceUrl: String(
+                      (server?.config as any)?.url ?? serverName,
+                    ),
+                    method: "prompts/get",
+                    operation: target.name,
+                  },
+                  descriptor: {
+                    kind: "prompt",
+                    surface: "prompts",
+                    serverName,
+                    promptName: target.name,
+                    arguments: providedArgs,
+                  },
+                }),
+            },
+          );
+          // Commit to the on-screen pane only if this is still the newest
+          // render; the tool still returns what IT fetched.
+          if (getVersion === promptGetVersionRef.current) {
+            setPromptContent(data.content);
+          }
+          const capped = capPromptContentForTranscript(data.content);
+          return {
+            status: "prompt_rendered",
+            prompt: target.name,
+            ...capped,
+            note: capped.truncated
+              ? "Content was truncated for the transcript — view the full render on screen."
+              : undefined,
+          };
+        } catch (e) {
+          throw createInspectorCommandClientError(
+            "execution_failed",
+            e instanceof Error ? e.message : "Failed to render the prompt.",
+          );
+        }
+      },
+    },
+    // Redacted STATE, not payloads: the selected server, the prompt NAMES
+    // (bounded), the current selection + its argument FIELD NAMES (never the
+    // values), and whether a render exists (presence/size only, never content).
+    snapshot: () => {
+      // Bounded: never fully serialize a huge prompt body just to size it.
+      const { bytes: lastResultBytes, truncated: lastResultTruncated } =
+        promptContent !== null && promptContent !== undefined
+          ? boundedJsonByteLength(promptContent)
+          : { bytes: 0, truncated: false };
+      return {
+        selectedServer: serverName ?? null,
+        connected: isServerConnected,
+        promptCount: prompts.length,
+        prompts: prompts
+          .slice(0, PROMPT_SNAPSHOT_MAX_ITEMS)
+          .map((p) => ({ name: p.name, title: p.title ?? null })),
+        selectedPrompt: selectedPrompt || null,
+        selectedPromptArgumentNames: formFields.map((f) => f.name),
+        lastResult: {
+          present: promptContent !== null && promptContent !== undefined,
+          approxSizeBytes: lastResultBytes,
+          ...(lastResultTruncated ? { approxSizeCapped: true } : {}),
+        },
+      };
+    },
+  });
 
   if (!serverConfig || !serverName) {
     return (
@@ -239,13 +575,15 @@ export function PromptsTab({ serverConfig, serverName }: PromptsTabProps) {
             </span>
           </div>
 
+          <CacheProvenanceBadge servedFromCache={promptsServedFromCache} />
+
           {/* Secondary actions */}
           <div className="flex items-center gap-0.5 text-muted-foreground/80">
             <Button
-              onClick={fetchPrompts}
+              onClick={() => fetchPrompts(true)}
               variant="ghost"
               size="sm"
-              disabled={fetchingPrompts}
+              disabled={fetchingPrompts || !isServerConnected}
               className="h-7 w-7 p-0"
               title="Refresh prompts"
             >
@@ -267,7 +605,7 @@ export function PromptsTab({ serverConfig, serverName }: PromptsTabProps) {
           {/* Run button */}
           <Button
             onClick={() => getPrompt()}
-            disabled={loading || !selectedPrompt}
+            disabled={loading || !selectedPrompt || !isServerConnected}
             size="sm"
             className="h-8 px-3 text-xs ml-auto"
           >
@@ -289,7 +627,19 @@ export function PromptsTab({ serverConfig, serverName }: PromptsTabProps) {
             toolName={selectedPrompt}
             description={selectedPromptData?.description}
             onExpand={() => setSelectedPrompt("")}
-            onClear={() => setSelectedPrompt("")}
+            toolSwitchList={{
+              names: prompts.map((p) => p.name),
+              onSelect: (name) => {
+                setSelectedPrompt(name);
+                setError("");
+                setPromptContent(null);
+
+                const prompt = prompts.find((p) => p.name === name);
+                if (!prompt?.arguments || prompt.arguments.length === 0) {
+                  void getPrompt(name, {});
+                }
+              },
+            }}
           />
 
           <ScrollArea className="flex-1">
@@ -412,7 +762,9 @@ export function PromptsTab({ serverConfig, serverName }: PromptsTabProps) {
               ) : promptNames.length === 0 ? (
                 <div className="text-center py-8">
                   <p className="text-sm text-muted-foreground">
-                    No prompts available
+                    {isServerConnected
+                      ? "No prompts available"
+                      : "Connect this server to load prompts."}
                   </p>
                 </div>
               ) : (
@@ -475,16 +827,20 @@ export function PromptsTab({ serverConfig, serverName }: PromptsTabProps) {
               {error}
             </div>
           </div>
-        ) : promptContent ? (
+        ) : promptContent !== null && promptContent !== undefined ? (
           <div className="flex-1 min-h-0 p-4 flex flex-col">
-            {typeof promptContent === "string" ? (
+            {promptDisplay?.kind === "text" ? (
               <pre className="flex-1 min-h-0 whitespace-pre-wrap text-xs font-mono bg-muted/30 p-4 rounded-md border border-border overflow-auto">
-                {promptContent}
+                {promptDisplay.text}
               </pre>
             ) : (
               <div className="flex-1 min-h-0">
                 <JsonEditor
-                  value={promptContent}
+                  value={
+                    promptDisplay?.kind === "json"
+                      ? promptDisplay.value
+                      : promptContent
+                  }
                   readOnly
                   showToolbar={false}
                   height="100%"
@@ -516,14 +872,21 @@ export function PromptsTab({ serverConfig, serverName }: PromptsTabProps) {
   );
 
   return (
-    <ThreePanelLayout
-      id="prompts"
-      sidebar={sidebarContent}
-      content={centerContent}
-      sidebarVisible={isSidebarVisible}
-      onSidebarVisibilityChange={setIsSidebarVisible}
-      sidebarTooltip="Show prompts sidebar"
-      serverName={serverName}
-    />
+    <>
+      <ThreePanelLayout
+        id="prompts"
+        sidebar={sidebarContent}
+        content={centerContent}
+        sidebarVisible={isSidebarVisible}
+        onSidebarVisibilityChange={setIsSidebarVisible}
+        sidebarTooltip="Show prompts sidebar"
+        serverName={serverName}
+      />
+      {/* Modern MRTR (`input_required`) input rail: a `prompts/get` can return
+          `input_required`; the SDK driver collects rounds through this shared
+          dialog and retries the get. */}
+      <MrtrElicitationHost />
+      <HostedMrtrHost />
+    </>
   );
 }

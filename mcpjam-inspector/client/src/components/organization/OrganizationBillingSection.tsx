@@ -1,0 +1,1269 @@
+import { Fragment, useEffect, useRef, useState, type ReactNode } from "react";
+import { Check, CheckCircle2, CreditCard, Info, Loader2 } from "lucide-react";
+import { toast } from "@/lib/toast";
+import { Badge } from "@mcpjam/design-system/badge";
+import { Button } from "@mcpjam/design-system/button";
+import { Card, CardContent, CardTitle } from "@mcpjam/design-system/card";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@mcpjam/design-system/dialog";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@mcpjam/design-system/table";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger,
+} from "@mcpjam/design-system/tooltip";
+import type {
+  BillingInterval,
+  OrganizationBillingStatus,
+  OrganizationPlan,
+  PlanCatalog,
+} from "@/hooks/useOrganizationBilling";
+import type { CheckoutIntentWithOrganization } from "@/lib/billing-deep-link";
+import { guardCheckoutIntentAgainstBillingStatus } from "@/lib/billing-checkout-intent-guard";
+import {
+  getAnnualDiscountPercent,
+  getDisplayPriceCentsForPlan,
+} from "@/lib/billing-entitlements";
+import { cn } from "@/lib/utils";
+import { buildComparePlanSectionsFromCatalog } from "@/components/organization/billing-compare-view-model";
+import { type ComparePlanCell } from "@/components/organization/compare-plan-marketing";
+import { CreditBalanceCard } from "@/components/billing/CreditBalanceCard";
+import { PaymentsHistorySection } from "@/components/billing/PaymentsHistorySection";
+import { ErrorBoundary } from "@/components/ui/error-boundary";
+import { useCreditTopupReturnFlowBilling } from "@/hooks/useCreditTopupReturnFlow";
+
+const PLAN_ORDER: OrganizationPlan[] = ["free", "team", "enterprise"];
+
+/** Column highlighted as the recommended tier (matches common pricing-page “Popular”). */
+const POPULAR_PLAN: OrganizationPlan = "team";
+
+/** Defines org as the billed scope for plans and limits (vs projects). */
+const ORG_COMPARE_PLANS_NOTE = "Your organization is the billed unit.";
+
+function getPlanRank(plan: OrganizationPlan): number {
+  return PLAN_ORDER.indexOf(plan);
+}
+
+function getPlanColumnCta(params: {
+  plan: OrganizationPlan;
+  currentPlan: OrganizationPlan;
+  entry: PlanCatalog["plans"][OrganizationPlan];
+  billingConfigured: boolean;
+  canManageBilling: boolean;
+  isBillingActionPending: boolean;
+  scheduledCancellationDate: string | null;
+  onDowngradePlan: (
+    plan: OrganizationPlan,
+    billingInterval: BillingInterval
+  ) => void;
+  onStartPlanChange: (
+    plan: "team",
+    billingInterval: BillingInterval
+  ) => Promise<void>;
+  billingInterval: BillingInterval;
+}): {
+  label: string;
+  disabled: boolean;
+  variant: "default" | "outline" | "secondary";
+  onClick?: () => void;
+  tooltip?: string;
+} {
+  const {
+    plan,
+    currentPlan,
+    entry,
+    billingConfigured,
+    canManageBilling,
+    isBillingActionPending,
+    scheduledCancellationDate,
+    onDowngradePlan,
+    onStartPlanChange,
+    billingInterval,
+  } = params;
+
+  const isCurrentPlan = currentPlan === plan;
+  const isHigherTier = getPlanRank(plan) > getPlanRank(currentPlan);
+  const isDowngrade = getPlanRank(plan) < getPlanRank(currentPlan);
+  const isEnterprisePlan = plan === "enterprise";
+
+  if (isCurrentPlan) {
+    return { label: "Current plan", disabled: true, variant: "outline" };
+  }
+
+  if (isEnterprisePlan) {
+    return {
+      label: "Talk to sales",
+      disabled: false,
+      variant: "outline",
+      onClick: () => {
+        window.location.href =
+          "mailto:founders@mcpjam.com?subject=Fletch%20Enterprise";
+      },
+    };
+  }
+
+  if (isDowngrade) {
+    if (scheduledCancellationDate !== null) {
+      return {
+        label: "Downgrade scheduled",
+        disabled: true,
+        variant: "outline",
+        tooltip: scheduledCancellationDate
+          ? `Your plan is already scheduled to return to Free on ${scheduledCancellationDate}.`
+          : "Your plan is already scheduled to return to Free at the end of the current billing period.",
+      };
+    }
+    return {
+      label: "Downgrade",
+      disabled:
+        !canManageBilling || !billingConfigured || isBillingActionPending,
+      variant: "outline",
+      onClick: () => void onDowngradePlan(plan, billingInterval),
+    };
+  }
+
+  if (isHigherTier && entry.isSelfServe) {
+    if (plan !== "team") {
+      return { label: "Unavailable", disabled: true, variant: "outline" };
+    }
+    return {
+      label: "Upgrade",
+      disabled:
+        !billingConfigured || !canManageBilling || isBillingActionPending,
+      variant: "default",
+      onClick: () => void onStartPlanChange(plan, billingInterval),
+    };
+  }
+
+  return { label: "Unavailable", disabled: true, variant: "outline" };
+}
+
+function formatCurrency(
+  amount: number,
+  currency: string,
+  maximumFractionDigits: number
+): string {
+  return new Intl.NumberFormat(undefined, {
+    style: "currency",
+    currency,
+    minimumFractionDigits: 0,
+    maximumFractionDigits,
+  }).format(amount);
+}
+
+function formatBillingDate(timestampMs: number): string {
+  return new Intl.DateTimeFormat(undefined, {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+  }).format(new Date(timestampMs));
+}
+
+function getDeferredTrialBillingCopy(
+  billingStatus: OrganizationBillingStatus | undefined
+): string | null {
+  const deferredTrialBillingStartsAt =
+    billingStatus?.deferredTrialBillingStartsAt;
+  if (typeof deferredTrialBillingStartsAt !== "number") {
+    return null;
+  }
+
+  return `$0 today. First bill charged in advance on ${formatBillingDate(
+    deferredTrialBillingStartsAt
+  )}.`;
+}
+
+/** Price line for the compare table; Team uses `/seat/mo`. */
+function formatPlanPriceLabel(
+  _plan: OrganizationPlan,
+  amountInCents: number | null,
+  currency: string,
+  interval: BillingInterval
+): string {
+  if (amountInCents == null) {
+    return interval === "annual" ? "Custom annual" : "Custom pricing";
+  }
+
+  if (interval === "monthly") {
+    return `${formatCurrency(amountInCents / 100, currency, 0)}/seat/mo`;
+  }
+  const monthlyEquivalentDollars = amountInCents / 12 / 100;
+  return `${formatCurrency(
+    Math.round(monthlyEquivalentDollars),
+    currency,
+    0
+  )}/seat/mo`;
+}
+
+function formatPerSeatCadence(
+  plan: OrganizationPlan,
+  entry: PlanCatalog["plans"][OrganizationPlan],
+  interval: BillingInterval
+): string {
+  if (plan === "free") {
+    return "No credit card required";
+  }
+  if (plan === "enterprise") {
+    return "Annual commitment";
+  }
+  if (entry.billingModel === "flat") {
+    return interval === "annual"
+      ? "Flat rate, billed annually"
+      : "Flat rate, billed monthly";
+  }
+  return interval === "annual" ? "Billed annually" : "Billed monthly";
+}
+
+const PER_SEAT_MO_SUFFIX = "/seat/mo";
+const PER_MO_SUFFIX = "/mo";
+
+function PlanPriceDisplay({ label }: { label: string }) {
+  const suffix = label.endsWith(PER_SEAT_MO_SUFFIX)
+    ? PER_SEAT_MO_SUFFIX
+    : label.endsWith(PER_MO_SUFFIX)
+    ? PER_MO_SUFFIX
+    : null;
+  const amount = suffix ? label.slice(0, -suffix.length) : label;
+
+  return (
+    <div className="flex min-h-9 min-w-0 items-baseline justify-center gap-x-1">
+      <span className="text-3xl font-semibold tabular-nums tracking-tight">
+        {amount}
+      </span>
+      {suffix ? (
+        <span className="text-sm font-medium text-muted-foreground">
+          {suffix}
+        </span>
+      ) : null}
+    </div>
+  );
+}
+
+const COMPARE_PLAN_ROW_LABEL_TOOLTIPS: Record<
+  string,
+  { ariaLabel: string; content: string; contentClassName?: string }
+> = {
+  "Included credits": {
+    ariaLabel: "About included credits",
+    content:
+      "Model credits for playground, chat, and agent usage. Free resets daily; Team is allocated per seat each month.",
+    contentClassName: "max-w-[22rem]",
+  },
+  "Seat limit": {
+    ariaLabel: "About seat limits",
+    content:
+      "You're charged only for active members. Pending invites are free until accepted.",
+    contentClassName: "max-w-[18rem]",
+  },
+  "Eval iterations": {
+    ariaLabel: "About eval iterations",
+    content:
+      "Suite and quick eval runs count toward your plan's iteration allowance. Free resets daily; Team resets monthly.",
+    contentClassName: "max-w-[22rem]",
+  },
+  "Evaluation traces": {
+    ariaLabel: "What are evaluation traces?",
+    content:
+      "Traces for evaluations: configured user prompts, tool execution, agent reasoning, errors, and latency breakdown for playground and CI/CD runs.",
+    contentClassName: "max-w-[26rem]",
+  },
+  "SSO / SAML": {
+    ariaLabel: "About SSO",
+    content:
+      "Single sign-on with SAML for your organization is available on Enterprise.",
+    contentClassName: "max-w-[20rem]",
+  },
+  "Role-based access control (RBAC)": {
+    ariaLabel: "About RBAC",
+    content:
+      "Basic Admin/Member-style access on Free and Team; customizable roles and fine-grained permissions on Enterprise.",
+    contentClassName: "max-w-[22rem]",
+  },
+  "Data processing agreement (DPA)": {
+    ariaLabel: "About the DPA",
+    content:
+      "A legal agreement covering how Fletch processes personal data on your behalf",
+    contentClassName: "max-w-[22rem]",
+  },
+  "Uptime service level agreement (SLA)": {
+    ariaLabel: "About the uptime SLA",
+    content:
+      "Formal uptime commitment with Enterprise; not offered on lower tiers.",
+    contentClassName: "max-w-[18rem]",
+  },
+};
+
+function ComparePlanRowLabel({
+  label,
+  tooltipKey,
+}: {
+  label: string;
+  tooltipKey?: string;
+}) {
+  const tip = COMPARE_PLAN_ROW_LABEL_TOOLTIPS[tooltipKey ?? label];
+  if (!tip) {
+    return <>{label}</>;
+  }
+  return (
+    <span className="inline-flex max-w-full items-center gap-1.5">
+      <span className="min-w-0">{label}</span>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <button
+            type="button"
+            className="inline-flex shrink-0 rounded-sm text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            aria-label={tip.ariaLabel}
+          >
+            <Info className="size-3.5" />
+          </button>
+        </TooltipTrigger>
+        <TooltipContent
+          side="right"
+          sideOffset={6}
+          className={cn("text-balance", tip.contentClassName)}
+        >
+          {tip.content}
+        </TooltipContent>
+      </Tooltip>
+    </span>
+  );
+}
+
+const COMPARE_PLAN_PERIOD_SUFFIXES = ["/ seat / mo", "/ day", "/ mo"] as const;
+
+function ComparePlanMatrixCell({ cell }: { cell: ComparePlanCell }) {
+  if (cell.kind === "check") {
+    return (
+      <span className="flex w-full justify-center">
+        <Check className="size-4 shrink-0 text-emerald-600" aria-hidden />
+        <span className="sr-only">Included</span>
+      </span>
+    );
+  }
+  if (cell.kind === "x") {
+    return (
+      <span className="flex w-full justify-center text-sm text-muted-foreground/80">
+        <span aria-hidden>-</span>
+        <span className="sr-only">Not included</span>
+      </span>
+    );
+  }
+
+  const periodSuffix = COMPARE_PLAN_PERIOD_SUFFIXES.find((suffix) =>
+    cell.text.endsWith(suffix)
+  );
+  if (periodSuffix) {
+    const amount = cell.text.slice(0, -periodSuffix.length).trimEnd();
+    return (
+      <span className="flex w-full items-baseline justify-center gap-x-1 text-sm">
+        <span className="font-semibold tabular-nums text-foreground">
+          {amount}
+        </span>
+        <span className="font-normal text-muted-foreground">
+          {periodSuffix}
+        </span>
+      </span>
+    );
+  }
+
+  return (
+    <span
+      className={cn(
+        "block w-full text-center text-sm text-muted-foreground",
+        cell.emphasize && "font-semibold text-foreground"
+      )}
+    >
+      {cell.text}
+    </span>
+  );
+}
+
+function BillingIntervalToggle({
+  billingInterval,
+  onBillingIntervalChange,
+  annualDiscountPct,
+}: {
+  billingInterval: BillingInterval;
+  onBillingIntervalChange: (interval: BillingInterval) => void;
+  annualDiscountPct: number;
+}) {
+  return (
+    <div
+      role="group"
+      aria-label="Billing interval"
+      className="inline-flex max-w-full flex-nowrap items-center gap-1 rounded-lg border border-border/70 bg-muted/40 p-1 whitespace-nowrap"
+    >
+      <button
+        type="button"
+        className={cn(
+          "inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md px-2 py-1.5 text-sm font-medium transition-colors sm:gap-2 sm:px-3",
+          billingInterval === "annual"
+            ? "bg-background text-foreground shadow-sm"
+            : "text-muted-foreground"
+        )}
+        onClick={() => onBillingIntervalChange("annual")}
+      >
+        Annual
+        <span
+          className="shrink-0 rounded-full bg-primary/10 px-1.5 py-0.5 text-[10px] font-medium text-primary sm:px-2 sm:text-xs"
+          title="Team: savings vs paying the monthly rate for 12 months."
+        >
+          -{annualDiscountPct}%
+        </span>
+      </button>
+      <button
+        type="button"
+        className={cn(
+          "shrink-0 whitespace-nowrap rounded-md px-2 py-1.5 text-sm font-medium transition-colors sm:px-3",
+          billingInterval === "monthly"
+            ? "bg-background text-foreground shadow-sm"
+            : "text-muted-foreground"
+        )}
+        onClick={() => onBillingIntervalChange("monthly")}
+      >
+        Monthly
+      </button>
+    </div>
+  );
+}
+
+/**
+ * Compact Team upsell shown beside the current-plan card while on Free, so that
+ * panel doesn't sit alone. Mirrors the Team column of the comparison table
+ * (price, Popular badge, Upgrade CTA) and reuses the same CTA logic.
+ */
+function FreePlanTeamUpsell({
+  planCatalog,
+  currentPlan,
+  billingConfigured,
+  canManageBilling,
+  isBillingActionPending,
+  pendingPlanChangeTarget,
+  deferredTrialBillingCopy,
+  onDowngradePlan,
+  onStartPlanChange,
+}: {
+  planCatalog: PlanCatalog;
+  currentPlan: OrganizationPlan;
+  billingConfigured: boolean;
+  canManageBilling: boolean;
+  isBillingActionPending: boolean;
+  pendingPlanChangeTarget: "team" | null;
+  deferredTrialBillingCopy: string | null;
+  onDowngradePlan: (
+    plan: OrganizationPlan,
+    billingInterval: BillingInterval
+  ) => void;
+  onStartPlanChange: (
+    plan: "team",
+    billingInterval: BillingInterval
+  ) => Promise<void>;
+}) {
+  const [billingInterval, setBillingInterval] =
+    useState<BillingInterval>("annual");
+  const entry = planCatalog.plans.team;
+  if (!entry) {
+    return null;
+  }
+
+  const displayCents = getDisplayPriceCentsForPlan(
+    "team",
+    billingInterval,
+    entry
+  );
+  const priceLabel = formatPlanPriceLabel(
+    "team",
+    displayCents,
+    planCatalog.currency,
+    billingInterval
+  );
+  const priceSubtext = formatPerSeatCadence("team", entry, billingInterval);
+  const cta = getPlanColumnCta({
+    plan: "team",
+    currentPlan,
+    entry,
+    billingConfigured,
+    canManageBilling,
+    isBillingActionPending,
+    scheduledCancellationDate: null,
+    onDowngradePlan,
+    onStartPlanChange,
+    billingInterval,
+  });
+  const showCtaSpinner =
+    pendingPlanChangeTarget === "team" && cta.label === "Upgrade";
+  const showDeferredTrialBillingCopy =
+    deferredTrialBillingCopy != null &&
+    cta.label === "Upgrade" &&
+    !cta.disabled &&
+    !cta.tooltip;
+
+  return (
+    <div
+      data-testid="free-plan-team-upsell"
+      className="flex h-full flex-col gap-5 rounded-xl border border-primary/35 bg-card p-5 md:p-6"
+    >
+      <div className="flex flex-1 flex-col items-center justify-center gap-4 text-center">
+        <div className="flex flex-wrap items-center justify-center gap-2">
+          <span className="text-base font-semibold">{entry.displayName}</span>
+          <Badge className="rounded-md bg-primary px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-primary-foreground">
+            Popular
+          </Badge>
+        </div>
+        <div className="w-full space-y-1">
+          <div
+            role="group"
+            aria-label="Billing interval"
+            className="mb-2 inline-flex items-center gap-0.5 rounded-md border border-border/60 bg-muted/40 p-0.5 text-xs"
+          >
+            <button
+              type="button"
+              className={cn(
+                "rounded px-2 py-1 font-medium transition-colors",
+                billingInterval === "annual"
+                  ? "bg-background text-foreground shadow-sm"
+                  : "text-muted-foreground"
+              )}
+              onClick={() => setBillingInterval("annual")}
+            >
+              Annual
+            </button>
+            <button
+              type="button"
+              className={cn(
+                "rounded px-2 py-1 font-medium transition-colors",
+                billingInterval === "monthly"
+                  ? "bg-background text-foreground shadow-sm"
+                  : "text-muted-foreground"
+              )}
+              onClick={() => setBillingInterval("monthly")}
+            >
+              Monthly
+            </button>
+          </div>
+          <PlanPriceDisplay label={priceLabel} />
+          <p className="text-xs leading-snug text-muted-foreground">
+            {priceSubtext}
+          </p>
+          {entry.seatMinimum ? (
+            <p className="text-xs leading-snug text-muted-foreground">
+              {entry.seatMinimum} seat minimum
+            </p>
+          ) : null}
+          {showDeferredTrialBillingCopy ? (
+            <p className="text-[11px] font-medium leading-tight text-muted-foreground">
+              {deferredTrialBillingCopy}
+            </p>
+          ) : null}
+        </div>
+      </div>
+      {cta.tooltip ? (
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button
+              className="w-full shrink-0 rounded-lg"
+              size="sm"
+              variant={cta.variant}
+              aria-disabled={true}
+              tabIndex={0}
+              onClick={undefined}
+            >
+              {showCtaSpinner ? (
+                <>
+                  <Loader2 className="size-4 animate-spin" />
+                  Loading...
+                </>
+              ) : (
+                cta.label
+              )}
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent side="top" className="max-w-[14rem] text-center">
+            {cta.tooltip}
+          </TooltipContent>
+        </Tooltip>
+      ) : (
+        <Button
+          className="w-full shrink-0 rounded-lg"
+          size="sm"
+          variant={cta.variant}
+          disabled={cta.disabled}
+          onClick={cta.onClick}
+        >
+          {showCtaSpinner ? (
+            <>
+              <Loader2 className="size-4 animate-spin" />
+              Loading...
+            </>
+          ) : (
+            cta.label
+          )}
+        </Button>
+      )}
+    </div>
+  );
+}
+
+interface OrganizationBillingSectionProps {
+  organizationId: string;
+  showPlanBilling: boolean;
+  showCredits: boolean;
+  billingStatus: OrganizationBillingStatus | undefined;
+  organizationName: string;
+  canManageCredits: boolean;
+  planCatalog: PlanCatalog | undefined;
+  isLoadingBilling: boolean;
+  isLoadingPlanCatalog: boolean;
+  isStartingPlanChange: boolean;
+  pendingPlanChangeTarget: "team" | null;
+  isOpeningPortal: boolean;
+  onDowngradePlan: (
+    plan: OrganizationPlan,
+    billingInterval: BillingInterval
+  ) => Promise<void>;
+  onStartPlanChange: (
+    plan: "team",
+    billingInterval: BillingInterval
+  ) => Promise<void>;
+  onStartAutoPlanChange?: (
+    plan: "team",
+    billingInterval: BillingInterval
+  ) => Promise<void>;
+  checkoutIntent?: CheckoutIntentWithOrganization | null;
+  onCheckoutIntentConsumed?: () => void;
+  /** Rendered below the credit usage card (above payments history). */
+  currentPlanPanel?: ReactNode;
+}
+
+export function OrganizationBillingSection({
+  organizationId,
+  showPlanBilling,
+  showCredits,
+  billingStatus,
+  organizationName,
+  canManageCredits,
+  planCatalog,
+  isLoadingBilling,
+  isLoadingPlanCatalog,
+  isStartingPlanChange,
+  pendingPlanChangeTarget,
+  isOpeningPortal,
+  onDowngradePlan,
+  onStartPlanChange,
+  onStartAutoPlanChange,
+  checkoutIntent = null,
+  onCheckoutIntentConsumed,
+  currentPlanPanel,
+}: OrganizationBillingSectionProps) {
+  useCreditTopupReturnFlowBilling({ enabled: showCredits });
+
+  const autoCheckoutStartedForKeyRef = useRef<string | null>(null);
+  const [billingInterval, setBillingInterval] =
+    useState<BillingInterval>("annual");
+  const [checkoutPlanNotice, setCheckoutPlanNotice] = useState<{
+    reason: "already_on" | "already_higher";
+    currentDisplayName: string;
+    requestedDisplayName: string;
+  } | null>(null);
+
+  useEffect(() => {
+    if (checkoutIntent?.interval) {
+      setBillingInterval(checkoutIntent.interval);
+    }
+  }, [checkoutIntent?.interval]);
+
+  useEffect(() => {
+    if (billingStatus?.billingInterval === "annual") {
+      setBillingInterval("annual");
+    } else if (billingStatus?.billingInterval === "monthly") {
+      setBillingInterval("monthly");
+    }
+  }, [billingStatus?.billingInterval]);
+
+  useEffect(() => {
+    if (!showPlanBilling) {
+      return;
+    }
+    if (!checkoutIntent) {
+      autoCheckoutStartedForKeyRef.current = null;
+      return;
+    }
+
+    const intentKey = `${checkoutIntent.organizationId}:${checkoutIntent.plan}:${checkoutIntent.interval}`;
+
+    let cancelled = false;
+
+    const run = async () => {
+      if (isLoadingBilling || isLoadingPlanCatalog) {
+        return;
+      }
+      if (!billingStatus || !planCatalog) {
+        return;
+      }
+
+      const isAutoCheckoutEligible =
+        billingStatus.source === "trial" ||
+        (billingStatus.source === "free" && billingStatus.plan === "free");
+
+      if (!isAutoCheckoutEligible) {
+        if (!cancelled) {
+          onCheckoutIntentConsumed?.();
+        }
+        return;
+      }
+
+      if (!billingStatus.billingConfigured || !billingStatus.canManageBilling) {
+        if (!cancelled) {
+          toast.error(
+            !billingStatus.canManageBilling
+              ? "Only organization owners can start checkout."
+              : "Checkout isn't available in this environment."
+          );
+          onCheckoutIntentConsumed?.();
+        }
+        return;
+      }
+
+      const intentGuard = guardCheckoutIntentAgainstBillingStatus(
+        billingStatus,
+        checkoutIntent.plan
+      );
+      if (!intentGuard.proceed) {
+        if (!cancelled && autoCheckoutStartedForKeyRef.current !== intentKey) {
+          autoCheckoutStartedForKeyRef.current = intentKey;
+          const currentEntry = planCatalog.plans[intentGuard.currentPlan];
+          const requestedEntry = planCatalog.plans[checkoutIntent.plan];
+          setCheckoutPlanNotice({
+            reason: intentGuard.reason,
+            currentDisplayName: currentEntry.displayName,
+            requestedDisplayName: requestedEntry.displayName,
+          });
+          onCheckoutIntentConsumed?.();
+        }
+        return;
+      }
+
+      if (autoCheckoutStartedForKeyRef.current === intentKey) {
+        return;
+      }
+      autoCheckoutStartedForKeyRef.current = intentKey;
+
+      try {
+        await (onStartAutoPlanChange ?? onStartPlanChange)(
+          checkoutIntent.plan,
+          checkoutIntent.interval
+        );
+        if (!cancelled) {
+          onCheckoutIntentConsumed?.();
+        }
+      } catch {
+        if (!cancelled) {
+          onCheckoutIntentConsumed?.();
+        }
+      }
+    };
+
+    void run();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    billingStatus,
+    checkoutIntent,
+    isLoadingBilling,
+    isLoadingPlanCatalog,
+    onCheckoutIntentConsumed,
+    onStartAutoPlanChange,
+    onStartPlanChange,
+    planCatalog,
+    showPlanBilling,
+  ]);
+
+  const currentPlan = billingStatus?.plan ?? "free";
+  const billingConfigured = billingStatus?.billingConfigured ?? false;
+  const canManageBilling = billingStatus?.canManageBilling ?? false;
+  const isBillingActionPending = isStartingPlanChange || isOpeningPortal;
+  const annualDiscountPct = getAnnualDiscountPercent(planCatalog);
+  const compareSections = planCatalog
+    ? buildComparePlanSectionsFromCatalog(planCatalog)
+    : null;
+  const deferredTrialBillingCopy = getDeferredTrialBillingCopy(billingStatus);
+  const isTrial = billingStatus?.source === "trial";
+  const showFreeTeamUpsell =
+    showPlanBilling &&
+    !isLoadingBilling &&
+    !isTrial &&
+    currentPlan === "free" &&
+    planCatalog != null &&
+    planCatalog.plans.team != null;
+
+  return (
+    <div className="space-y-5">
+      <Dialog
+        open={checkoutPlanNotice !== null}
+        onOpenChange={(open) => {
+          if (!open) setCheckoutPlanNotice(null);
+        }}
+      >
+        {checkoutPlanNotice ? (
+          <DialogContent
+            className="gap-0 overflow-hidden border-border/80 p-0 sm:max-w-md"
+            aria-describedby={undefined}
+          >
+            <div className="border-b border-border/60 bg-muted/25 px-6 py-5">
+              <div className="flex items-start gap-4">
+                <span className="flex size-11 shrink-0 items-center justify-center rounded-xl border border-primary/25 bg-primary/10 text-primary shadow-sm">
+                  <CheckCircle2 className="size-5" aria-hidden />
+                </span>
+                <DialogHeader className="flex-1 gap-1.5 space-y-0 text-left">
+                  <DialogTitle className="text-xl font-semibold tracking-tight text-foreground">
+                    {checkoutPlanNotice.reason === "already_higher"
+                      ? "You’re already on a higher plan"
+                      : "You’re already on this plan"}
+                  </DialogTitle>
+                  <DialogDescription asChild>
+                    <div className="space-y-3 pt-1 text-sm leading-relaxed text-muted-foreground">
+                      {checkoutPlanNotice.reason === "already_higher" ? (
+                        <>
+                          <p>
+                            Your organization is on{" "}
+                            <span className="font-medium text-foreground">
+                              {checkoutPlanNotice.currentDisplayName}
+                            </span>
+                            . The link you followed was for{" "}
+                            <span className="font-medium text-foreground">
+                              {checkoutPlanNotice.requestedDisplayName}
+                            </span>
+                            , which would be a downgrade.
+                          </p>
+                          <p className="text-xs text-muted-foreground/90">
+                            To change plans or manage billing, use the actions
+                            in the comparison table below or open the billing
+                            portal.
+                          </p>
+                        </>
+                      ) : (
+                        <>
+                          <p>
+                            You’re already subscribed to{" "}
+                            <span className="font-medium text-foreground">
+                              {checkoutPlanNotice.currentDisplayName}
+                            </span>
+                            . There’s no need to check out again for the same
+                            plan.
+                          </p>
+                          <p className="text-xs text-muted-foreground/90">
+                            If you meant to change interval or payment method,
+                            use Manage billing or the options below.
+                          </p>
+                        </>
+                      )}
+                    </div>
+                  </DialogDescription>
+                </DialogHeader>
+              </div>
+            </div>
+            <DialogFooter className="border-t border-border/50 bg-background/80 px-6 py-4 sm:justify-center">
+              <Button
+                type="button"
+                className="min-w-[8rem]"
+                onClick={() => setCheckoutPlanNotice(null)}
+              >
+                Got it
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        ) : null}
+      </Dialog>
+
+      {showCredits ? (
+        <ErrorBoundary fallback={null}>
+          <CreditBalanceCard
+            organizationId={organizationId}
+            canManageCredits={canManageCredits}
+          />
+        </ErrorBoundary>
+      ) : null}
+
+      {showFreeTeamUpsell && planCatalog ? (
+        <div className="grid items-stretch gap-4 lg:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]">
+          {currentPlanPanel}
+          <FreePlanTeamUpsell
+            planCatalog={planCatalog}
+            currentPlan={currentPlan}
+            billingConfigured={billingConfigured}
+            canManageBilling={canManageBilling}
+            isBillingActionPending={isBillingActionPending}
+            pendingPlanChangeTarget={pendingPlanChangeTarget}
+            deferredTrialBillingCopy={deferredTrialBillingCopy}
+            onDowngradePlan={(plan, interval) =>
+              void onDowngradePlan(plan, interval)
+            }
+            onStartPlanChange={onStartPlanChange}
+          />
+        </div>
+      ) : (
+        currentPlanPanel
+      )}
+
+      {showCredits || (showPlanBilling && billingStatus?.canManageBilling) ? (
+        <ErrorBoundary fallback={null}>
+          <PaymentsHistorySection
+            organizationId={organizationId}
+            canViewHistory={showCredits && canManageCredits}
+            canViewInvoices={
+              !!(showPlanBilling && billingStatus?.canManageBilling)
+            }
+          />
+        </ErrorBoundary>
+      ) : null}
+
+      {showPlanBilling ? (
+        <>
+          {checkoutIntent ? (
+            <div
+              className="flex items-center gap-2 rounded-md border border-border/60 bg-muted/30 px-3 py-2 text-sm text-muted-foreground"
+              data-testid="billing-deep-link-redirect"
+            >
+              <Loader2 className="size-4 shrink-0 animate-spin" aria-hidden />
+              Redirecting to checkout…
+            </div>
+          ) : null}
+          <div className="space-y-1.5">
+            <div className="flex items-center gap-2 text-xl font-semibold tracking-tight">
+              <CreditCard
+                className="size-5 shrink-0 text-muted-foreground"
+                aria-hidden
+              />
+              Plans & Billing
+            </div>
+            <p className="text-sm text-muted-foreground">
+              Compare plans, review your current subscription, and start billing
+              changes for {organizationName}.
+            </p>
+          </div>
+
+          {isLoadingBilling ? (
+            <div className="rounded-md border border-dashed border-border/70 p-4 text-sm text-muted-foreground">
+              Loading billing details...
+            </div>
+          ) : billingStatus ? (
+            <>
+              {!billingConfigured ? (
+                <div className="rounded-md border border-dashed border-border/70 p-4 text-sm text-muted-foreground">
+                  Billing is not configured in this environment. Plans are
+                  visible, but purchase actions are unavailable.
+                </div>
+              ) : null}
+              {!canManageBilling ? (
+                <p className="text-sm text-muted-foreground">
+                  Only organization owners can manage billing changes. Admins
+                  can review plan details here.
+                </p>
+              ) : null}
+            </>
+          ) : null}
+
+          <Card className="border-border/60 py-6 shadow-sm">
+            <CardContent className="px-0 pb-0 pt-0">
+              {isLoadingPlanCatalog || !planCatalog ? (
+                <div className="px-4 py-6 sm:px-6">
+                  <div className="mb-4 space-y-1">
+                    <p className="text-xs font-semibold uppercase tracking-wider text-primary">
+                      Compare plans
+                    </p>
+                    <CardTitle className="text-sm font-semibold leading-snug sm:text-base">
+                      Compare Free vs Team
+                    </CardTitle>
+                    <p className="pt-1 text-xs leading-snug text-muted-foreground">
+                      {ORG_COMPARE_PLANS_NOTE}
+                    </p>
+                  </div>
+                  <div className="mb-4">
+                    <BillingIntervalToggle
+                      billingInterval={billingInterval}
+                      onBillingIntervalChange={setBillingInterval}
+                      annualDiscountPct={annualDiscountPct}
+                    />
+                  </div>
+                  <div className="rounded-md border border-dashed border-border/70 p-4 text-sm text-muted-foreground">
+                    Loading plan catalog...
+                  </div>
+                </div>
+              ) : (
+                <div className="relative w-full overflow-x-auto overscroll-x-contain">
+                  <div className="min-w-[44rem] px-4 pb-6 sm:px-6">
+                    <Table>
+                      <TableHeader>
+                        <TableRow className="border-b hover:bg-transparent [&_th]:align-top [&_th]:h-full">
+                          <TableHead className="sticky left-0 z-20 h-full min-h-0 w-[26%] min-w-[11rem] whitespace-normal bg-card text-left shadow-[1px_0_0_0_hsl(var(--border))] px-4 pt-5 pb-4 align-top">
+                            <div className="flex h-full min-h-[11rem] flex-col">
+                              <div className="flex min-h-0 flex-1 flex-col">
+                                <div className="space-y-1 pr-1">
+                                  <p className="text-xs font-semibold uppercase tracking-wider text-primary">
+                                    Compare plans
+                                  </p>
+                                  <CardTitle className="text-sm font-semibold leading-snug sm:text-base">
+                                    Compare Free vs Team
+                                  </CardTitle>
+                                  <p className="pt-1 text-xs leading-snug text-muted-foreground">
+                                    {ORG_COMPARE_PLANS_NOTE}
+                                  </p>
+                                </div>
+                                <div className="min-h-0 flex-1" aria-hidden />
+                              </div>
+                              <div className="shrink-0">
+                                <BillingIntervalToggle
+                                  billingInterval={billingInterval}
+                                  onBillingIntervalChange={setBillingInterval}
+                                  annualDiscountPct={annualDiscountPct}
+                                />
+                              </div>
+                            </div>
+                          </TableHead>
+                          {PLAN_ORDER.map((plan) => {
+                            const entry = planCatalog.plans[plan];
+                            const isEnterprisePlan = plan === "enterprise";
+                            const displayCents =
+                              plan === "free" || isEnterprisePlan
+                                ? null
+                                : getDisplayPriceCentsForPlan(
+                                    plan,
+                                    billingInterval,
+                                    entry
+                                  );
+                            const priceLabel = isEnterprisePlan
+                              ? "Custom"
+                              : plan === "free"
+                              ? "$0"
+                              : formatPlanPriceLabel(
+                                  plan,
+                                  displayCents,
+                                  planCatalog.currency,
+                                  billingInterval
+                                );
+                            const priceSubtext = isEnterprisePlan
+                              ? formatPerSeatCadence(
+                                  plan,
+                                  entry,
+                                  billingInterval
+                                )
+                              : plan === "free"
+                              ? "No credit card required"
+                              : formatPerSeatCadence(
+                                  plan,
+                                  entry,
+                                  billingInterval
+                                );
+                            const cancellationDateMs =
+                              billingStatus?.stripeCancelAt ??
+                              billingStatus?.stripeCurrentPeriodEnd ??
+                              null;
+                            const scheduledCancellationDate =
+                              billingStatus?.stripeCancelAtPeriodEnd
+                                ? cancellationDateMs != null
+                                  ? formatBillingDate(cancellationDateMs)
+                                  : ""
+                                : null;
+                            const cta = getPlanColumnCta({
+                              plan,
+                              currentPlan,
+                              entry,
+                              billingConfigured,
+                              canManageBilling,
+                              isBillingActionPending,
+                              scheduledCancellationDate,
+                              onDowngradePlan: (
+                                targetPlan,
+                                targetBillingInterval
+                              ) =>
+                                void onDowngradePlan(
+                                  targetPlan,
+                                  targetBillingInterval
+                                ),
+                              onStartPlanChange,
+                              billingInterval,
+                            });
+                            const showPlanChangeSpinner =
+                              pendingPlanChangeTarget === plan &&
+                              (cta.label === "Upgrade" ||
+                                cta.label === "Downgrade") &&
+                              plan === "team";
+                            const showCtaSpinner = showPlanChangeSpinner;
+                            const isPopular = plan === POPULAR_PLAN;
+                            const showDeferredTrialBillingCopy =
+                              deferredTrialBillingCopy != null &&
+                              cta.label === "Upgrade" &&
+                              !cta.disabled &&
+                              !cta.tooltip &&
+                              plan === "team";
+                            return (
+                              <TableHead
+                                key={plan}
+                                className={cn(
+                                  "h-full min-h-0 whitespace-normal px-3 pt-5 pb-4 text-center align-top",
+                                  isPopular &&
+                                    "border-x border-primary/35 bg-primary/[0.06]"
+                                )}
+                              >
+                                <div className="mx-auto flex h-full min-h-[11rem] w-full max-w-[13rem] flex-col">
+                                  <div className="flex min-h-0 flex-1 flex-col items-center gap-3">
+                                    <div className="flex flex-wrap items-center justify-center gap-2">
+                                      <span className="text-base font-semibold">
+                                        {entry.displayName}
+                                      </span>
+                                      {isPopular ? (
+                                        <Badge className="rounded-md bg-primary px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-primary-foreground">
+                                          Popular
+                                        </Badge>
+                                      ) : null}
+                                    </div>
+                                    <div className="w-full space-y-1 text-center">
+                                      <PlanPriceDisplay label={priceLabel} />
+                                      <p className="text-xs leading-snug text-muted-foreground">
+                                        {priceSubtext}
+                                      </p>
+                                      {entry.seatMinimum ? (
+                                        <p className="text-xs leading-snug text-muted-foreground">
+                                          {entry.seatMinimum} seat minimum
+                                        </p>
+                                      ) : null}
+                                      {showDeferredTrialBillingCopy ? (
+                                        <p className="text-[11px] font-medium leading-tight text-muted-foreground">
+                                          {deferredTrialBillingCopy}
+                                        </p>
+                                      ) : null}
+                                    </div>
+                                  </div>
+                                  {cta.tooltip ? (
+                                    <Tooltip>
+                                      <TooltipTrigger asChild>
+                                        <Button
+                                          className="w-full shrink-0 rounded-lg"
+                                          size="sm"
+                                          variant={cta.variant}
+                                          aria-disabled={true}
+                                          tabIndex={0}
+                                          onClick={undefined}
+                                        >
+                                          {showCtaSpinner ? (
+                                            <>
+                                              <Loader2 className="size-4 animate-spin" />
+                                              Loading...
+                                            </>
+                                          ) : (
+                                            cta.label
+                                          )}
+                                        </Button>
+                                      </TooltipTrigger>
+                                      <TooltipContent
+                                        side="top"
+                                        className="max-w-[14rem] text-center"
+                                      >
+                                        {cta.tooltip}
+                                      </TooltipContent>
+                                    </Tooltip>
+                                  ) : (
+                                    <Button
+                                      className="w-full shrink-0 rounded-lg"
+                                      size="sm"
+                                      variant={cta.variant}
+                                      disabled={cta.disabled}
+                                      onClick={cta.onClick}
+                                    >
+                                      {showCtaSpinner ? (
+                                        <>
+                                          <Loader2 className="size-4 animate-spin" />
+                                          Loading...
+                                        </>
+                                      ) : (
+                                        cta.label
+                                      )}
+                                    </Button>
+                                  )}
+                                </div>
+                              </TableHead>
+                            );
+                          })}
+                        </TableRow>
+                      </TableHeader>
+                      <TableBody>
+                        {(compareSections ?? []).map((section) => (
+                          <Fragment key={section.title}>
+                            {!section.hideTitle ? (
+                              <TableRow className="border-b hover:bg-transparent">
+                                <TableCell
+                                  className="bg-muted/40 py-2.5 pl-4"
+                                  colSpan={PLAN_ORDER.length + 1}
+                                >
+                                  <div className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+                                    {section.title}
+                                  </div>
+                                </TableCell>
+                              </TableRow>
+                            ) : null}
+                            {section.rows.map((row, rowIndex) => {
+                              const cells: ComparePlanCell[] = [
+                                row.free,
+                                row.team,
+                                row.enterprise,
+                              ];
+                              return (
+                                <TableRow
+                                  key={`${section.title}-${rowIndex}-${row.label}`}
+                                  className="border-b"
+                                >
+                                  <TableCell className="sticky left-0 z-10 max-w-[14rem] bg-card py-3 pl-4 text-sm font-medium shadow-[1px_0_0_0_hsl(var(--border))] sm:max-w-none">
+                                    <ComparePlanRowLabel
+                                      label={row.label}
+                                      tooltipKey={row.tooltipKey}
+                                    />
+                                  </TableCell>
+                                  {PLAN_ORDER.map((plan, i) => {
+                                    const isPopular = plan === POPULAR_PLAN;
+                                    return (
+                                      <TableCell
+                                        key={plan}
+                                        className={cn(
+                                          "max-w-[13rem] whitespace-normal px-3 py-3 text-center align-middle text-sm",
+                                          isPopular &&
+                                            "border-x border-primary/35 bg-primary/[0.06]"
+                                        )}
+                                      >
+                                        <ComparePlanMatrixCell
+                                          cell={cells[i]!}
+                                        />
+                                      </TableCell>
+                                    );
+                                  })}
+                                </TableRow>
+                              );
+                            })}
+                          </Fragment>
+                        ))}
+                      </TableBody>
+                    </Table>
+                  </div>
+                </div>
+              )}
+            </CardContent>
+          </Card>
+        </>
+      ) : null}
+    </div>
+  );
+}

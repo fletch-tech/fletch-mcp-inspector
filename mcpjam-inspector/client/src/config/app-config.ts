@@ -3,12 +3,12 @@ import packageJson from "../../../package.json";
 const currentYear = new Date().getFullYear();
 
 export const APP_CONFIG = {
-  name: "MCPJam",
+  name: "Fletch MCP Studio",
   version: packageJson.version,
-  copyright: `© ${currentYear}, MCPJam.`,
+  copyright: `© ${currentYear}, Fletch.`,
   meta: {
-    title: "MCPJam",
+    title: "Fletch MCP Studio",
     description:
-      "MCPJam is a testing and debugging tool for MCP servers. Postman for MCP.",
+      "Fletch MCP Studio is a testing and debugging tool for MCP servers.",
   },
 };

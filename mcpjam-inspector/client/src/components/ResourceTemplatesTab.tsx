@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
-import { Button } from "./ui/button";
-import { Input } from "./ui/input";
-import { Badge } from "./ui/badge";
-import { ScrollArea } from "./ui/scroll-area";
+import { Button } from "@mcpjam/design-system/button";
+import { Input } from "@mcpjam/design-system/input";
+import { Badge } from "@mcpjam/design-system/badge";
+import { ScrollArea } from "@mcpjam/design-system/scroll-area";
 import {
   ResizablePanelGroup,
   ResizablePanel,
@@ -11,13 +11,18 @@ import {
 import { FileCode, Play, RefreshCw, ChevronRight, Eye } from "lucide-react";
 import { EmptyState } from "./ui/empty-state";
 import { JsonEditor } from "@/components/ui/json-editor";
-import {
+import { extractDisplayFromValue } from "@/components/chat-v2/shared/tool-result-text";
+import type {
+  MCPReadResourceResult,
+  MCPResourceTemplate,
   MCPServerConfig,
-  type MCPResourceTemplate,
-  type MCPReadResourceResult,
-} from "@mcpjam/sdk";
+} from "@mcpjam/sdk/browser";
 import { listResourceTemplates as listResourceTemplatesApi } from "@/lib/apis/mcp-resource-templates-api";
 import { readResource as readResourceTemplateApi } from "@/lib/apis/mcp-resources-api";
+import {
+  CacheProvenanceBadge,
+  type ServedFromCache,
+} from "@/components/ui/cache-provenance-badge";
 import { LoggerView } from "./logger-view";
 import { parseTemplate } from "url-template";
 
@@ -64,6 +69,29 @@ function buildUriFromTemplate(
   return template.expand(params);
 }
 
+function renderResourceTemplateTextContent(text: string) {
+  const display = extractDisplayFromValue(text);
+
+  if (display?.kind === "json") {
+    return (
+      <div className="p-4">
+        <JsonEditor
+          height="100%"
+          value={display.value}
+          readOnly
+          showToolbar={false}
+        />
+      </div>
+    );
+  }
+
+  return (
+    <pre className="text-xs font-mono whitespace-pre-wrap p-4 bg-background overflow-auto max-h-96">
+      {display?.kind === "text" ? display.text : text}
+    </pre>
+  );
+}
+
 export function ResourceTemplatesTab({
   serverConfig,
   serverName,
@@ -75,6 +103,9 @@ export function ResourceTemplatesTab({
     useState<MCPReadResourceResult | null>(null);
   const [loading, setLoading] = useState(false);
   const [fetchingTemplates, setFetchingTemplates] = useState(false);
+  const [templatesServedFromCache, setTemplatesServedFromCache] = useState<
+    ServedFromCache | undefined
+  >(undefined);
   const [error, setError] = useState<string>("");
 
   const selectedTemplateData = useMemo(() => {
@@ -102,18 +133,7 @@ export function ResourceTemplatesTab({
     }
   }, [selectedTemplateData?.uriTemplate, templateOverrides]);
 
-  useEffect(() => {
-    if (serverConfig && serverName) {
-      fetchTemplates();
-    }
-  }, [serverConfig, serverName]);
-
-  // Register refresh function for parent component
-  useEffect(() => {
-    onRegisterRefresh?.(fetchTemplates);
-  }, [onRegisterRefresh, fetchTemplates]);
-
-  const fetchTemplates = async () => {
+  async function fetchTemplates(forceRefresh = false) {
     if (!serverName) return;
 
     setFetchingTemplates(true);
@@ -122,10 +142,16 @@ export function ResourceTemplatesTab({
     setTemplates([]);
     setSelectedTemplate("");
     setResourceContent(null);
+    // Clear stale provenance at the start of a (re)fetch so a failed or
+    // in-flight refresh cannot keep showing the previous badge.
+    setTemplatesServedFromCache(undefined);
 
     try {
-      const serverTemplates = await listResourceTemplatesApi(serverName);
+      const serverTemplates = await listResourceTemplatesApi(serverName, {
+        refresh: forceRefresh,
+      });
       setTemplates(serverTemplates);
+      setTemplatesServedFromCache(serverTemplates.servedFromCache);
 
       if (serverTemplates.length === 0) {
         setSelectedTemplate("");
@@ -147,7 +173,20 @@ export function ResourceTemplatesTab({
     } finally {
       setFetchingTemplates(false);
     }
-  };
+  }
+
+  useEffect(() => {
+    if (serverConfig && serverName) {
+      fetchTemplates();
+    }
+  }, [serverConfig, serverName]);
+
+  // Register refresh function for parent component. The parent's explicit
+  // "Refresh" action forces a live re-fetch (cacheMode: "refresh") rather
+  // than silently reusing a still-fresh cached entry.
+  useEffect(() => {
+    onRegisterRefresh?.(() => fetchTemplates(true));
+  }, [onRegisterRefresh, fetchTemplates]);
 
   const updateParamValue = (paramName: string, value: string) => {
     setTemplateOverrides((prev) => ({ ...prev, [paramName]: value }));
@@ -237,6 +276,13 @@ export function ResourceTemplatesTab({
             {/* Left Panel - Templates List */}
             <ResizablePanel defaultSize={30} minSize={20} maxSize={50}>
               <div className="h-full flex flex-col border-r border-border bg-background">
+                {templatesServedFromCache && (
+                  <div className="px-2 py-1.5 border-b border-border flex-shrink-0">
+                    <CacheProvenanceBadge
+                      servedFromCache={templatesServedFromCache}
+                    />
+                  </div>
+                )}
                 {/* Templates List */}
                 <div className="flex-1 overflow-hidden">
                   <ScrollArea className="h-full">
@@ -496,9 +542,9 @@ export function ResourceTemplatesTab({
                                   <div key={index} className="group">
                                     <div className="overflow-hidden">
                                       {content.type === "text" ? (
-                                        <pre className="text-xs font-mono whitespace-pre-wrap p-4 bg-background overflow-auto max-h-96">
-                                          {content.text}
-                                        </pre>
+                                        renderResourceTemplateTextContent(
+                                          content.text,
+                                        )
                                       ) : (
                                         <div className="p-4">
                                           <JsonEditor

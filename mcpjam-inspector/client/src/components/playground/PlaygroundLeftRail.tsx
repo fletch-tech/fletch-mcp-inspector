@@ -1,0 +1,206 @@
+import { useCallback, useState } from "react";
+import { Hammer, History } from "lucide-react";
+import { track } from "@/lib/analytics";
+import { ChatHistoryRail } from "@/components/chat-v2/history/ChatHistoryRail";
+import { usePlaygroundStateContext } from "@/components/ui-playground/hooks/use-playground-state";
+import { PlaygroundLeft } from "@/components/ui-playground/PlaygroundLeft";
+import { useHarnessBuiltinTools } from "@/hooks/useHarnessBuiltinTools";
+import { usePreviewedEnvironmentId } from "@/hooks/use-previewed-environment-id";
+import { useProjectEnvironmentsEnabled } from "@/hooks/useProjectEnvironmentsEnabled";
+import { EnvironmentToolsPane } from "./panes/EnvironmentToolsPane";
+import { MultiServerToolsPaneInner } from "./panes/MultiServerToolsPane";
+import { usePlaygroundChatHistoryBridge } from "./playground-chat-history-bridge";
+import { cn } from "@/lib/utils";
+
+type LeftRailTab = "sessions" | "tools";
+
+/**
+ * Playground left rail — Sessions (`ChatHistoryRail`) and Tools tabs in a
+ * single collapsible panel, matching the chat-v2 rail pattern. Active tab is
+ * local state (not persisted per view); rail visibility is owned by
+ * `PlaygroundTab`.
+ */
+export function PlaygroundLeftRail({
+  previewedHostId,
+  projectId,
+}: {
+  /** Resolved previewed host (from PlaygroundTab) — used to surface a harness
+   *  host's native built-in tools in the Tools list. */
+  previewedHostId?: string | null;
+  /** Project scope, for the environment-mode Tools body (see `ToolsBody`). */
+  projectId?: string | null;
+}) {
+  const [activeTab, setActiveTab] = useState<LeftRailTab>("tools");
+
+  const handleTabClick = useCallback(
+    (next: LeftRailTab) => {
+      if (next === activeTab) return;
+      track("playground_left_rail_tab_changed", {
+        location: "playground_left_rail",
+        from: activeTab,
+        to: next,
+      });
+      setActiveTab(next);
+    },
+    [activeTab],
+  );
+
+  return (
+    <div className="flex h-full min-h-0 flex-col bg-background">
+      <div className="flex shrink-0 items-center gap-0.5 border-b border-border px-2 py-1">
+        <TabButton
+          icon={Hammer}
+          label="Tools"
+          isActive={activeTab === "tools"}
+          onClick={() => handleTabClick("tools")}
+        />
+        <TabButton
+          icon={History}
+          label="Sessions"
+          isActive={activeTab === "sessions"}
+          onClick={() => handleTabClick("sessions")}
+        />
+      </div>
+      <div className="flex-1 min-h-0">
+        {activeTab === "sessions" ? (
+          <SessionsBody />
+        ) : (
+          <ToolsBody
+            previewedHostId={previewedHostId ?? null}
+            projectId={projectId ?? null}
+          />
+        )}
+      </div>
+    </div>
+  );
+}
+
+function TabButton({
+  icon: Icon,
+  label,
+  isActive,
+  onClick,
+}: {
+  icon: typeof History;
+  label: string;
+  isActive: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={cn(
+        "flex items-center gap-1.5 rounded-md px-2 py-1 text-xs font-medium transition-colors",
+        isActive
+          ? "bg-accent text-foreground"
+          : "text-muted-foreground hover:bg-accent/60 hover:text-foreground",
+      )}
+      aria-pressed={isActive}
+    >
+      <Icon className="h-3.5 w-3.5" />
+      {label}
+    </button>
+  );
+}
+
+function SessionsBody() {
+  const bridge = usePlaygroundChatHistoryBridge();
+  if (!bridge) {
+    return (
+      <div className="flex h-full items-center justify-center p-3 text-center text-xs text-muted-foreground">
+        Loading chat history…
+      </div>
+    );
+  }
+  return (
+    <ChatHistoryRail
+      activeSessionId={bridge.activeSessionId}
+      hostStyle={bridge.hostStyle}
+      isAuthenticated={bridge.isAuthenticated}
+      isStreaming={bridge.isStreaming}
+      projectId={bridge.projectId}
+      enabled={bridge.enabled}
+      refreshSignal={bridge.refreshSignal}
+      onSelectThread={bridge.onSelectThread}
+      onPrefetchThread={bridge.onPrefetchThread}
+      onNewChat={bridge.onNewChat}
+      beforeResetChatAfterArchiveAll={bridge.beforeResetChatAfterArchiveAll}
+      onArchiveAllComplete={bridge.onArchiveAllComplete}
+      onSessionAction={bridge.onSessionAction}
+    />
+  );
+}
+
+function ToolsBody({
+  previewedHostId,
+  projectId,
+}: {
+  previewedHostId: string | null;
+  projectId: string | null;
+}) {
+  const state = usePlaygroundStateContext();
+  // When the previewed host runs a harness (e.g. Claude Code), surface its
+  // native built-in tools so the panel isn't empty/tool-less. Resolved once
+  // here and fed into BOTH the multi-server pane and the zero-server fallback.
+  const { tools: harnessBuiltinTools } = useHarnessBuiltinTools(previewedHostId);
+  // ENVIRONMENT MODE: the panes below read the browser's own connections,
+  // which environment turns never create (the backend connects per message) —
+  // so they'd report "No tools found" while tools execute fine in chat. Read
+  // the SAME selected-environment signal the Playground itself uses (the
+  // persisted previewed id, fail-closed behind the flag exactly like
+  // `usePlaygroundEnvironment`) and show the environment's server-listed
+  // tools instead.
+  const environmentsEnabled = useProjectEnvironmentsEnabled();
+  const [storedEnvironmentId] = usePreviewedEnvironmentId(projectId);
+  const environmentId = environmentsEnabled ? storedEnvironmentId : null;
+  if (environmentId && projectId) {
+    return (
+      <EnvironmentToolsPane
+        projectId={projectId}
+        environmentId={environmentId}
+      />
+    );
+  }
+  // The Playground is multi-server by nature: its active set mirrors the
+  // connected servers. Aggregate tools across ALL active servers whenever
+  // there's at least one — not only when there's more than one. Using `> 1`
+  // meant disconnecting down to a single server fell back to the single-
+  // server pane (keyed on the stale `serverName` pointer), so the remaining
+  // server's tools vanished. Only the zero-server case falls back to
+  // PlaygroundLeft for its empty/onboarding state.
+  if (state.activeServerNames.length >= 1) {
+    return (
+      <MultiServerToolsPaneInner
+        activeServerNames={state.activeServerNames}
+        builtinTools={harnessBuiltinTools}
+      />
+    );
+  }
+
+  // Zero-server → reuse the existing PlaygroundLeft (empty/onboarding state),
+  // but suppress its inline LoggerView since the logger lives in the right rail.
+  return (
+    <PlaygroundLeft
+      tools={state.tools}
+      selectedToolName={state.selectedTool}
+      fetchingTools={state.fetchingTools}
+      onRefresh={state.fetchTools}
+      onSelectTool={state.setSelectedTool}
+      formFields={state.formFields}
+      onFieldChange={state.updateFormField}
+      onToggleField={state.updateFormFieldIsSet}
+      isExecuting={state.isExecuting}
+      onExecute={state.executeTool}
+      onSave={state.savedRequestsHook.openSaveDialog}
+      savedRequests={state.savedRequestsHook.savedRequests}
+      highlightedRequestId={state.savedRequestsHook.highlightedRequestId}
+      onLoadRequest={state.savedRequestsHook.handleLoadRequest}
+      onRenameRequest={state.savedRequestsHook.handleRenameRequest}
+      onDuplicateRequest={state.savedRequestsHook.handleDuplicateRequest}
+      onDeleteRequest={state.savedRequestsHook.handleDeleteRequest}
+      showLogger={false}
+      builtinTools={harnessBuiltinTools}
+    />
+  );
+}

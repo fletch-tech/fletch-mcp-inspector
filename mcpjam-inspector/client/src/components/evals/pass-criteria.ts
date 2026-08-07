@@ -1,4 +1,4 @@
-import { matchToolCalls } from "@/shared/eval-matching";
+import { evaluateToolCalls, resolveExtrasCap } from "@/shared/eval-matching";
 import { EvalIteration, EvalSuiteRun } from "./types";
 
 export type PassCriteriaType =
@@ -47,7 +47,15 @@ export const DEFAULT_CRITERIA: PassCriteria = {
  */
 export function computeIterationResult(
   iteration: {
-    status: "pending" | "running" | "completed" | "failed" | "cancelled";
+    status:
+      | "pending"
+      | "running"
+      | "completed"
+      | "failed"
+      | "cancelled"
+      | "timed_out";
+    result?: "pending" | "passed" | "failed" | "cancelled" | "timed_out";
+    resultSource?: "reported" | "derived";
     testCaseSnapshot?: {
       expectedToolCalls: Array<{
         toolName: string;
@@ -60,13 +68,27 @@ export function computeIterationResult(
     }>;
   },
   criteria?: PassCriteria,
-): "pending" | "passed" | "failed" | "cancelled" {
+): "pending" | "passed" | "failed" | "cancelled" | "timed_out" {
+  if (
+    iteration.resultSource === "reported" &&
+    (iteration.result === "pending" ||
+      iteration.result === "passed" ||
+      iteration.result === "failed" ||
+      iteration.result === "cancelled" ||
+      iteration.result === "timed_out")
+  ) {
+    return iteration.result;
+  }
+
   // Handle status-based results first
   if (iteration.status === "pending" || iteration.status === "running") {
     return "pending";
   }
   if (iteration.status === "cancelled") {
     return "cancelled";
+  }
+  if (iteration.status === "timed_out") {
+    return "timed_out";
   }
 
   // Compute pass/fail for completed iterations
@@ -82,24 +104,38 @@ export function computeIterationPassed(
   iteration: EvalIteration,
   criteria?: PassCriteria,
 ): boolean {
+  if (iteration.resultSource === "reported") {
+    return iteration.result === "passed";
+  }
+
   const actual = iteration.actualToolCalls || [];
   const expected = iteration.testCaseSnapshot?.expectedToolCalls || [];
   const isNegativeTest = iteration.testCaseSnapshot?.isNegativeTest;
+  const snapshotMatchOptions = iteration.testCaseSnapshot?.matchOptions;
 
-  // Use shared matching logic
-  const matchResult = matchToolCalls(expected, actual, isNegativeTest);
+  // Use shared matching logic; honor per-iteration snapshot options when
+  // present. Missing field on old iterations → defaults preserve prior
+  // inspector behavior (order-agnostic, extras allowed, partial args).
+  const matchResult = evaluateToolCalls(expected, actual, {
+    ...snapshotMatchOptions,
+    isNegativeTest,
+  });
 
-  // For negative tests, the shared function handles everything
+  // For negative tests, the matcher handles everything
   if (isNegativeTest) {
     return matchResult.passed;
   }
 
-  // For positive tests with no expected calls but tools were called = pass
+  // For positive tests with no expected calls but tools were called: pass
+  // unless extras are bounded at this snapshot, in which case those calls
+  // are unexpected extras and must fail when over the cap.
   if (expected.length === 0 && actual.length > 0) {
-    return true;
+    const cap = resolveExtrasCap(snapshotMatchOptions);
+    return cap === null || actual.length <= cap;
   }
 
-  // Apply tolerances from criteria
+  // Apply tolerances from criteria (aggregate-suite leniency, not
+  // per-call match semantics).
   const effectiveMissing = criteria?.allowUnexpectedTools
     ? []
     : matchResult.missing;
@@ -107,7 +143,20 @@ export function computeIterationPassed(
     ? []
     : matchResult.argumentMismatches;
 
-  return effectiveMissing.length === 0 && effectiveMismatches.length === 0;
+  if (effectiveMissing.length > 0 || effectiveMismatches.length > 0) {
+    return false;
+  }
+
+  // Snapshot may also fail on out-of-order or extras (when bounded).
+  // Mirror the matcher's `passed` for those cases.
+  if (matchResult.outOfOrder.length > 0) {
+    return false;
+  }
+  const cap = resolveExtrasCap(snapshotMatchOptions);
+  if (cap !== null && matchResult.extra.length > cap) {
+    return false;
+  }
+  return true;
 }
 
 /**
@@ -131,8 +180,13 @@ export function evaluatePassCriteria(
         passed: result === "passed",
       };
     })
-    // Only count completed iterations - exclude pending/cancelled
-    .filter((it) => it.result === "passed" || it.result === "failed");
+    // Only count terminal pass/fail iterations - exclude pending/cancelled.
+    .filter(
+      (it) =>
+        it.result === "passed" ||
+        it.result === "failed" ||
+        it.result === "timed_out",
+    );
 
   const totalCount = iterationsWithResults.length;
   const passedCount = iterationsWithResults.filter((it) => it.passed).length;

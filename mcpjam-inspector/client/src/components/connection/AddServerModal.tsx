@@ -1,30 +1,110 @@
-import { useEffect } from "react";
-import { toast } from "sonner";
-import { Button } from "../ui/button";
-import { Input } from "../ui/input";
-import { Dialog, DialogContent, DialogHeader, DialogTitle } from "../ui/dialog";
+import { useEffect, useState } from "react";
+import { useAuth } from "@workos-inc/authkit-react";
+import { toast } from "@/lib/toast";
+import { normalizeRegistrationMode } from "@/shared/xaa.js";
+import { Button } from "@mcpjam/design-system/button";
+import { Input } from "@mcpjam/design-system/input";
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@mcpjam/design-system/dialog";
 import {
   Select,
   SelectContent,
   SelectItem,
   SelectTrigger,
   SelectValue,
-} from "../ui/select";
-import { ChevronDown, ChevronRight } from "lucide-react";
-import { ServerFormData } from "@/shared/types.js";
-import { detectEnvironment, detectPlatform } from "@/lib/PosthogUtils";
+} from "@mcpjam/design-system/select";
+import {
+  ServerFormData,
+  normalizeOauthProtocolMode,
+} from "@/shared/types.js";
+import { track } from "@/lib/analytics";
 import { HOSTED_MODE } from "@/lib/config";
-import { usePostHog } from "posthog-js/react";
+import { useAppReady, useAppReadyMessage } from "@/hooks/use-app-ready";
 import { useServerForm } from "./hooks/use-server-form";
+import { AdvancedConnectionSettingsSection } from "./shared/AdvancedConnectionSettingsSection";
 import { AuthenticationSection } from "./shared/AuthenticationSection";
-import { CustomHeadersSection } from "./shared/CustomHeadersSection";
 import { EnvVarsSection } from "./shared/EnvVarsSection";
+import { HostedConnectionTypeControl } from "./shared/HostedConnectionTypeControl";
+import { findProjectByAnyId, type Project } from "@/state/app-types";
+import { useOptionalSharedAppState } from "@/state/app-state-context";
 
 interface AddServerModalProps {
   isOpen: boolean;
   onClose: () => void;
   onSubmit: (formData: ServerFormData) => void;
   initialData?: Partial<ServerFormData>;
+  requireHttps?: boolean;
+  projectClientConfig?: Project["clientConfig"];
+  organizationId?: string | null;
+  isSignedIn?: boolean;
+  /** Project default XAA test identity — shown as override placeholders. */
+  projectXaaDefaultIdentity?: { subject: string; email: string } | null;
+  /**
+   * Shared (hosted) project id. When present, the Connection-overrides
+   * section shows the per-server MCP protocol-version picker; the chosen
+   * pin rides `ServerFormData.mcpProtocolVersionOverride` and the caller
+   * persists it on the project layer once the hosted server row exists.
+   * Absent (local-only / CLI contexts) the picker stays hidden — there is
+   * no project row to bind the override to.
+   */
+  projectId?: string | null;
+}
+
+// normalizeOauthProtocolMode / ServerFormOAuthProtocolMode are single-sourced
+// in shared/types (the normalizer preserves the 2026-07-28 draft era).
+
+// Single-sourced in the SDK's registration vocabulary (accepts the legacy
+// pre_registered alias; unknown → undefined so callers apply defaults).
+const normalizeOauthRegistrationMode = normalizeRegistrationMode;
+
+function isAuthorizationHeader(key: string): boolean {
+  return key.trim().toLowerCase() === "authorization";
+}
+
+function getAuthorizationHeaderValue(
+  headers?: Record<string, string>,
+): string | undefined {
+  if (!headers) {
+    return undefined;
+  }
+
+  for (const [key, value] of Object.entries(headers)) {
+    if (isAuthorizationHeader(key)) {
+      return value;
+    }
+  }
+
+  return undefined;
+}
+
+function createHeaderEntry(key: string, value: string) {
+  return {
+    id:
+      typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+        ? crypto.randomUUID()
+        : `${Date.now()}-${Math.random().toString(16).slice(2)}`,
+    key,
+    value,
+  };
+}
+
+export function resolveAddServerConfidentialCimdContext({
+  organizationId,
+  isSignedIn,
+  activeProjectOrganizationId,
+  hasSignedInUser,
+}: {
+  organizationId?: string | null;
+  isSignedIn?: boolean;
+  activeProjectOrganizationId?: string;
+  hasSignedInUser: boolean;
+}) {
+  return {
+    organizationId:
+      organizationId !== undefined
+        ? organizationId
+        : activeProjectOrganizationId ?? null,
+    isSignedIn: isSignedIn !== undefined ? isSignedIn : hasSignedInUser,
+  };
 }
 
 export function AddServerModal({
@@ -32,13 +112,54 @@ export function AddServerModal({
   onClose,
   onSubmit,
   initialData,
+  requireHttps,
+  projectClientConfig,
+  organizationId,
+  isSignedIn,
+  projectXaaDefaultIdentity = null,
+  projectId = null,
 }: AddServerModalProps) {
-  const posthog = usePostHog();
-  const formState = useServerForm();
+  const appState = useOptionalSharedAppState();
+  const activeProject = findProjectByAnyId(
+    appState?.projects,
+    appState?.activeProjectId,
+  );
+  const { user } = useAuth();
+  const resolvedConfidentialCimdContext =
+    resolveAddServerConfidentialCimdContext({
+      organizationId,
+      isSignedIn,
+      activeProjectOrganizationId: activeProject?.organizationId,
+      hasSignedInUser: Boolean(user),
+    });
+  const formState = useServerForm(undefined, {
+    requireHttps,
+    projectClientConfig,
+    confidentialCimdProbeEnabled: isOpen,
+    organizationId: resolvedConfidentialCimdContext.organizationId,
+    isSignedIn: resolvedConfidentialCimdContext.isSignedIn,
+  });
+  // Per-server MCP wire-version pin. Lives OUTSIDE `useServerForm` on
+  // purpose: the edit flow persists this on the project layer via
+  // `projectServerConfig:setConfig` (see `ServerDetailModal`), never through
+  // the server-save payload, so the shared form hook must not start
+  // emitting it. Here it rides the one-shot `ServerFormData` and the add
+  // path applies it once the hosted server row exists.
+  const [mcpProtocolVersionOverride, setMcpProtocolVersionOverride] = useState<
+    ServerFormData["mcpProtocolVersionOverride"]
+  >(undefined);
+  const hostedUrlPlaceholder = "https://example.com/mcp";
+  const appReady = useAppReady();
+  const appReadyMessage = useAppReadyMessage();
+  const isAppBootstrapping = appReady.status !== "ready";
 
   // Initialize form with initial data if provided
   useEffect(() => {
     if (initialData && isOpen) {
+      // Hydrate the per-server wire pin from the prefill so the OAuth-protocol
+      // "auto" bridge sees it: a 2026-07-28-pinned prefill must resolve to the
+      // 2026 OAuth flow and round-trip its pin, not silently drop to 2025.
+      setMcpProtocolVersionOverride(initialData.mcpProtocolVersionOverride);
       if (initialData.name) {
         formState.setName(initialData.name);
       }
@@ -71,28 +192,131 @@ export function AddServerModal({
       if (initialData.useOAuth) {
         formState.setAuthType("oauth");
         formState.setShowAuthSettings(true);
-      } else if (
-        initialData.headers &&
-        initialData.headers["Authorization"] !== undefined
-      ) {
-        // Has Authorization header - set up bearer token
-        formState.setAuthType("bearer");
+        if (initialData.oauthProtocolMode) {
+          formState.setOauthProtocolMode(
+            normalizeOauthProtocolMode(initialData.oauthProtocolMode),
+          );
+        }
+        if (initialData.registrationMode) {
+          formState.setOauthRegistrationMode(
+            normalizeOauthRegistrationMode(initialData.registrationMode) ??
+              "auto",
+          );
+          formState.setUseCustomClientId(
+            initialData.registrationMode === "preregistered",
+          );
+        }
+        if (initialData.oauthScopes && initialData.oauthScopes.length > 0) {
+          formState.setOauthScopesInput(initialData.oauthScopes.join(" "));
+        }
+        if (initialData.clientId) {
+          formState.setUseCustomClientId(true);
+          formState.setOauthRegistrationMode("preregistered");
+          formState.setClientId(initialData.clientId);
+        }
+        if (initialData.clientSecret) {
+          formState.setClientSecret(initialData.clientSecret);
+        }
+        if (initialData.hasClientSecret) {
+          formState.setHasStoredClientSecret(true);
+        }
+      } else if (initialData.useXaa || initialData.authMethod === "xaa") {
+        formState.setAuthType("xaa");
         formState.setShowAuthSettings(true);
-        formState.setBearerToken(initialData.headers["Authorization"] || "");
+        formState.setOauthRegistrationMode(
+          normalizeOauthRegistrationMode(initialData.registrationMode) ??
+            "auto",
+        );
+        formState.setXaaClientAuth(
+          initialData.xaaClientAuth === "private_key_jwt"
+            ? "private_key_jwt"
+            : "none",
+        );
+        formState.setUseCustomClientId(
+          initialData.registrationMode === "preregistered" ||
+            initialData.registrationMode === "auto" ||
+            initialData.registrationMode == null,
+        );
+        if (initialData.oauthScopes?.length) {
+          formState.setOauthScopesInput(initialData.oauthScopes.join(" "));
+        }
+        if (initialData.clientId) formState.setClientId(initialData.clientId);
+        if (initialData.clientSecret) {
+          formState.setClientSecret(initialData.clientSecret);
+        }
+        if (initialData.hasClientSecret) {
+          formState.setHasStoredClientSecret(true);
+        }
+        formState.setXaaAuthzIssuer(initialData.xaaAuthzIssuer ?? "");
+        formState.setXaaAllowPathScopedIssuer(
+          initialData.xaaAllowPathScopedIssuer === true,
+        );
+        formState.setOauthAllowPathScopedIssuer(
+          initialData.oauthAllowPathScopedIssuer === true,
+        );
+        formState.setXaaSubject(initialData.xaaSubject ?? "");
+        formState.setXaaEmail(initialData.xaaEmail ?? "");
+      } else if (initialData.headers) {
+        const authorizationHeader = getAuthorizationHeaderValue(
+          initialData.headers,
+        );
+
+        if (authorizationHeader !== undefined) {
+          // Has Authorization header - set up bearer token
+          formState.setAuthType("bearer");
+          formState.setShowAuthSettings(true);
+          formState.setBearerToken(
+            authorizationHeader.startsWith("Bearer ")
+              ? authorizationHeader.replace("Bearer ", "")
+              : authorizationHeader,
+          );
+        }
+      }
+      if (initialData.headers) {
+        const headersArray = Object.entries(initialData.headers)
+          .filter(([key]) => !isAuthorizationHeader(key))
+          .map(([key, value]) => createHeaderEntry(key, value));
+        if (headersArray.length > 0) {
+          formState.setCustomHeaders(headersArray);
+          formState.setShowConfiguration(true);
+        }
+      }
+      if (
+        typeof initialData.requestTimeout === "number" &&
+        Number.isFinite(initialData.requestTimeout)
+      ) {
+        formState.setRequestTimeout(String(initialData.requestTimeout));
+        formState.setShowConfiguration(true);
+      }
+      if (initialData.clientCapabilities) {
+        formState.setClientCapabilitiesOverrideEnabled(true);
+        formState.setClientCapabilitiesOverrideText(
+          JSON.stringify(initialData.clientCapabilities, null, 2),
+        );
+        formState.setShowConfiguration(true);
       }
     }
   }, [initialData, isOpen]);
 
   const handleClose = () => {
     formState.resetForm();
+    setMcpProtocolVersionOverride(undefined);
     onClose();
   };
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
 
+    if (isAppBootstrapping) {
+      toast.error(appReadyMessage ?? "App is still loading. Try again in a moment.");
+      return;
+    }
+
     // Validate Client ID if using custom configuration
-    if (formState.authType === "oauth" && formState.useCustomClientId) {
+    if (
+      formState.authType === "oauth" &&
+      formState.registrationMode === "preregistered"
+    ) {
       const clientIdError = formState.validateClientId(formState.clientId);
       if (clientIdError) {
         toast.error(clientIdError);
@@ -118,9 +342,15 @@ export function AddServerModal({
       return;
     }
 
-    const finalFormData = formState.buildFormData();
+    const finalFormData: ServerFormData = {
+      ...formState.buildFormData(),
+      ...(mcpProtocolVersionOverride !== undefined
+        ? { mcpProtocolVersionOverride }
+        : {}),
+    };
     onSubmit(finalFormData);
     formState.resetForm();
+    setMcpProtocolVersionOverride(undefined);
     onClose();
   };
 
@@ -148,7 +378,6 @@ export function AddServerModal({
               onChange={(e) => formState.setName(e.target.value)}
               placeholder="my-mcp-server"
               required
-              className="h-10"
             />
           </div>
 
@@ -157,7 +386,29 @@ export function AddServerModal({
             <label className="block text-sm font-medium text-foreground">
               Connection Type
             </label>
-            {formState.type === "stdio" && !HOSTED_MODE ? (
+            {HOSTED_MODE ? (
+              formState.type === "stdio" ? (
+                <HostedConnectionTypeControl transportType="stdio">
+                  <Input
+                    value={formState.commandInput}
+                    onChange={(e) => formState.setCommandInput(e.target.value)}
+                    placeholder="npx -y @modelcontextprotocol/server-everything"
+                    required
+                    className="flex-1 rounded-l-none"
+                  />
+                </HostedConnectionTypeControl>
+              ) : (
+                <HostedConnectionTypeControl transportType="http">
+                  <Input
+                    value={formState.url}
+                    onChange={(e) => formState.setUrl(e.target.value)}
+                    placeholder={hostedUrlPlaceholder}
+                    required
+                    className="flex-1 rounded-l-none"
+                  />
+                </HostedConnectionTypeControl>
+              )
+            ) : formState.type === "stdio" ? (
               <div className="flex">
                 <Select
                   value={formState.type}
@@ -235,6 +486,7 @@ export function AddServerModal({
           {/* HTTP: Authentication */}
           {formState.type === "http" && (
             <AuthenticationSection
+              serverUrl={formState.url}
               authType={formState.authType}
               onAuthTypeChange={(value) => {
                 formState.setAuthType(value);
@@ -245,12 +497,33 @@ export function AddServerModal({
               onBearerTokenChange={formState.setBearerToken}
               oauthScopesInput={formState.oauthScopesInput}
               onOauthScopesChange={formState.setOauthScopesInput}
+              oauthProtocolMode={formState.oauthProtocolMode}
+              onOauthProtocolModeChange={formState.setOauthProtocolMode}
+              serverMcpProtocolVersion={mcpProtocolVersionOverride}
+              registrationMode={formState.registrationMode}
+              onOauthRegistrationModeChange={
+                formState.setOauthRegistrationMode
+              }
+              xaaClientAuth={formState.xaaClientAuth}
+              onXaaClientAuthChange={formState.setXaaClientAuth}
+              confidentialCimdStatus={
+                formState.confidentialCimdCapability.status
+              }
+              confidentialCimdBlockReason={
+                formState.confidentialCimdBlockReason
+              }
+              onRetryConfidentialCimd={
+                formState.confidentialCimdCapability.retry
+              }
               useCustomClientId={formState.useCustomClientId}
               onUseCustomClientIdChange={(checked) => {
                 formState.setUseCustomClientId(checked);
                 if (!checked) {
                   formState.setClientId("");
                   formState.setClientSecret("");
+                  if (formState.hasStoredClientSecret) {
+                    formState.setClearClientSecret(true);
+                  }
                   formState.setClientIdError(null);
                   formState.setClientSecretError(null);
                 }
@@ -264,70 +537,79 @@ export function AddServerModal({
               clientSecret={formState.clientSecret}
               onClientSecretChange={(value) => {
                 formState.setClientSecret(value);
+                if (value.trim()) {
+                  formState.setClearClientSecret(false);
+                }
                 const error = formState.validateClientSecret(value);
                 formState.setClientSecretError(error);
               }}
+              hasStoredClientSecret={formState.hasStoredClientSecret}
+              clearClientSecret={formState.clearClientSecret}
+              onClearClientSecret={() => formState.setClearClientSecret(true)}
+              onUndoClearClientSecret={() =>
+                formState.setClearClientSecret(false)
+              }
               clientIdError={formState.clientIdError}
               clientSecretError={formState.clientSecretError}
-            />
-          )}
-
-          {/* HTTP: Custom Headers */}
-          {formState.type === "http" && (
-            <CustomHeadersSection
-              customHeaders={formState.customHeaders}
-              onAdd={formState.addCustomHeader}
-              onRemove={formState.removeCustomHeader}
-              onUpdate={formState.updateCustomHeader}
-            />
-          )}
-
-          {/* Configuration Section */}
-          <div className="border border-border rounded-lg overflow-hidden">
-            <button
-              type="button"
-              onClick={() =>
-                formState.setShowConfiguration(!formState.showConfiguration)
+              xaaAuthzIssuer={formState.xaaAuthzIssuer}
+              onXaaAuthzIssuerChange={formState.setXaaAuthzIssuer}
+              xaaAllowPathScopedIssuer={formState.xaaAllowPathScopedIssuer}
+              onXaaAllowPathScopedIssuerChange={
+                formState.setXaaAllowPathScopedIssuer
               }
-              className="w-full flex items-center justify-between p-3 hover:bg-muted/50 transition-colors cursor-pointer"
-            >
-              <div className="flex items-center gap-2">
-                {formState.showConfiguration ? (
-                  <ChevronDown className="h-4 w-4 text-muted-foreground" />
-                ) : (
-                  <ChevronRight className="h-4 w-4 text-muted-foreground" />
-                )}
-                <span className="text-sm font-medium text-foreground">
-                  Additional Configuration
-                </span>
-              </div>
-            </button>
+              oauthAllowPathScopedIssuer={formState.oauthAllowPathScopedIssuer}
+              onOauthAllowPathScopedIssuerChange={
+                formState.setOauthAllowPathScopedIssuer
+              }
+              xaaSubject={formState.xaaSubject}
+              onXaaSubjectChange={formState.setXaaSubject}
+              xaaEmail={formState.xaaEmail}
+              onXaaEmailChange={formState.setXaaEmail}
+              autoSelectsXaa={formState.autoSelectsXaa}
+              projectDefaultIdentity={projectXaaDefaultIdentity}
+            />
+          )}
 
-            {formState.showConfiguration && (
-              <div className="p-4 space-y-4 border-t border-border bg-muted/30">
-                <div className="space-y-2">
-                  <label className="block text-sm font-medium text-foreground">
-                    Request Timeout
-                  </label>
-                  <Input
-                    type="number"
-                    value={formState.requestTimeout}
-                    onChange={(e) =>
-                      formState.setRequestTimeout(e.target.value)
-                    }
-                    placeholder="10000"
-                    className="h-10"
-                    min="1000"
-                    max="600000"
-                    step="1000"
-                  />
-                  <p className="text-xs text-muted-foreground">
-                    Timeout in ms (default: 10000ms, min: 1000ms, max: 600000ms)
-                  </p>
-                </div>
-              </div>
-            )}
-          </div>
+          <AdvancedConnectionSettingsSection
+            showConfiguration={formState.showConfiguration}
+            onToggle={() =>
+              formState.setShowConfiguration(!formState.showConfiguration)
+            }
+            requestTimeout={formState.requestTimeout}
+            onRequestTimeoutChange={formState.setRequestTimeout}
+            inheritedRequestTimeout={formState.inheritedRequestTimeout}
+            clientCapabilitiesOverrideEnabled={
+              formState.clientCapabilitiesOverrideEnabled
+            }
+            onClientCapabilitiesOverrideEnabledChange={(enabled) => {
+              formState.setClientCapabilitiesOverrideEnabled(enabled);
+              if (!enabled) {
+                formState.setClientCapabilitiesOverrideError(null);
+              }
+            }}
+            clientCapabilitiesOverrideText={
+              formState.clientCapabilitiesOverrideText
+            }
+            onClientCapabilitiesOverrideTextChange={
+              formState.setClientCapabilitiesOverrideText
+            }
+            clientCapabilitiesOverrideError={
+              formState.clientCapabilitiesOverrideError
+            }
+            showMcpProtocolVersionOverride={Boolean(projectId)}
+            mcpProtocolVersionOverride={mcpProtocolVersionOverride}
+            onMcpProtocolVersionOverrideChange={setMcpProtocolVersionOverride}
+            transportKind={formState.type === "http" ? "http" : "stdio"}
+            {...(formState.type === "http"
+              ? {
+                  customHeaders: formState.customHeaders,
+                  onAddHeader: formState.addCustomHeader,
+                  onRemoveHeader: formState.removeCustomHeader,
+                  onUpdateHeader: formState.updateCustomHeader,
+                  headersWarning: formState.oauthAuthorizationHeaderWarning,
+                }
+              : {})}
+          />
 
           {/* Action Buttons */}
           <div className="flex justify-end space-x-2 pt-4">
@@ -335,10 +617,8 @@ export function AddServerModal({
               type="button"
               variant="outline"
               onClick={() => {
-                posthog.capture("cancel_button_clicked", {
+                track("cancel_button_clicked", {
                   location: "add_server_modal",
-                  platform: detectPlatform(),
-                  environment: detectEnvironment(),
                 });
                 handleClose();
               }}
@@ -348,16 +628,18 @@ export function AddServerModal({
             </Button>
             <Button
               type="submit"
+              disabled={
+                formState.authConfigurationBlocksSubmit || isAppBootstrapping
+              }
+              title={isAppBootstrapping ? appReadyMessage ?? undefined : undefined}
               onClick={() => {
-                posthog.capture("add_server_button_clicked", {
+                track("add_server_button_clicked", {
                   location: "add_server_modal",
-                  platform: detectPlatform(),
-                  environment: detectEnvironment(),
                 });
               }}
               className="px-4"
             >
-              Add Server
+              {isAppBootstrapping ? appReadyMessage ?? "Loading..." : "Add Server"}
             </Button>
           </div>
         </form>

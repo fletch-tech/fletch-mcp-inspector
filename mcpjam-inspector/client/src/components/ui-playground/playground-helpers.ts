@@ -7,6 +7,13 @@
 
 import { generateId, type UIMessage, type DynamicToolUIPart } from "ai";
 import { detectUIType } from "@/lib/mcp-ui/mcp-apps-utils";
+import { extractDisplayFromToolResult } from "@/components/chat-v2/shared/tool-result-text";
+import { mergeMcpToolOriginMetadata } from "@/shared/mcp-tool-origin-metadata";
+import { hasMcpToolResultImageCandidate } from "@/components/chat-v2/shared/mcp-tool-result-image-preview";
+import {
+  getMcpToolResultImageRenderPlacement,
+  type McpToolResultImageRenderingPolicy,
+} from "@/lib/client-config-v2";
 
 type DeterministicToolState = "output-available" | "output-error";
 
@@ -17,38 +24,19 @@ interface DeterministicToolOptions {
   errorText?: string;
   /** Optional fixed toolCallId for in-place updates */
   toolCallId?: string;
+  /** Optional model-facing output used by trace/prelude callers, not UI storage. */
+  modelOutput?: unknown;
+  /** Host policy for human-facing tool-result image rendering. */
+  mcpToolResultImageRendering?: McpToolResultImageRenderingPolicy;
 }
 
-function extractTextFromToolResult(result: unknown): string | null {
-  if (!result) return null;
-
-  if (typeof result === "string") {
-    const trimmed = result.trim();
-    return trimmed || null;
-  }
-
-  if (typeof result !== "object") return null;
-
-  const record = result as Record<string, unknown>;
-
-  if (typeof record.text === "string" && record.text.trim()) {
-    return record.text.trim();
-  }
-
-  const content = record.content;
-  if (!Array.isArray(content)) return null;
-
-  const textParts = content
-    .map((item) => {
-      if (!item || typeof item !== "object") return null;
-      const block = item as Record<string, unknown>;
-      if (block.type !== "text" || typeof block.text !== "string") return null;
-      const text = block.text.trim();
-      return text || null;
-    })
-    .filter((text): text is string => Boolean(text));
-
-  return textParts.length > 0 ? textParts.join("\n\n") : null;
+function readServerIdFromToolMeta(
+  toolMeta: Record<string, unknown> | undefined
+): string | undefined {
+  const serverId = toolMeta?._serverId ?? toolMeta?.serverId;
+  return typeof serverId === "string" && serverId.length > 0
+    ? serverId
+    : undefined;
 }
 
 /**
@@ -62,7 +50,7 @@ export function createDeterministicToolMessages(
   params: Record<string, unknown>,
   result: unknown,
   toolMeta: Record<string, unknown> | undefined,
-  options?: DeterministicToolOptions,
+  options?: DeterministicToolOptions
 ): { messages: UIMessage[]; toolCallId: string } {
   // Validate toolName
   if (!toolName?.trim()) {
@@ -71,6 +59,7 @@ export function createDeterministicToolMessages(
 
   const toolCallId = options?.toolCallId ?? `playground-${generateId()}`;
   const state = options?.state ?? "output-available";
+  const toolOutput = result;
 
   // Get custom invoked message from tool metadata if available
   const invokedMessage = toolMeta?.["openai/toolInvocation/invoked"] as
@@ -81,6 +70,8 @@ export function createDeterministicToolMessages(
   const invocationText = invokedMessage || `Invoked \`${toolName}\``;
   const uiType = detectUIType(toolMeta, result);
   const isTextTool = uiType === null;
+  const serverId = readServerIdFromToolMeta(toolMeta);
+  const providerMetadata = mergeMcpToolOriginMetadata(undefined, serverId);
 
   // Properly typed dynamic tool part based on state
   const toolPart: DynamicToolUIPart =
@@ -92,6 +83,9 @@ export function createDeterministicToolMessages(
           state: "output-error",
           input: params,
           errorText: options?.errorText ?? "Unknown error",
+          ...(providerMetadata
+            ? { callProviderMetadata: providerMetadata }
+            : {}),
         }
       : {
           type: "dynamic-tool",
@@ -99,7 +93,10 @@ export function createDeterministicToolMessages(
           toolName,
           state: "output-available",
           input: params,
-          output: result,
+          output: toolOutput,
+          ...(providerMetadata
+            ? { callProviderMetadata: providerMetadata }
+            : {}),
         };
 
   const assistantParts: UIMessage["parts"] = [
@@ -120,11 +117,28 @@ export function createDeterministicToolMessages(
         text: `Tool error: ${options?.errorText ?? "Unknown error"}`,
       });
     } else {
-      const resultText = extractTextFromToolResult(result);
-      if (resultText) {
+      const suppressInlineImageDataResult =
+        getMcpToolResultImageRenderPlacement(
+          options?.mcpToolResultImageRendering
+        ) === "inline" &&
+        hasMcpToolResultImageCandidate(
+          result,
+          options?.mcpToolResultImageRendering
+        );
+      const display = suppressInlineImageDataResult
+        ? null
+        : extractDisplayFromToolResult(result);
+      if (display?.kind === "json") {
+        assistantParts.push({
+          type: "data-result",
+          data: display.value,
+          autoHeight: true,
+          ...(serverId ? { serverId } : {}),
+        } as any);
+      } else if (display?.kind === "text") {
         assistantParts.push({
           type: "text",
-          text: resultText,
+          text: display.text,
         });
       }
     }

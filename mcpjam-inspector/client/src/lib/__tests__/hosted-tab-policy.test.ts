@@ -11,14 +11,27 @@ import {
 
 describe("hosted-tab-policy", () => {
   it("normalizes legacy hash aliases to canonical tabs", () => {
-    expect(normalizeHostedHashTab("registry")).toBe("servers");
-    expect(normalizeHostedHashTab("chat")).toBe("chat-v2");
-    expect(normalizeHostedHashTab("chat-v2")).toBe("chat-v2");
+    expect(normalizeHostedHashTab("chat")).toBe("playground");
+    // "registry" is now a first-class tab, not an alias
+    expect(normalizeHostedHashTab("registry")).toBe("registry");
   });
 
   it("keeps prompts visible in hosted sidebar allow-list", () => {
     expect(HOSTED_SIDEBAR_ALLOWED_TABS).toContain("prompts");
     expect(isHostedSidebarTabAllowed("prompts")).toBe(true);
+  });
+
+  it("keeps ci-evals visible in hosted sidebar allow-list", () => {
+    expect(HOSTED_SIDEBAR_ALLOWED_TABS).toContain("ci-evals");
+    expect(isHostedSidebarTabAllowed("ci-evals")).toBe(true);
+  });
+
+  it("keeps chatboxes visible in hosted navigation", () => {
+    expect(HOSTED_SIDEBAR_ALLOWED_TABS).toContain("chatboxes");
+    expect(HOSTED_HASH_ALLOWED_TABS).toContain("chatboxes");
+    expect(isHostedSidebarTabAllowed("chatboxes")).toBe(true);
+    expect(isHostedHashTabAllowed("chatboxes")).toBe(true);
+    expect(isHostedHashTabBlocked("chatboxes")).toBe(false);
   });
 
   it("allows profile and organizations hashes in hosted mode", () => {
@@ -28,6 +41,13 @@ describe("hosted-tab-policy", () => {
     expect(isHostedHashTabAllowed("organizations")).toBe(true);
   });
 
+  it("allows tasks in hosted mode (reconnect-per-poll routes)", () => {
+    expect(HOSTED_SIDEBAR_ALLOWED_TABS).toContain("tasks");
+    expect(HOSTED_HASH_ALLOWED_TABS).toContain("tasks");
+    expect(isHostedSidebarTabAllowed("tasks")).toBe(true);
+    expect(isHostedHashTabBlocked("tasks")).toBe(false);
+  });
+
   it("blocks tracing and auth hashes in hosted mode", () => {
     expect(HOSTED_HASH_BLOCKED_TABS).toContain("tracing");
     expect(HOSTED_HASH_BLOCKED_TABS).toContain("auth");
@@ -35,20 +55,65 @@ describe("hosted-tab-policy", () => {
     expect(isHostedHashTabBlocked("auth")).toBe(true);
   });
 
-  it("treats #chat as allowed after normalization to #chat-v2", () => {
+  it("treats #chat as allowed after normalization to #playground", () => {
     expect(isHostedHashTabAllowed("chat")).toBe(true);
     expect(isHostedHashTabBlocked("chat")).toBe(false);
   });
 
   it("hides blocked tabs from hosted sidebar", () => {
     expect(isHostedSidebarTabAllowed("skills")).toBe(false);
-    expect(isHostedSidebarTabAllowed("tasks")).toBe(false);
-    expect(isHostedSidebarTabAllowed("evals")).toBe(false);
+    expect(isHostedSidebarTabAllowed("tracing")).toBe(false);
+    expect(isHostedSidebarTabAllowed("evals")).toBe(true);
+    expect(isHostedHashTabBlocked("evals")).toBe(false);
   });
 
   it("allows oauth-flow in hosted sidebar", () => {
     expect(isHostedSidebarTabAllowed("oauth-flow")).toBe(true);
     expect(isHostedHashTabAllowed("oauth-flow")).toBe(true);
     expect(isHostedHashTabBlocked("oauth-flow")).toBe(false);
+  });
+
+  it("allows conformance in hosted sidebar", () => {
+    expect(HOSTED_SIDEBAR_ALLOWED_TABS).toContain("conformance");
+    expect(HOSTED_HASH_ALLOWED_TABS).toContain("conformance");
+    expect(isHostedSidebarTabAllowed("conformance")).toBe(true);
+    expect(isHostedHashTabAllowed("conformance")).toBe(true);
+    expect(isHostedHashTabBlocked("conformance")).toBe(false);
+  });
+
+  it("allows xaa-flow in hosted sidebar", () => {
+    expect(HOSTED_SIDEBAR_ALLOWED_TABS).toContain("xaa-flow");
+    expect(HOSTED_HASH_ALLOWED_TABS).toContain("xaa-flow");
+    expect(isHostedSidebarTabAllowed("xaa-flow")).toBe(true);
+    expect(isHostedHashTabAllowed("xaa-flow")).toBe(true);
+    expect(isHostedHashTabBlocked("xaa-flow")).toBe(false);
+  });
+
+  it("allows environments in hosted navigation (visibility stays flag-gated)", () => {
+    expect(HOSTED_SIDEBAR_ALLOWED_TABS).toContain("environments");
+    expect(HOSTED_HASH_ALLOWED_TABS).toContain("environments");
+    expect(isHostedSidebarTabAllowed("environments")).toBe(true);
+    expect(isHostedHashTabAllowed("environments")).toBe(true);
+    expect(isHostedHashTabBlocked("environments")).toBe(false);
+  });
+
+  it("allows learning in hosted navigation", () => {
+    expect(HOSTED_SIDEBAR_ALLOWED_TABS).toContain("learning");
+    expect(HOSTED_HASH_ALLOWED_TABS).toContain("learning");
+    expect(isHostedSidebarTabAllowed("learning")).toBe(true);
+    expect(isHostedHashTabAllowed("learning")).toBe(true);
+  });
+
+  it("allows the computer hash in hosted mode without adding a sidebar item", () => {
+    // Project Computers are reachable in hosted mode (E2B-backed), gated by
+    // project membership + entitlement + the `computers-enabled` flag — so the
+    // App hosted-mode effect must NOT bounce /computer back to /servers.
+    expect(HOSTED_HASH_ALLOWED_TABS).toContain("computer");
+    expect(isHostedHashTabAllowed("computer")).toBe(true);
+    expect(isHostedHashTabBlocked("computer")).toBe(false);
+    // Computer is reached via the Connect tab switcher, not its own sidebar
+    // entry, so it deliberately stays out of the sidebar allow-list.
+    expect(HOSTED_SIDEBAR_ALLOWED_TABS).not.toContain("computer");
+    expect(isHostedSidebarTabAllowed("computer")).toBe(false);
   });
 });

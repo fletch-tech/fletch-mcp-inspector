@@ -3,9 +3,30 @@ import type {
   ElicitRequest,
   ElicitResult,
   ListToolsResult,
-} from "@modelcontextprotocol/sdk/types.js";
+} from "@modelcontextprotocol/client";
 import "../../types/hono"; // Type extensions
 import { listTools as listToolsShared } from "../../utils/route-handlers.js";
+import {
+  extractInsufficientScopeChallenge,
+  serializeMcpError,
+  jsonError,
+  type InsufficientScopeChallenge,
+} from "../../utils/mcp-error-serialize.js";
+
+// Re-exported so existing importers (and
+// `__tests__/tools.serialize-error.test.ts`) keep resolving these from
+// `mcp/tools`; the implementations now live in the shared serializer used by
+// every route surface that can receive a `403 insufficient_scope` (SEP-2350).
+export {
+  extractInsufficientScopeChallenge,
+  serializeMcpError,
+  jsonError,
+  type InsufficientScopeChallenge,
+};
+import {
+  toServedFromCache,
+  withCacheEventCapture,
+} from "../../utils/cache-events.js";
 
 const tools = new Hono();
 
@@ -88,60 +109,26 @@ function getExecutionDurationMs(context: ExecutionContext): number {
   return Math.max(0, Date.now() - context.startedAtMs);
 }
 
-function serializeMcpError(error: unknown) {
-  const anyErr = error as any;
-  const base = {
-    name: anyErr?.name ?? "Error",
-    message: anyErr?.message ?? String(error),
-    code: anyErr?.code ?? anyErr?.error?.code,
-    data: anyErr?.data ?? anyErr?.error?.data,
-  } as Record<string, unknown>;
-  const cause = anyErr?.cause;
-  if (cause && typeof cause === "object") {
-    base.cause = {
-      name: (cause as any)?.name,
-      message: (cause as any)?.message,
-      code: (cause as any)?.code,
-      data: (cause as any)?.data,
-    };
-  }
-  if (process.env.NODE_ENV === "development" && anyErr?.stack) {
-    base.stack = anyErr.stack;
-  }
-  return base;
-}
-
-function jsonError(c: any, error: unknown, fallbackStatus = 500) {
-  const details = serializeMcpError(error);
-  const status =
-    typeof (error as any)?.status === "number"
-      ? (error as any).status
-      : fallbackStatus;
-  return c.json(
-    { error: details.message as string, mcpError: details },
-    status,
-  );
-}
-
 tools.post("/list", async (c) => {
   try {
-    const { serverId, modelId, cursor } = (await c.req.json()) as {
+    const { serverId, modelId, cursor, refresh } = (await c.req.json()) as {
       serverId?: string;
       modelId?: string;
       cursor?: string;
+      refresh?: boolean;
     };
     if (!serverId) {
       return c.json({ error: "serverId is required" }, 400);
     }
 
-    // Normalize serverId - try to find a case-insensitive match if exact match fails
+    // Normalize serverId - try to find a case-insensitive match if exact match
+    // fails. Match against all registered servers (not just live-clients) so
+    // a server that's still mid-connect can still be resolved.
     let normalizedServerId = serverId;
-    const availableServers = c.mcpClientManager
-      .listServers()
-      .filter((id: string) => Boolean(c.mcpClientManager.getClient(id)));
+    const registeredServers = c.mcpClientManager.listServers();
 
-    if (!availableServers.includes(serverId)) {
-      const match = availableServers.find(
+    if (!registeredServers.includes(serverId)) {
+      const match = registeredServers.find(
         (name: string) => name.toLowerCase() === serverId.toLowerCase(),
       );
       if (match) {
@@ -149,13 +136,27 @@ tools.post("/list", async (c) => {
       }
     }
 
-    return c.json(
-      await listToolsShared(c.mcpClientManager, {
+    // Only bail out for truly unknown ids (e.g. stale chatbox refs) so we
+    // don't 500 the metadata fetch. Registered-but-still-connecting ids fall
+    // through to the SDK path, which awaits the in-flight connectPromise and
+    // returns the real tools.
+    if (!registeredServers.includes(normalizedServerId)) {
+      return c.json({ tools: [], toolsMetadata: {}, tokenCount: undefined });
+    }
+
+    const { result, events } = await withCacheEventCapture(() =>
+      listToolsShared(c.mcpClientManager, {
         serverId: normalizedServerId,
         modelId,
         cursor,
+        cacheMode: refresh === true ? "refresh" : undefined,
       }),
     );
+    const servedFromCache = toServedFromCache(events);
+    return c.json({
+      ...result,
+      ...(servedFromCache ? { servedFromCache } : {}),
+    });
   } catch (error) {
     return jsonError(c, error, 500);
   }
@@ -167,19 +168,27 @@ tools.post("/execute", async (c) => {
     toolName,
     parameters = {},
     taskOptions,
+    allowTaskResult,
   } = (await c.req.json()) as {
     serverId?: string;
     toolName?: string;
     parameters?: Record<string, unknown>;
     taskOptions?: { ttl?: number };
+    allowTaskResult?: boolean;
   };
 
   if (!serverId) return c.json({ error: "serverId is required" }, 400);
   if (!toolName) return c.json({ error: "toolName is required" }, 400);
 
   const manager = c.mcpClientManager;
-  const client = manager.getClient(serverId);
-  if (!client) {
+  // `getClient()` is legacy-only — it returns the unwrapped upstream
+  // `Client` (or `undefined` for stateless preview connections, which
+  // wrap their own fetch instead of an upstream Client). Use
+  // `getManagedClient()` here so the guard works for both adapters; the
+  // actual execution at `manager.executeTool` already goes through
+  // `getClientOrThrow` which reads from the same managed-client map.
+  const managedClient = manager.getManagedClient(serverId);
+  if (!managedClient) {
     return c.json({ error: `Server '${serverId}' is not connected` }, 400);
   }
 
@@ -191,13 +200,17 @@ tools.post("/execute", async (c) => {
     serverId,
     toolName,
     startedAtMs,
-    execPromise: manager.executeTool(
-      serverId,
-      toolName,
-      parameters,
-      undefined, // options
-      taskOptions, // task options for background task creation
-    ) as unknown as Promise<ListToolsResult>,
+    execPromise: (allowTaskResult
+      ? manager.executeTool(serverId, toolName, parameters, {
+          allowTaskResult: true,
+        })
+      : manager.executeTool(
+          serverId,
+          toolName,
+          parameters,
+          undefined, // options
+          taskOptions, // task options for background task creation
+        )) as unknown as Promise<ListToolsResult>,
     queue: [],
   };
 
@@ -253,10 +266,31 @@ tools.post("/execute", async (c) => {
       const modelImmediateResponse =
         result?._meta?.["io.modelcontextprotocol/model-immediate-response"];
 
-      // Standard MCP Tasks spec format: top-level task property
-      if (result?.task?.taskId && result?.task?.status) {
+      // No wire dispatch available (older embedder, test double) means no
+      // tasks wire — never assume one on the create path.
+      const wire =
+        typeof manager.getTasksWire === "function"
+          ? manager.getTasksWire(serverId)
+          : "none";
+
+      // Extension wire: the CreateTaskResult is flat (`resultType: "task"`).
+      if (wire === "extension" && result?.resultType === "task") {
         return c.json({
           status: "task_created",
+          wire,
+          task: result,
+          durationMs: getExecutionDurationMs(context),
+          modelImmediateResponse,
+        });
+      }
+
+      // Legacy (2025-11-25) format: nested top-level `task` property. On the
+      // extension wire this shape is nonconforming, so it must not be
+      // classified as a creation.
+      if (wire === "legacy" && result?.task?.taskId && result?.task?.status) {
+        return c.json({
+          status: "task_created",
+          wire,
           task: result.task,
           durationMs: getExecutionDurationMs(context),
           // Include model-immediate-response if provided by server
@@ -264,13 +298,17 @@ tools.post("/execute", async (c) => {
         });
       }
 
-      // Check for task info in _meta["modelcontextprotocol.io/task"] or _meta["io.modelcontextprotocol/related-task"]
+      // Heuristic _meta fallback for legacy servers only: on the extension
+      // wire a related-task pointer is not a creation signal.
       const metaTask =
-        result?._meta?.["modelcontextprotocol.io/task"] ||
-        result?._meta?.["io.modelcontextprotocol/related-task"];
+        wire === "legacy"
+          ? result?._meta?.["modelcontextprotocol.io/task"] ||
+            result?._meta?.["io.modelcontextprotocol/related-task"]
+          : undefined;
       if (metaTask?.taskId && metaTask?.status) {
         return c.json({
           status: "task_created",
+          wire,
           task: {
             taskId: metaTask.taskId,
             status: metaTask.status,

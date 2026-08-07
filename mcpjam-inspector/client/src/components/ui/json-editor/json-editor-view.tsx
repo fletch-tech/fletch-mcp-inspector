@@ -9,6 +9,7 @@ interface JsonEditorViewProps {
   maxHeight?: string | number;
   showLineNumbers?: boolean;
   collapseStringsAfterLength?: number;
+  wrapLongLinesInView?: boolean;
   collapsible?: boolean;
   defaultExpandDepth?: number;
   collapsedPaths?: Set<string>;
@@ -22,6 +23,7 @@ export function JsonEditorView({
   maxHeight,
   showLineNumbers = true,
   collapseStringsAfterLength,
+  wrapLongLinesInView = true,
   collapsible = false,
   defaultExpandDepth,
   collapsedPaths,
@@ -45,6 +47,8 @@ export function JsonEditorView({
       <JsonTreeView
         value={value}
         className={className}
+        height={height ?? "100%"}
+        maxHeight={maxHeight}
         defaultExpandDepth={defaultExpandDepth}
         collapsedPaths={collapsedPaths}
         onCollapseChange={onCollapseChange}
@@ -62,6 +66,7 @@ export function JsonEditorView({
       maxHeight={maxHeight}
       showLineNumbers={showLineNumbers}
       collapseStringsAfterLength={collapseStringsAfterLength}
+      wrapLongLinesInView={wrapLongLinesInView}
     />
   );
 }

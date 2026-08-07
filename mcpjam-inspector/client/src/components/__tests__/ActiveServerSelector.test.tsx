@@ -11,6 +11,7 @@ import {
   type ActiveServerSelectorProps,
 } from "../ActiveServerSelector";
 import type { ServerWithName } from "@/hooks/use-app-state";
+import { hasOAuthConfig } from "@/lib/oauth/mcp-oauth";
 
 // Mock posthog
 vi.mock("posthog-js/react", () => ({
@@ -23,6 +24,10 @@ vi.mock("posthog-js/react", () => ({
 vi.mock("@/lib/PosthogUtils", () => ({
   detectEnvironment: vi.fn().mockReturnValue("test"),
   detectPlatform: vi.fn().mockReturnValue("web"),
+}));
+
+vi.mock("@/lib/analytics", () => ({
+  track: vi.fn(),
 }));
 
 // Mock OAuth utilities
@@ -53,25 +58,6 @@ vi.mock("../connection/AddServerModal", () => ({
     ) : null,
 }));
 
-// Mock ConfirmChatResetDialog
-vi.mock("../chat-v2/chat-input/dialogs/confirm-chat-reset-dialog", () => ({
-  ConfirmChatResetDialog: ({
-    open,
-    onConfirm,
-    onCancel,
-  }: {
-    open: boolean;
-    onConfirm: () => void;
-    onCancel: () => void;
-  }) =>
-    open ? (
-      <div data-testid="confirm-dialog">
-        <button onClick={onConfirm}>Confirm</button>
-        <button onClick={onCancel}>Cancel</button>
-      </div>
-    ) : null,
-}));
-
 describe("ActiveServerSelector", () => {
   const createServer = (
     overrides: Partial<ServerWithName> = {},
@@ -82,6 +68,7 @@ describe("ActiveServerSelector", () => {
       enabled: true,
       retryCount: 0,
       useOAuth: false,
+      lastConnectionTime: new Date("2024-01-01"),
       config: {
         transportType: "stdio",
         command: "node",
@@ -172,6 +159,135 @@ describe("ActiveServerSelector", () => {
       );
 
       expect(screen.getByText("HTTP")).toBeInTheDocument();
+    });
+
+    it("hides the selector when the views filter has no matching servers", () => {
+      const serverConfigs = {
+        "server-1": createServer({ name: "server-1" }),
+        "server-2": createServer({ name: "server-2" }),
+      };
+
+      render(
+        <ActiveServerSelector
+          {...defaultProps}
+          serverConfigs={serverConfigs}
+          selectedServer="server-1"
+          showOnlyServersWithViews={true}
+          serversWithViews={new Set()}
+        />,
+      );
+
+      expect(screen.queryByText("server-1")).not.toBeInTheDocument();
+      expect(screen.queryByText("server-2")).not.toBeInTheDocument();
+      expect(screen.queryByText("Add Server")).not.toBeInTheDocument();
+    });
+
+    it("filters to servers with saved views when saved views exist", () => {
+      const serverConfigs = {
+        "server-1": createServer({ name: "server-1" }),
+        "server-2": createServer({ name: "server-2" }),
+      };
+
+      render(
+        <ActiveServerSelector
+          {...defaultProps}
+          serverConfigs={serverConfigs}
+          selectedServer="server-1"
+          showOnlyServersWithViews={true}
+          serversWithViews={new Set(["server-2"])}
+        />,
+      );
+
+      expect(screen.queryByText("server-1")).not.toBeInTheDocument();
+      expect(screen.getByText("server-2")).toBeInTheDocument();
+    });
+
+    it("filters to OAuth HTTP servers when requested", () => {
+      vi.mocked(hasOAuthConfig).mockImplementation(
+        (serverName) =>
+          serverName === "stored-config-oauth" ||
+          serverName === "opted-out-stored-config",
+      );
+      const httpConfig = {
+        transportType: "streamableHttp",
+        url: "http://localhost:3000/mcp",
+      } as const;
+      const oauthTokens = {
+        client_id: "client-id",
+        client_secret: "client-secret",
+        access_token: "access-token",
+        refresh_token: "refresh-token",
+        expires_in: 3600,
+        scope: "read",
+      };
+      const serverConfigs = {
+        "explicit-oauth": createServer({
+          name: "explicit-oauth",
+          config: httpConfig,
+          useOAuth: true,
+        }),
+        "token-oauth": createServer({
+          name: "token-oauth",
+          config: httpConfig,
+          useOAuth: undefined,
+          oauthTokens,
+        }),
+        "stored-config-oauth": createServer({
+          name: "stored-config-oauth",
+          config: httpConfig,
+          useOAuth: undefined,
+        }),
+        "flow-oauth": createServer({
+          name: "flow-oauth",
+          config: httpConfig,
+          useOAuth: undefined,
+          connectionStatus: "oauth-flow",
+        }),
+        "opted-out-token-oauth": createServer({
+          name: "opted-out-token-oauth",
+          config: httpConfig,
+          useOAuth: false,
+          oauthTokens,
+        }),
+        "opted-out-stored-config": createServer({
+          name: "opted-out-stored-config",
+          config: httpConfig,
+          useOAuth: false,
+        }),
+        "plain-http": createServer({
+          name: "plain-http",
+          config: httpConfig,
+        }),
+        "stdio-with-oauth-state": createServer({
+          name: "stdio-with-oauth-state",
+          useOAuth: true,
+          oauthTokens,
+        }),
+      };
+
+      render(
+        <ActiveServerSelector
+          {...defaultProps}
+          serverConfigs={serverConfigs}
+          selectedServer="explicit-oauth"
+          showOnlyOAuthServers={true}
+        />,
+      );
+
+      expect(screen.getByText("explicit-oauth")).toBeInTheDocument();
+      expect(screen.getByText("token-oauth")).toBeInTheDocument();
+      expect(screen.getByText("stored-config-oauth")).toBeInTheDocument();
+      expect(screen.getByText("flow-oauth")).toBeInTheDocument();
+      expect(
+        screen.queryByText("opted-out-token-oauth"),
+      ).not.toBeInTheDocument();
+      expect(
+        screen.queryByText("opted-out-stored-config"),
+      ).not.toBeInTheDocument();
+      expect(screen.queryByText("plain-http")).not.toBeInTheDocument();
+      expect(
+        screen.queryByText("stdio-with-oauth-state"),
+      ).not.toBeInTheDocument();
     });
   });
 
@@ -407,52 +523,31 @@ describe("ActiveServerSelector", () => {
     });
   });
 
-  describe("confirmation dialog", () => {
-    it("shows confirmation dialog when changing server with messages", () => {
+  describe("server changes with existing messages", () => {
+    it("changes server immediately even when the chat already has messages", () => {
       const serverConfigs = {
         "server-1": createServer({ name: "server-1" }),
         "server-2": createServer({ name: "server-2" }),
       };
-
-      render(
-        <ActiveServerSelector
-          {...defaultProps}
-          serverConfigs={serverConfigs}
-          selectedServer="server-1"
-          hasMessages={true}
-        />,
-      );
-
-      fireEvent.click(screen.getByText("server-2"));
-
-      expect(screen.getByTestId("confirm-dialog")).toBeInTheDocument();
-    });
-
-    it("changes server after confirming dialog", () => {
       const onServerChange = vi.fn();
-      const serverConfigs = {
-        "server-1": createServer({ name: "server-1" }),
-        "server-2": createServer({ name: "server-2" }),
-      };
 
       render(
         <ActiveServerSelector
           {...defaultProps}
           serverConfigs={serverConfigs}
           selectedServer="server-1"
-          hasMessages={true}
           onServerChange={onServerChange}
+          hasMessages={true}
         />,
       );
 
       fireEvent.click(screen.getByText("server-2"));
-      fireEvent.click(screen.getByText("Confirm"));
 
       expect(onServerChange).toHaveBeenCalledWith("server-2");
     });
 
-    it("does not change server after canceling dialog", () => {
-      const onServerChange = vi.fn();
+    it("toggles servers immediately in multi-select mode when the chat already has messages", () => {
+      const onMultiServerToggle = vi.fn();
       const serverConfigs = {
         "server-1": createServer({ name: "server-1" }),
         "server-2": createServer({ name: "server-2" }),
@@ -462,25 +557,35 @@ describe("ActiveServerSelector", () => {
         <ActiveServerSelector
           {...defaultProps}
           serverConfigs={serverConfigs}
-          selectedServer="server-1"
+          isMultiSelectEnabled={true}
+          selectedMultipleServers={["server-1"]}
           hasMessages={true}
-          onServerChange={onServerChange}
+          onMultiServerToggle={onMultiServerToggle}
         />,
       );
 
       fireEvent.click(screen.getByText("server-2"));
-      fireEvent.click(screen.getByText("Cancel"));
 
-      expect(onServerChange).not.toHaveBeenCalled();
+      expect(onMultiServerToggle).toHaveBeenCalledWith("server-2");
     });
   });
 
   describe("auto-selection", () => {
-    it("auto-selects first server when current selection is invalid", async () => {
+    it("auto-selects most recently connected server when current selection is invalid", async () => {
       const onServerChange = vi.fn();
       const serverConfigs = {
-        "server-1": createServer({ name: "server-1" }),
-        "server-2": createServer({ name: "server-2" }),
+        "server-1": createServer({
+          name: "server-1",
+          lastConnectionTime: new Date("2024-01-01"),
+        }),
+        "server-2": createServer({
+          name: "server-2",
+          lastConnectionTime: new Date("2024-01-03"),
+        }),
+        "server-3": createServer({
+          name: "server-3",
+          lastConnectionTime: new Date("2024-01-02"),
+        }),
       };
 
       render(
@@ -493,7 +598,7 @@ describe("ActiveServerSelector", () => {
       );
 
       await waitFor(() => {
-        expect(onServerChange).toHaveBeenCalledWith("server-1");
+        expect(onServerChange).toHaveBeenCalledWith("server-2");
       });
     });
 
@@ -516,6 +621,147 @@ describe("ActiveServerSelector", () => {
       // Give time for any effects to run
       await new Promise((r) => setTimeout(r, 50));
 
+      expect(onServerChange).not.toHaveBeenCalled();
+    });
+
+    it("does not auto-select a filtered server when auto-selection is disabled", async () => {
+      const onServerChange = vi.fn();
+      const httpConfig = {
+        transportType: "streamableHttp",
+        url: "http://localhost:3000/mcp",
+      } as const;
+      const serverConfigs = {
+        "selected-plain-http": createServer({
+          name: "selected-plain-http",
+          config: httpConfig,
+        }),
+        "visible-oauth": createServer({
+          name: "visible-oauth",
+          config: httpConfig,
+          useOAuth: true,
+          lastConnectionTime: new Date("2024-01-03"),
+        }),
+      };
+
+      render(
+        <ActiveServerSelector
+          {...defaultProps}
+          serverConfigs={serverConfigs}
+          selectedServer="selected-plain-http"
+          onServerChange={onServerChange}
+          showOnlyOAuthServers={true}
+          autoSelectFilteredServer={false}
+        />,
+      );
+
+      expect(screen.queryByText("selected-plain-http")).not.toBeInTheDocument();
+      expect(screen.getByText("visible-oauth")).toBeInTheDocument();
+
+      await new Promise((r) => setTimeout(r, 50));
+
+      expect(onServerChange).not.toHaveBeenCalled();
+    });
+
+    it("auto-selects an eligible debugger server when the current selection is filtered out", async () => {
+      const onServerChange = vi.fn();
+      const httpConfig = {
+        transportType: "streamableHttp",
+        url: "http://localhost:3000/mcp",
+      } as const;
+      const serverConfigs = {
+        "selected-plain-http": createServer({
+          name: "selected-plain-http",
+          config: httpConfig,
+        }),
+        "visible-oauth": createServer({
+          name: "visible-oauth",
+          config: httpConfig,
+          useOAuth: true,
+          lastConnectionTime: new Date("2024-01-03"),
+        }),
+      };
+
+      render(
+        <ActiveServerSelector
+          {...defaultProps}
+          serverConfigs={serverConfigs}
+          selectedServer="selected-plain-http"
+          onServerChange={onServerChange}
+          showOnlyOAuthServers
+          autoSelectFilteredServer
+        />,
+      );
+
+      await waitFor(() => {
+        expect(onServerChange).toHaveBeenCalledWith("visible-oauth");
+      });
+    });
+
+    it('"when-empty" fills a blank selection with the most recent eligible server', async () => {
+      const onServerChange = vi.fn();
+      const httpConfig = {
+        transportType: "streamableHttp",
+        url: "http://localhost:3000/mcp",
+      } as const;
+      const serverConfigs = {
+        "visible-oauth": createServer({
+          name: "visible-oauth",
+          config: httpConfig,
+          useOAuth: true,
+          lastConnectionTime: new Date("2024-01-03"),
+        }),
+      };
+
+      render(
+        <ActiveServerSelector
+          {...defaultProps}
+          serverConfigs={serverConfigs}
+          selectedServer="none"
+          onServerChange={onServerChange}
+          showOnlyOAuthServers
+          autoSelectFilteredServer="when-empty"
+        />,
+      );
+
+      await waitFor(() => {
+        expect(onServerChange).toHaveBeenCalledWith("visible-oauth");
+      });
+    });
+
+    it('"when-empty" never replaces an existing selection, even one the filter hides', async () => {
+      // The debugger tabs fire live auth requests at their target; a target
+      // the user picked must not be silently swapped for another server.
+      const onServerChange = vi.fn();
+      const httpConfig = {
+        transportType: "streamableHttp",
+        url: "http://localhost:3000/mcp",
+      } as const;
+      const serverConfigs = {
+        "selected-plain-http": createServer({
+          name: "selected-plain-http",
+          config: httpConfig,
+        }),
+        "visible-oauth": createServer({
+          name: "visible-oauth",
+          config: httpConfig,
+          useOAuth: true,
+          lastConnectionTime: new Date("2024-01-03"),
+        }),
+      };
+
+      render(
+        <ActiveServerSelector
+          {...defaultProps}
+          serverConfigs={serverConfigs}
+          selectedServer="selected-plain-http"
+          onServerChange={onServerChange}
+          showOnlyOAuthServers
+          autoSelectFilteredServer="when-empty"
+        />,
+      );
+
+      // Give the auto-select effect a tick to (not) fire.
+      await new Promise((resolve) => setTimeout(resolve, 50));
       expect(onServerChange).not.toHaveBeenCalled();
     });
   });

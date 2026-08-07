@@ -1,0 +1,632 @@
+import { render, screen } from "@testing-library/react";
+import { describe, expect, it, vi } from "vitest";
+import {
+  ModelCompareCardHeader,
+  type MultiModelCardSummary,
+} from "../model-compare-card-header";
+
+const model = {
+  id: "anthropic/claude-haiku",
+  name: "Claude Haiku 4.5 (Free)",
+  provider: "anthropic" as const,
+};
+
+const idleSummary: MultiModelCardSummary = {
+  modelId: String(model.id),
+  durationMs: null,
+  tokens: 0,
+  toolCount: 0,
+  status: "idle",
+  hasMessages: false,
+};
+
+function makeSummary(
+  overrides: Partial<MultiModelCardSummary>,
+): MultiModelCardSummary {
+  return {
+    ...idleSummary,
+    status: "ready",
+    hasMessages: true,
+    durationMs: 1000,
+    tokens: 100,
+    toolCount: 1,
+    ...overrides,
+  };
+}
+
+function getMetricRunningSpinnerCount(container: ParentNode): number {
+  return container.querySelectorAll('[data-testid="metric-running-spinner"]')
+    .length;
+}
+
+describe("ModelCompareCardHeader", () => {
+  it("renders nothing when comparison chrome is off, trace tabs are hidden, and identity is off", () => {
+    const { container } = render(
+      <ModelCompareCardHeader
+        model={model}
+        summary={idleSummary}
+        allSummaries={[]}
+        mode="chat"
+        onModeChange={vi.fn()}
+        showTraceTabs={false}
+        showComparisonChrome={false}
+      />,
+    );
+
+    expect(container.firstChild).toBeNull();
+  });
+
+  it("shows host identity (logo + name) above tabs without Latency when identity header is on", () => {
+    render(
+      <ModelCompareCardHeader
+        compareLabel="Claude"
+        summary={idleSummary}
+        allSummaries={[]}
+        mode="chat"
+        onModeChange={vi.fn()}
+        showTraceTabs={true}
+        showComparisonChrome={false}
+        showIdentityHeader
+        logoSrc="/logos/claude.svg"
+      />,
+    );
+
+    const identity = screen.getByTestId("compare-card-identity");
+    expect(identity).toBeInTheDocument();
+    expect(screen.getByText("Claude")).toBeInTheDocument();
+    expect(identity.querySelector("img")).toHaveAttribute(
+      "src",
+      "/logos/claude.svg",
+    );
+    expect(screen.getByTitle("Trace")).toBeInTheDocument();
+    expect(screen.queryByText("Latency")).not.toBeInTheDocument();
+  });
+
+  it("shows initials fallback when identity header has no logo", () => {
+    render(
+      <ModelCompareCardHeader
+        compareLabel="Custom Host"
+        summary={idleSummary}
+        allSummaries={[]}
+        mode="chat"
+        onModeChange={vi.fn()}
+        showTraceTabs={false}
+        showComparisonChrome={false}
+        showIdentityHeader
+        logoSrc={null}
+      />,
+    );
+
+    expect(screen.getByTestId("compare-card-identity")).toBeInTheDocument();
+    expect(screen.getByText("Custom Host")).toBeInTheDocument();
+    expect(screen.getByText("Cu")).toBeInTheDocument();
+    expect(screen.queryByRole("img")).not.toBeInTheDocument();
+  });
+
+  it("shows trace tabs but not model name or Latency when comparison chrome is off", () => {
+    render(
+      <ModelCompareCardHeader
+        model={model}
+        summary={idleSummary}
+        allSummaries={[]}
+        mode="chat"
+        onModeChange={vi.fn()}
+        showTraceTabs={true}
+        showComparisonChrome={false}
+      />,
+    );
+
+    expect(screen.getByTitle("Trace")).toBeInTheDocument();
+    expect(screen.queryByText("Latency")).not.toBeInTheDocument();
+    expect(screen.queryByText(/Claude Haiku/)).not.toBeInTheDocument();
+  });
+
+  it("renders inline tabs with pass/fail chrome when comparison metrics are hidden", () => {
+    render(
+      <ModelCompareCardHeader
+        summary={makeSummary({ status: "ready" })}
+        allSummaries={[]}
+        mode="tools"
+        onModeChange={vi.fn()}
+        showTraceTabs
+        showComparisonChrome={false}
+        compactCompareHeader={false}
+        tabsInline
+        showToolsTab
+        result="passed"
+        actionsSlot={<button type="button">Retry</button>}
+      />,
+    );
+
+    expect(screen.getByText("Passed")).toBeInTheDocument();
+    expect(screen.queryByText("Latency")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Retry" })).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /Tool Calls/i }),
+    ).toBeInTheDocument();
+  });
+
+  it("shows comparison chrome when enabled", () => {
+    render(
+      <ModelCompareCardHeader
+        model={model}
+        summary={idleSummary}
+        allSummaries={[]}
+        mode="chat"
+        onModeChange={vi.fn()}
+        showTraceTabs={false}
+        showComparisonChrome={true}
+      />,
+    );
+
+    expect(screen.getByText(/Claude Haiku/)).toBeInTheDocument();
+    expect(screen.getByText("Latency")).toBeInTheDocument();
+  });
+
+  it("uses segment styling for inline preview tabs", () => {
+    render(
+      <ModelCompareCardHeader
+        model={model}
+        summary={idleSummary}
+        allSummaries={[]}
+        mode="chat"
+        onModeChange={vi.fn()}
+        showTraceTabs={true}
+        showComparisonChrome={false}
+        tabsInline
+      />,
+    );
+
+    expect(screen.getByRole("button", { name: "Chat" })).toHaveClass(
+      "bg-background",
+      "ring-inset",
+    );
+  });
+
+  it("uses the sidebar-selected styling for full-width trace tabs", () => {
+    render(
+      <ModelCompareCardHeader
+        model={model}
+        summary={idleSummary}
+        allSummaries={[]}
+        mode="chat"
+        onModeChange={vi.fn()}
+        showTraceTabs={true}
+        showComparisonChrome={false}
+      />,
+    );
+
+    expect(screen.getByRole("button", { name: "Chat" })).toHaveClass(
+      "bg-sidebar-accent",
+      "text-sidebar-accent-foreground",
+    );
+  });
+
+  it("hides status dot and Tools row in compact mode (default)", () => {
+    const withTools: MultiModelCardSummary = {
+      ...idleSummary,
+      toolCount: 3,
+      hasMessages: true,
+      status: "ready",
+    };
+    render(
+      <ModelCompareCardHeader
+        model={model}
+        summary={withTools}
+        allSummaries={[withTools]}
+        mode="chat"
+        onModeChange={vi.fn()}
+        showTraceTabs={false}
+        showComparisonChrome={true}
+      />,
+    );
+
+    expect(screen.queryByLabelText("Ready")).not.toBeInTheDocument();
+    expect(screen.queryByText("Tools")).not.toBeInTheDocument();
+    expect(screen.getByText("Latency")).toBeInTheDocument();
+    expect(screen.getByText("Tokens")).toBeInTheDocument();
+  });
+
+  it("shows an Interactions row in full mode when interactionCount > 0", () => {
+    const withInteractions = makeSummary({ interactionCount: 2 });
+    render(
+      <ModelCompareCardHeader
+        model={model}
+        summary={withInteractions}
+        allSummaries={[withInteractions]}
+        mode="chat"
+        onModeChange={vi.fn()}
+        showTraceTabs={false}
+        showComparisonChrome={true}
+        compactCompareHeader={false}
+      />,
+    );
+
+    expect(screen.getByText("Interactions")).toBeInTheDocument();
+    expect(screen.getByText("2 interactions")).toBeInTheDocument();
+  });
+
+  it("hides the Interactions row when interactionCount is 0 / absent", () => {
+    const noInteractions = makeSummary({ toolCount: 1 });
+    render(
+      <ModelCompareCardHeader
+        model={model}
+        summary={noInteractions}
+        allSummaries={[noInteractions]}
+        mode="chat"
+        onModeChange={vi.fn()}
+        showTraceTabs={false}
+        showComparisonChrome={true}
+        compactCompareHeader={false}
+      />,
+    );
+
+    expect(screen.queryByText("Interactions")).not.toBeInTheDocument();
+  });
+
+  it("shows running spinners in the latency and tokens rows in compact mode", () => {
+    const runningSummary = makeSummary({
+      status: "running",
+      durationMs: null,
+      tokens: 0,
+      toolCount: 0,
+      hasMessages: false,
+    });
+
+    const { container } = render(
+      <ModelCompareCardHeader
+        model={model}
+        summary={runningSummary}
+        allSummaries={[runningSummary]}
+        mode="chat"
+        onModeChange={vi.fn()}
+        showTraceTabs={false}
+        showComparisonChrome={true}
+      />,
+    );
+
+    expect(getMetricRunningSpinnerCount(container)).toBe(2);
+    expect(screen.queryByLabelText("Running")).not.toBeInTheDocument();
+    expect(screen.queryByText("Tools")).not.toBeInTheDocument();
+  });
+
+  it("does not render metric bar spinners for non-running summaries", () => {
+    const readySummary = makeSummary({});
+
+    const { container } = render(
+      <ModelCompareCardHeader
+        model={model}
+        summary={readySummary}
+        allSummaries={[readySummary]}
+        mode="chat"
+        onModeChange={vi.fn()}
+        showTraceTabs={false}
+        showComparisonChrome={true}
+      />,
+    );
+
+    expect(getMetricRunningSpinnerCount(container)).toBe(0);
+    expect(screen.queryByLabelText("Running")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Ready")).not.toBeInTheDocument();
+  });
+
+  it("shows status dot and Tools row when compactCompareHeader is false", () => {
+    const withTools: MultiModelCardSummary = {
+      ...idleSummary,
+      toolCount: 2,
+      hasMessages: true,
+      status: "ready",
+      durationMs: 1000,
+    };
+    render(
+      <ModelCompareCardHeader
+        model={model}
+        summary={withTools}
+        allSummaries={[withTools]}
+        mode="chat"
+        onModeChange={vi.fn()}
+        showTraceTabs={false}
+        showComparisonChrome={true}
+        compactCompareHeader={false}
+      />,
+    );
+
+    expect(screen.getByLabelText("Ready")).toBeInTheDocument();
+    expect(screen.getByText("Tools")).toBeInTheDocument();
+    expect(screen.getByText("2 tool calls")).toBeInTheDocument();
+  });
+
+  it("keeps winner accents neutral while another model is still running", () => {
+    const fastest = makeSummary({
+      durationMs: 1100,
+      tokens: 111,
+      toolCount: 1,
+    });
+    const slower = makeSummary({
+      modelId: "openai/gpt-4",
+      durationMs: 2200,
+      tokens: 222,
+      toolCount: 2,
+    });
+    const running = makeSummary({
+      modelId: "google/gemini-2.5-pro",
+      status: "running",
+      durationMs: null,
+      tokens: 0,
+      toolCount: 0,
+      hasMessages: false,
+    });
+
+    render(
+      <ModelCompareCardHeader
+        model={model}
+        summary={fastest}
+        allSummaries={[fastest, slower, running]}
+        mode="chat"
+        onModeChange={vi.fn()}
+        showTraceTabs={false}
+        showComparisonChrome={true}
+        compactCompareHeader={false}
+      />,
+    );
+
+    expect(screen.getByText("1.1s")).toHaveClass("text-foreground");
+    expect(screen.getByText("111")).toHaveClass("text-foreground");
+    expect(screen.getByText("1 tool call")).toHaveClass("text-foreground");
+  });
+
+  it("excludes errored models from winner selection", () => {
+    const winningSuccess = makeSummary({
+      durationMs: 1100,
+      tokens: 111,
+      toolCount: 2,
+    });
+    const slowerSuccess = makeSummary({
+      modelId: "openai/gpt-4",
+      durationMs: 2200,
+      tokens: 222,
+      toolCount: 3,
+    });
+    const errored = makeSummary({
+      modelId: "google/gemini-2.5-pro",
+      status: "error",
+      durationMs: 900,
+      tokens: 90,
+      toolCount: 1,
+    });
+
+    render(
+      <ModelCompareCardHeader
+        model={model}
+        summary={winningSuccess}
+        allSummaries={[winningSuccess, slowerSuccess, errored]}
+        mode="chat"
+        onModeChange={vi.fn()}
+        showTraceTabs={false}
+        showComparisonChrome={true}
+        compactCompareHeader={false}
+      />,
+    );
+
+    expect(screen.getByText("1.1s")).toHaveClass("text-emerald-700");
+    expect(screen.getByText("111")).toHaveClass("text-emerald-700");
+    expect(screen.getByText("2 tool calls")).toHaveClass("text-emerald-700");
+  });
+
+  it("keeps winner accents neutral while another model is running even if an errored model is excluded", () => {
+    const fastestSuccess = makeSummary({
+      durationMs: 1100,
+      tokens: 111,
+      toolCount: 2,
+    });
+    const slowerSuccess = makeSummary({
+      modelId: "openai/gpt-4",
+      durationMs: 2200,
+      tokens: 222,
+      toolCount: 3,
+    });
+    const errored = makeSummary({
+      modelId: "google/gemini-2.5-pro",
+      status: "error",
+      durationMs: 900,
+      tokens: 90,
+      toolCount: 1,
+    });
+    const running = makeSummary({
+      modelId: "xai/grok-4",
+      status: "running",
+      durationMs: null,
+      tokens: 0,
+      toolCount: 0,
+      hasMessages: false,
+    });
+
+    render(
+      <ModelCompareCardHeader
+        model={model}
+        summary={fastestSuccess}
+        allSummaries={[fastestSuccess, slowerSuccess, errored, running]}
+        mode="chat"
+        onModeChange={vi.fn()}
+        showTraceTabs={false}
+        showComparisonChrome={true}
+        compactCompareHeader={false}
+      />,
+    );
+
+    expect(screen.getByText("1.1s")).toHaveClass("text-foreground");
+    expect(screen.getByText("111")).toHaveClass("text-foreground");
+    expect(screen.getByText("2 tool calls")).toHaveClass("text-foreground");
+  });
+
+  it("restores winner accents once all models are no longer running", () => {
+    const fastest = makeSummary({
+      durationMs: 1100,
+      tokens: 111,
+      toolCount: 1,
+    });
+    const slower = makeSummary({
+      modelId: "openai/gpt-4",
+      durationMs: 2200,
+      tokens: 222,
+      toolCount: 2,
+    });
+    const third = makeSummary({
+      modelId: "google/gemini-2.5-pro",
+      durationMs: 1500,
+      tokens: 150,
+      toolCount: 3,
+    });
+
+    render(
+      <ModelCompareCardHeader
+        model={model}
+        summary={fastest}
+        allSummaries={[fastest, slower, third]}
+        mode="chat"
+        onModeChange={vi.fn()}
+        showTraceTabs={false}
+        showComparisonChrome={true}
+        compactCompareHeader={false}
+      />,
+    );
+
+    expect(screen.getByText("1.1s")).toHaveClass("text-emerald-700");
+    expect(screen.getByText("111")).toHaveClass("text-emerald-700");
+    expect(screen.getByText("1 tool call")).toHaveClass("text-emerald-700");
+  });
+
+  it("shows amber static dot (no pulse) with label Stopped for cancelled status", () => {
+    render(
+      <ModelCompareCardHeader
+        model={model}
+        summary={makeSummary({ status: "cancelled", durationMs: null })}
+        allSummaries={[]}
+        mode="chat"
+        onModeChange={vi.fn()}
+        showTraceTabs={false}
+        showComparisonChrome={true}
+        compactCompareHeader={false}
+      />,
+    );
+
+    const dot = screen.getByRole("img", { name: "Stopped" });
+    expect(dot).toBeInTheDocument();
+    expect(dot).toHaveClass("bg-amber-500/45");
+    expect(dot).not.toHaveClass("animate-pulse");
+  });
+
+  it("uses modelLabel override instead of model.name when provided", () => {
+    render(
+      <ModelCompareCardHeader
+        model={model}
+        modelLabel="My Custom Label"
+        summary={idleSummary}
+        allSummaries={[]}
+        mode="chat"
+        onModeChange={vi.fn()}
+        showTraceTabs={false}
+        showComparisonChrome={true}
+      />,
+    );
+
+    expect(screen.getByText("My Custom Label")).toBeInTheDocument();
+    expect(screen.queryByText(/Claude Haiku/)).not.toBeInTheDocument();
+  });
+
+  it("renders modelLabel without a model prop", () => {
+    render(
+      <ModelCompareCardHeader
+        modelLabel="gpt-4o"
+        summary={idleSummary}
+        allSummaries={[]}
+        mode="chat"
+        onModeChange={vi.fn()}
+        showTraceTabs={false}
+        showComparisonChrome={true}
+      />,
+    );
+
+    expect(screen.getByText("gpt-4o")).toBeInTheDocument();
+  });
+
+  it("shows Passed pill instead of status dot when result is passed", () => {
+    render(
+      <ModelCompareCardHeader
+        model={model}
+        summary={makeSummary({ status: "ready" })}
+        allSummaries={[]}
+        mode="chat"
+        onModeChange={vi.fn()}
+        showTraceTabs={false}
+        showComparisonChrome={true}
+        compactCompareHeader={false}
+        result="passed"
+      />,
+    );
+
+    expect(screen.getByText("Passed")).toBeInTheDocument();
+    expect(screen.queryByLabelText("Ready")).not.toBeInTheDocument();
+  });
+
+  it("shows Failed pill instead of status dot when result is failed", () => {
+    render(
+      <ModelCompareCardHeader
+        model={model}
+        summary={makeSummary({ status: "error" })}
+        allSummaries={[]}
+        mode="chat"
+        onModeChange={vi.fn()}
+        showTraceTabs={false}
+        showComparisonChrome={true}
+        compactCompareHeader={false}
+        result="failed"
+      />,
+    );
+
+    expect(screen.getByText("Failed")).toBeInTheDocument();
+    expect(screen.queryByRole("img", { name: "Failed" })).not.toBeInTheDocument();
+  });
+
+  it("renders inline tabs with Results tab and actionsSlot when tabsInline is true", () => {
+    const handleModeChange = vi.fn();
+    render(
+      <ModelCompareCardHeader
+        model={model}
+        summary={idleSummary}
+        allSummaries={[]}
+        mode="tools"
+        onModeChange={handleModeChange}
+        showTraceTabs={true}
+        showComparisonChrome={true}
+        tabsInline={true}
+        showToolsTab={true}
+        actionsSlot={<button type="button">Retry</button>}
+      />,
+    );
+
+    expect(
+      screen.getByRole("button", { name: /Tool Calls/i }),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Retry" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Trace/i })).toBeInTheDocument();
+  });
+
+  it("renders full-width ChatTraceViewModeHeaderBar when tabsInline is false", () => {
+    render(
+      <ModelCompareCardHeader
+        model={model}
+        summary={idleSummary}
+        allSummaries={[]}
+        mode="chat"
+        onModeChange={vi.fn()}
+        showTraceTabs={true}
+        showComparisonChrome={true}
+        tabsInline={false}
+      />,
+    );
+
+    expect(screen.getByTitle("Trace")).toBeInTheDocument();
+    expect(screen.queryByText("Results")).not.toBeInTheDocument();
+  });
+});

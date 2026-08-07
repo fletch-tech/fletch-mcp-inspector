@@ -16,11 +16,8 @@ import {
   Collapsible,
   CollapsibleContent,
   CollapsibleTrigger,
-} from "@/components/ui/collapsible";
-import type {
-  InfoLogLevel,
-  LogErrorDetails,
-} from "@/lib/oauth/state-machines/types";
+} from "@mcpjam/design-system/collapsible";
+import type { InfoLogLevel, LogErrorDetails } from "@mcpjam/sdk/browser";
 
 interface InfoLogEntryProps {
   label: string;
@@ -54,7 +51,7 @@ export function InfoLogEntry({
   > = {
     info: {
       icon: Info,
-      accent: "border-blue-300 dark:border-blue-600",
+      accent: "border-border",
       text: "text-blue-600 dark:text-blue-300",
     },
     warning: {

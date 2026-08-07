@@ -8,6 +8,7 @@ import "@testing-library/jest-dom/vitest";
 
 // Cleanup after each test to prevent state leakage
 afterEach(() => {
+  vi.useRealTimers();
   cleanup();
   vi.clearAllMocks();
 });
@@ -27,12 +28,51 @@ Object.defineProperty(window, "matchMedia", {
   })),
 });
 
-// Mock ResizeObserver (required for some UI components)
-global.ResizeObserver = vi.fn().mockImplementation(() => ({
-  observe: vi.fn(),
-  unobserve: vi.fn(),
-  disconnect: vi.fn(),
-}));
+// Mock ResizeObserver (required for some UI components). A plain class — NOT
+// a vi.fn() — so a suite-level vi.restoreAllMocks() can't strip its
+// implementation and break every later test that mounts a measuring
+// component (Radix Switch/Slider use it via useSize).
+global.ResizeObserver = class ResizeObserverStub {
+  observe() {}
+  unobserve() {}
+  disconnect() {}
+} as unknown as typeof ResizeObserver;
+
+// cmdk / Command dialogs call scrollIntoView on active items
+Element.prototype.scrollIntoView = vi.fn();
+
+// Radix UI primitives (Select, etc.) call Pointer Capture APIs that JSDOM lacks
+Element.prototype.hasPointerCapture = vi.fn(() => false);
+Element.prototype.setPointerCapture = vi.fn();
+Element.prototype.releasePointerCapture = vi.fn();
+
+// CodeMirror measures DOM Range geometry, which JSDOM does not implement.
+if (typeof Range !== "undefined") {
+  const rect = {
+    bottom: 0,
+    height: 0,
+    left: 0,
+    right: 0,
+    top: 0,
+    width: 0,
+    x: 0,
+    y: 0,
+    toJSON: () => ({}),
+  } as DOMRect;
+
+  Object.defineProperty(Range.prototype, "getBoundingClientRect", {
+    configurable: true,
+    value: vi.fn(() => rect),
+  });
+  Object.defineProperty(Range.prototype, "getClientRects", {
+    configurable: true,
+    value: vi.fn(() => ({
+      length: 0,
+      item: () => null,
+      [Symbol.iterator]: function* () {},
+    })),
+  });
+}
 
 // Mock IntersectionObserver (required for lazy loading/virtual lists)
 global.IntersectionObserver = vi.fn().mockImplementation(() => ({

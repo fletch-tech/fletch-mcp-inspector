@@ -1,27 +1,28 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Textarea } from "@/components/ui/textarea";
+import { Button } from "@mcpjam/design-system/button";
+import { Input } from "@mcpjam/design-system/input";
+import { Switch } from "@mcpjam/design-system/switch";
+import { Textarea } from "@mcpjam/design-system/textarea";
 import {
   Select,
   SelectContent,
   SelectItem,
   SelectTrigger,
   SelectValue,
-} from "@/components/ui/select";
+} from "@mcpjam/design-system/select";
 import {
   Dialog,
   DialogContent,
   DialogFooter,
   DialogHeader,
   DialogTitle,
-} from "@/components/ui/dialog";
-import { Label } from "@/components/ui/label";
+} from "@mcpjam/design-system/dialog";
+import { Label } from "@mcpjam/design-system/label";
 import {
   getDefaultRegistrationStrategy,
   getSupportedRegistrationStrategies,
-} from "@/lib/oauth/state-machines/factory";
-import type { OAuthProtocolVersion } from "@/lib/oauth/state-machines/types";
+  type OAuthProtocolVersion,
+} from "@mcpjam/sdk/browser";
 import type {
   OAuthRegistrationStrategy,
   OAuthTestProfile,
@@ -34,17 +35,29 @@ import {
   AccordionContent,
   AccordionItem,
   AccordionTrigger,
-} from "@/components/ui/accordion";
+} from "@mcpjam/design-system/accordion";
+
+/**
+ * Prefill an agent command may seed the form with when it opens. Deliberately
+ * cannot carry credentials — there are no clientId/clientSecret fields here;
+ * the human types those. Overlays the server-derived seed on open.
+ */
+export interface OAuthProfileAgentSeed {
+  serverName?: string;
+  serverUrl?: string;
+  registrationStrategy?: OAuthRegistrationStrategy;
+}
 
 interface OAuthProfileModalProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   server?: ServerWithName;
   existingServerNames: string[];
+  agentSeed?: OAuthProfileAgentSeed | null;
   onSave: (payload: {
     formData: ServerFormData;
     profile: OAuthTestProfile;
-  }) => void;
+  }) => void | Promise<void>;
 }
 
 interface HeaderRow {
@@ -77,6 +90,7 @@ export function OAuthProfileModal({
   onOpenChange,
   server,
   existingServerNames,
+  agentSeed,
   onSave,
 }: OAuthProfileModalProps) {
   const derivedProfile = useMemo(
@@ -90,7 +104,12 @@ export function OAuthProfileModal({
       ? derivedProfile.customHeaders.map((header) => createHeaderRow(header))
       : [createHeaderRow()],
   );
+  // Top-level server field, not part of the OAuth test profile: only flat
+  // server columns round-trip through a save, so a nested profile key would be
+  // silently dropped and the switch would read back off.
+  const [allowPathScopedIssuer, setAllowPathScopedIssuer] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
   const supportedStrategies = useMemo(
     () => getSupportedRegistrationStrategies(draft.protocolVersion),
     [draft.protocolVersion],
@@ -103,8 +122,17 @@ export function OAuthProfileModal({
 
   useEffect(() => {
     if (open) {
-      setServerName(generateDefaultName());
-      setDraft(derivedProfile);
+      // The agent seed overlays the server-derived values; anything it omits
+      // keeps the derived default. It never carries credentials (see the
+      // OAuthProfileAgentSeed type).
+      setServerName(agentSeed?.serverName ?? generateDefaultName());
+      setDraft({
+        ...derivedProfile,
+        ...(agentSeed?.serverUrl ? { serverUrl: agentSeed.serverUrl } : {}),
+        ...(agentSeed?.registrationStrategy
+          ? { registrationStrategy: agentSeed.registrationStrategy }
+          : {}),
+      });
       setHeaderRows(
         derivedProfile.customHeaders.length
           ? derivedProfile.customHeaders.map((header) =>
@@ -112,9 +140,16 @@ export function OAuthProfileModal({
             )
           : [createHeaderRow()],
       );
+      setAllowPathScopedIssuer(server?.oauthAllowPathScopedIssuer === true);
       setError(null);
     }
-  }, [open, derivedProfile, generateDefaultName]);
+  }, [
+    open,
+    derivedProfile,
+    generateDefaultName,
+    agentSeed,
+    server?.oauthAllowPathScopedIssuer,
+  ]);
 
   const normalizedHeaders = useMemo(
     () =>
@@ -145,7 +180,12 @@ export function OAuthProfileModal({
     }
 
     const trimmedClientId = draft.clientId.trim();
-    const trimmedClientSecret = draft.clientSecret.trim();
+    // Preserve the exact typed secret — only whether there's a real value is
+    // trim-based (whitespace-only counts as none). Trimming the value itself
+    // would silently corrupt a secret with legitimate surrounding whitespace.
+    const trimmedClientSecret = draft.clientSecret.trim()
+      ? draft.clientSecret
+      : "";
     setError(null);
 
     return {
@@ -156,13 +196,25 @@ export function OAuthProfileModal({
     };
   };
 
-  const handleSubmit = (event: React.FormEvent<HTMLFormElement>) => {
+  const handleSubmit = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     const validated = getValidatedProfileValues();
     if (!validated) return;
     const trimmedName = serverName.trim();
     if (!trimmedName) {
       setError("Server name is required");
+      return;
+    }
+    // Add mode has no `server`, so every collision is rejected; edit mode
+    // exempts only the row being edited from its own name. Without this the
+    // save handler treats an add-onto-existing-name as a plain save and
+    // overwrites that server (the hook's guard only covers renames).
+    if (
+      existingServerNames.some(
+        (name) => name === trimmedName && name !== server?.name,
+      )
+    ) {
+      setError(`A server named "${trimmedName}" already exists.`);
       return;
     }
 
@@ -185,24 +237,45 @@ export function OAuthProfileModal({
       url: validated.trimmedUrl,
       headers: Object.keys(headerMap).length ? headerMap : undefined,
       useOAuth: true,
+      // Carry the chosen OAuth protocol version onto the connection form so
+      // `toMCPConfig` stamps the sessionless 2026 wire era on the saved/synced
+      // server config. Without this, hosted chat/eval/backend connects — which
+      // forward host/per-server MCP pins, not the OAuth profile — fall back to
+      // the 2025 initialize path for a 2026-only server.
+      oauthProtocolMode: draft.protocolVersion,
       oauthScopes: scopesArray,
       clientId: validated.trimmedClientId || undefined,
       clientSecret: validated.trimmedClientSecret || undefined,
+      oauthAllowPathScopedIssuer: allowPathScopedIssuer,
     };
 
-    onSave({
-      formData,
-      profile: {
-        serverUrl: validated.trimmedUrl,
-        clientId: validated.trimmedClientId,
-        clientSecret: validated.trimmedClientSecret,
-        scopes: draft.scopes.trim(),
-        customHeaders: normalizedHeaders,
-        protocolVersion: draft.protocolVersion,
-        registrationStrategy: draft.registrationStrategy,
-      },
-    });
-    onOpenChange(false);
+    // Await so a rejected save keeps the modal open with the entered values
+    // instead of closing over a server that was never written. `saving` blocks
+    // the resubmits that awaiting now makes possible. Mirrors XAAServerModal.
+    setSaving(true);
+    try {
+      await onSave({
+        formData,
+        profile: {
+          serverUrl: validated.trimmedUrl,
+          clientId: validated.trimmedClientId,
+          clientSecret: validated.trimmedClientSecret,
+          scopes: draft.scopes.trim(),
+          customHeaders: normalizedHeaders,
+          protocolVersion: draft.protocolVersion,
+          registrationStrategy: draft.registrationStrategy,
+        },
+      });
+      onOpenChange(false);
+    } catch (saveError) {
+      setError(
+        saveError instanceof Error
+          ? saveError.message
+          : "Could not save the server. Please try again.",
+      );
+    } finally {
+      setSaving(false);
+    }
   };
 
   const handleProtocolChange = (value: OAuthProtocolVersion) => {
@@ -271,7 +344,7 @@ export function OAuthProfileModal({
               required
             />
           </div>
-          <div className="space-y-6 max-h-[65vh] overflow-y-auto pr-1 pb-4">
+          <div className="space-y-6 max-h-[65vh] overflow-y-auto px-1 pb-4">
             <div className="space-y-4">
               <div className="space-y-2">
                 <Label
@@ -326,6 +399,9 @@ export function OAuthProfileModal({
                       </SelectItem>
                       <SelectItem value="2025-11-25" className="text-xs">
                         2025-11-25 (Latest)
+                      </SelectItem>
+                      <SelectItem value="2026-07-28" className="text-xs">
+                        2026-07-28 (Draft)
                       </SelectItem>
                     </SelectContent>
                   </Select>
@@ -396,6 +472,11 @@ export function OAuthProfileModal({
                         }
                         placeholder="openid profile email"
                         rows={1}
+                        spellCheck={false}
+                        autoComplete="off"
+                        data-1p-ignore
+                        data-lpignore="true"
+                        data-form-type="other"
                       />
                     </div>
 
@@ -419,6 +500,9 @@ export function OAuthProfileModal({
                           placeholder="Client ID"
                           spellCheck={false}
                           autoComplete="off"
+                          data-1p-ignore
+                          data-lpignore="true"
+                          data-form-type="other"
                         />
                         <Input
                           type="password"
@@ -431,6 +515,9 @@ export function OAuthProfileModal({
                           }
                           placeholder="Client Secret (optional)"
                           autoComplete="off"
+                          data-1p-ignore
+                          data-lpignore="true"
+                          data-form-type="other"
                         />
                       </div>
                     </div>
@@ -492,6 +579,28 @@ export function OAuthProfileModal({
                         + Add header
                       </Button>
                     </div>
+
+                    <div className="flex items-start gap-2 pt-1">
+                      <Switch
+                        id="oauth-profile-path-scoped"
+                        checked={allowPathScopedIssuer}
+                        onCheckedChange={setAllowPathScopedIssuer}
+                      />
+                      <div className="space-y-0.5">
+                        <label
+                          htmlFor="oauth-profile-path-scoped"
+                          className="block text-xs font-medium text-foreground"
+                        >
+                          Path-scoped authorization server
+                        </label>
+                        <p className="text-xs text-muted-foreground">
+                          Allow the metadata to advertise the origin root as
+                          issuer while the OAuth endpoints live under a
+                          different path. Off keeps the strict RFC 8414 issuer
+                          match.
+                        </p>
+                      </div>
+                    </div>
                   </AccordionContent>
                 </AccordionItem>
               </Accordion>
@@ -509,10 +618,13 @@ export function OAuthProfileModal({
               type="button"
               variant="ghost"
               onClick={() => onOpenChange(false)}
+              disabled={saving}
             >
               Cancel
             </Button>
-            <Button type="submit">Save configuration</Button>
+            <Button type="submit" disabled={saving}>
+              {saving ? "Saving…" : "Save configuration"}
+            </Button>
           </DialogFooter>
         </form>
       </DialogContent>

@@ -1,18 +1,196 @@
 import { Hono } from "hono";
 import "../../types/hono";
-import { handleJsonRpc, BridgeMode } from "../../services/mcp-http-bridge";
+import {
+  handleJsonRpc,
+  parseAndValidateJsonRpc,
+  BridgeMode,
+} from "../../services/mcp-http-bridge";
+import {
+  getServerIdForTunnelDomain,
+  isActiveTunnelDomain,
+} from "../../services/tunnel-registry";
+import { recordTunnelRequest } from "../../services/tunnel-request-log";
+import { getRequestLogger } from "../../utils/request-logger";
+import { verifyHarnessProxyToken } from "../../utils/harness/harness-proxy-token";
+import {
+  HARNESS_SCOPE_STEP_UP_CORRELATION_HEADER,
+  HARNESS_SCOPE_STEP_UP_CORRELATION_QUERY,
+  normalizeHarnessScopeStepUpCorrelationId,
+  publishHarnessScopeStepUpFromToolError,
+} from "../../utils/harness/harness-scope-step-up.js";
 
 // In-memory SSE session store per serverId:sessionId
 type Session = {
   send: (event: string, data: string) => void;
   close: () => void;
+  scopeStepUpCorrelationId?: string;
 };
 const sessions: Map<string, Session> = new Map();
 const latestSessionByServer: Map<string, string> = new Map();
 
-// Unified HTTP adapter that handles both adapter-http and manager-http routes
-// with the same robust implementation but different JSON-RPC response modes
+// ── Server→client notification relay ───────────────────────────────────────
+// Real upstream notifications (progress, logging, *_list_changed, task
+// status) are fanned out to every live SSE session for the server. One
+// manager-level handler per method per server feeds a relay set, so SSE
+// sessions come and go without handler churn on the MCP client.
+//
+// `pushFrameToClient` is deliberately method-agnostic: today it carries
+// notifications, and a future server→client REQUEST channel (an id-bearing
+// frame whose response arrives via POST /:serverId/messages) can ride the
+// same path without reworking the stream. Sampling is deprecated and
+// intentionally unsupported; elicitation will be wired once its product
+// rework lands.
+const RELAYED_NOTIFICATION_METHODS = [
+  // Wire literals from the MCP spec; the SDK's exported constants cover a
+  // subset of these, so the bridge standardizes on the literals.
+  "notifications/progress",
+  "notifications/message",
+  "notifications/resources/list_changed",
+  "notifications/resources/updated",
+  "notifications/prompts/list_changed",
+  "notifications/tools/list_changed",
+  "notifications/tasks/status",
+] as const;
 
+const notificationRelays = new Map<string, Set<(payload: string) => void>>();
+// Stable dispatcher instances per server+method. Registration must be
+// re-runnable: removeServer() clears the manager's stored handlers, so a
+// re-added server with the same id needs its relay hooks re-applied. The
+// manager keeps handlers in a Set, so re-adding the SAME function instance
+// is an idempotent no-op while the server stays registered.
+const relayDispatchers = new Map<string, Map<string, (n: any) => void>>();
+
+function pushFrameToClient(
+  serverId: string,
+  frame: Record<string, unknown>
+): void {
+  const relays = notificationRelays.get(serverId);
+  if (!relays || relays.size === 0) {
+    return;
+  }
+  const payload = JSON.stringify(frame);
+  for (const push of relays) {
+    try {
+      push(payload);
+    } catch {}
+  }
+}
+
+function ensureNotificationRelay(clientManager: any, serverId: string): void {
+  let dispatchers = relayDispatchers.get(serverId);
+  if (!dispatchers) {
+    dispatchers = new Map();
+    for (const method of RELAYED_NOTIFICATION_METHODS) {
+      dispatchers.set(method, (notification: any) => {
+        pushFrameToClient(serverId, {
+          jsonrpc: "2.0",
+          method: notification?.method ?? method,
+          params: notification?.params,
+        });
+      });
+    }
+    relayDispatchers.set(serverId, dispatchers);
+  }
+  // Register on every SSE open (not once per process): restores the hooks
+  // after removeServer() wiped them, dedupes via the manager's handler Set
+  // otherwise.
+  for (const [method, handler] of dispatchers) {
+    try {
+      clientManager.addNotificationHandler(serverId, method as any, handler);
+    } catch {
+      // Server may not support handler registration yet; the manager
+      // re-applies stored handlers when the client (re)connects.
+    }
+  }
+}
+
+// ── Tunnel awareness ────────────────────────────────────────────────────────
+
+function forwardedTunnelHost(c: any): string | undefined {
+  const xfHost = c.req.header("x-forwarded-host");
+  if (!xfHost || !isActiveTunnelDomain(xfHost)) {
+    return undefined;
+  }
+  return String(xfHost).toLowerCase().split(":")[0];
+}
+
+/**
+ * Per-server isolation guard (defense-in-depth behind the relay edge
+ * Policy path rule): a request that arrived through a per-server tunnel may
+ * only address the serverId that tunnel was provisioned for.
+ */
+function tunnelScopeViolation(c: any, requestedServerId: string): boolean {
+  const tunnelHost = forwardedTunnelHost(c);
+  if (!tunnelHost) {
+    return false;
+  }
+  const boundServerId = getServerIdForTunnelDomain(tunnelHost);
+  if (!boundServerId) {
+    // Legacy shared tunnel — no per-server binding to enforce.
+    return false;
+  }
+  return boundServerId.toLowerCase() !== requestedServerId.toLowerCase();
+}
+
+function logTunnelRequest(
+  c: any,
+  serverId: string,
+  rpcMethod: string | undefined
+): void {
+  if (!forwardedTunnelHost(c)) {
+    return;
+  }
+  recordTunnelRequest(serverId, { method: rpcMethod, path: c.req.path });
+  try {
+    getRequestLogger(c, "routes.mcp.http-adapters").event("tunnel.request", {
+      tunnelKind: "server",
+      rpcMethod,
+      path: c.req.path,
+    });
+  } catch {}
+}
+
+function normalizeServerId(clientManager: any, serverId: string): string {
+  const availableServers = clientManager
+    .listServers()
+    // `getClient()` is legacy-only. Use `getManagedClient()` so stateless
+    // preview connections show up in the available-servers list.
+    .filter((id: string) => Boolean(clientManager.getManagedClient(id)));
+
+  if (availableServers.includes(serverId)) {
+    return serverId;
+  }
+  const match = availableServers.find(
+    (name: string) => name.toLowerCase() === serverId.toLowerCase()
+  );
+  return match ?? serverId;
+}
+
+// Per-turn harness-proxy token (`X-MCPJam-Proxy-Token`, HEADER-ONLY). The relay
+// edge binds every adapter tunnel to `/api/mcp/adapter-http/{serverId}`
+// (backend `tunnelPolicy.ts`), so the harness reuses THIS route rather than a
+// dedicated one. The token is VALIDATE-WHEN-PRESENT: the harness always sends
+// it (per-turn expiry/revocation on top of the tunnel's per-server `?k=`
+// bearer), while external MCP clients send none and are unaffected. The old
+// `?t=` query fallback is removed — tokens in URLs leak into edge/access logs.
+function readProxyToken(c: any): string | undefined {
+  return c.req.header("x-mcpjam-proxy-token") || undefined;
+}
+
+function readScopeStepUpCorrelationId(c: any): string | undefined {
+  const fromHeader = normalizeHarnessScopeStepUpCorrelationId(
+    c.req.header(HARNESS_SCOPE_STEP_UP_CORRELATION_HEADER),
+  );
+  if (fromHeader) return fromHeader;
+  return normalizeHarnessScopeStepUpCorrelationId(
+    new URL(c.req.url).searchParams.get(
+      HARNESS_SCOPE_STEP_UP_CORRELATION_QUERY,
+    ),
+  );
+}
+
+// Unified HTTP adapter for adapter-http + manager-http (same robust
+// implementation, different JSON-RPC response modes).
 function createHttpHandler(mode: BridgeMode, routePrefix: string) {
   const router = new Hono();
 
@@ -26,6 +204,19 @@ function createHttpHandler(mode: BridgeMode, routePrefix: string) {
   async function handleHttp(c: any) {
     const serverId = c.req.param("serverId");
     const method = c.req.method;
+
+    // A per-server tunnel must not reach any other server's adapter.
+    if (tunnelScopeViolation(c, serverId)) {
+      return c.json({ error: "Not found" }, 404);
+    }
+
+    // Harness proxy token: when supplied it MUST be valid + scoped to this
+    // serverId (covers GET/POST/HEAD before any stream opens or RPC runs).
+    // Absent ⇒ external client ⇒ unaffected.
+    const proxyTok = readProxyToken(c);
+    if (proxyTok && !verifyHarnessProxyToken(proxyTok, serverId)) {
+      return c.json({ error: "Unauthorized" }, 401);
+    }
 
     // SSE endpoint for clients that probe/subscribe via GET; HEAD advertises event-stream
     if (method === "HEAD") {
@@ -60,7 +251,19 @@ function createHttpHandler(mode: BridgeMode, routePrefix: string) {
         const origin = host ? `${proto}://${host}` : incomingUrl.origin;
         endpointBase = `${origin}/api/mcp/${routePrefix}/${serverId}/messages`;
       }
+      // Propagate the tunnel bearer secret into the advertised endpoint:
+      // SSE clients POST to this URL verbatim, and without ?k= the relay
+      // edge policy would 401 their messages.
+      const incomingSecret = incomingUrl.searchParams.get("k");
+      if (incomingSecret && !/[?&]k=/.test(endpointBase)) {
+        const sep = endpointBase.includes("?") ? "&" : "?";
+        endpointBase = `${endpointBase}${sep}k=${encodeURIComponent(
+          incomingSecret
+        )}`;
+      }
       const sessionId = crypto.randomUUID();
+      const relayServerId = normalizeServerId(c.mcpClientManager, serverId);
+      let relayPush: ((payload: string) => void) | undefined;
       let timer: any;
       const stream = new ReadableStream({
         start(controller) {
@@ -75,8 +278,23 @@ function createHttpHandler(mode: BridgeMode, routePrefix: string) {
           };
 
           // Register session
-          sessions.set(`${serverId}:${sessionId}`, { send, close });
+          const scopeStepUpCorrelationId = readScopeStepUpCorrelationId(c);
+          sessions.set(`${serverId}:${sessionId}`, {
+            send,
+            close,
+            ...(scopeStepUpCorrelationId ? { scopeStepUpCorrelationId } : {}),
+          });
           latestSessionByServer.set(serverId, sessionId);
+
+          // Relay real server notifications down this SSE stream.
+          relayPush = (payload: string) => send("message", payload);
+          let relaySet = notificationRelays.get(relayServerId);
+          if (!relaySet) {
+            relaySet = new Set();
+            notificationRelays.set(relayServerId, relaySet);
+          }
+          relaySet.add(relayPush);
+          ensureNotificationRelay(c.mcpClientManager, relayServerId);
 
           // Ping and endpoint per SSE transport handshake
           send("ping", "");
@@ -94,7 +312,7 @@ function createHttpHandler(mode: BridgeMode, routePrefix: string) {
           timer = setInterval(() => {
             try {
               controller.enqueue(
-                encoder.encode(`: keepalive ${Date.now()}\n\n`),
+                encoder.encode(`: keepalive ${Date.now()}\n\n`)
               );
             } catch {}
           }, 15000);
@@ -107,6 +325,14 @@ function createHttpHandler(mode: BridgeMode, routePrefix: string) {
           // If this session was the latest for this server, clear pointer
           if (latestSessionByServer.get(serverId) === sessionId) {
             latestSessionByServer.delete(serverId);
+          }
+          // Drop this stream from the notification relay set
+          if (relayPush) {
+            const relaySet = notificationRelays.get(relayServerId);
+            relaySet?.delete(relayPush);
+            if (relaySet && relaySet.size === 0) {
+              notificationRelays.delete(relayServerId);
+            }
           }
         },
       });
@@ -123,34 +349,35 @@ function createHttpHandler(mode: BridgeMode, routePrefix: string) {
       return c.json({ error: "Unsupported request" }, 400);
     }
 
-    // Parse JSON body (best effort)
-    let body: any = undefined;
-    try {
-      body = await c.req.json();
-    } catch {}
+    // Malformed payloads must NOT fall through to the notification → 202 path
+    // (the bridge treats a missing method as a notification): a garbage body
+    // acknowledged as "Accepted" looks like a delivered message to the client.
+    // Shared with the hosted harness proxy (`harness-mcp`) via the bridge helper.
+    const validation = await parseAndValidateJsonRpc(() => c.req.json());
+    if (!validation.ok) {
+      return c.json(validation.response, validation.status as 400);
+    }
+    const body = validation.body;
 
     const clientManager = c.mcpClientManager;
 
     // Normalize serverId - try to find a case-insensitive match if exact match fails
-    let normalizedServerId = serverId;
-    const availableServers = clientManager
-      .listServers()
-      .filter((id: string) => Boolean(clientManager.getClient(id)));
+    const normalizedServerId = normalizeServerId(clientManager, serverId);
 
-    if (!availableServers.includes(serverId)) {
-      const match = availableServers.find(
-        (name: string) => name.toLowerCase() === serverId.toLowerCase(),
-      );
-      if (match) {
-        normalizedServerId = match;
-      }
-    }
+    logTunnelRequest(c, normalizedServerId, body?.method);
 
     const response = await handleJsonRpc(
       normalizedServerId,
       body as any,
       clientManager,
       mode,
+      {
+        onToolCallError: (context) =>
+          publishHarnessScopeStepUpFromToolError(
+            readScopeStepUpCorrelationId(c),
+            context,
+          ),
+      },
     );
     if (!response) {
       // Notification → 202 Accepted
@@ -162,6 +389,17 @@ function createHttpHandler(mode: BridgeMode, routePrefix: string) {
   // Endpoint to receive client messages for SSE transport: /:serverId/messages?sessionId=...
   router.post("/:serverId/messages", async (c) => {
     const serverId = c.req.param("serverId");
+
+    // A per-server tunnel must not reach any other server's adapter.
+    if (tunnelScopeViolation(c, serverId)) {
+      return c.json({ error: "Not found" }, 404);
+    }
+
+    const proxyTok = readProxyToken(c);
+    if (proxyTok && !verifyHarnessProxyToken(proxyTok, serverId)) {
+      return c.json({ error: "Unauthorized" }, 401);
+    }
+
     const url = new URL(c.req.url);
     const sessionId = url.searchParams.get("sessionId") || "";
     const key = `${serverId}:${sessionId}`;
@@ -191,19 +429,9 @@ function createHttpHandler(mode: BridgeMode, routePrefix: string) {
     const params = body?.params ?? {};
 
     // Normalize serverId - try to find a case-insensitive match if exact match fails
-    let normalizedServerId = serverId;
-    const availableServers = c.mcpClientManager
-      .listServers()
-      .filter((id: string) => Boolean(c.mcpClientManager.getClient(id)));
+    const normalizedServerId = normalizeServerId(c.mcpClientManager, serverId);
 
-    if (!availableServers.includes(serverId)) {
-      const match = availableServers.find(
-        (name: string) => name.toLowerCase() === serverId.toLowerCase(),
-      );
-      if (match) {
-        normalizedServerId = match;
-      }
-    }
+    logTunnelRequest(c, normalizedServerId, method);
 
     // Reuse the JSON-RPC handling via bridge
     try {
@@ -212,6 +440,13 @@ function createHttpHandler(mode: BridgeMode, routePrefix: string) {
         { id, method, params },
         c.mcpClientManager,
         mode,
+        {
+          onToolCallError: (context) =>
+            publishHarnessScopeStepUpFromToolError(
+              readScopeStepUpCorrelationId(c) ?? sess.scopeStepUpCorrelationId,
+              context,
+            ),
+        },
       );
       // If there is a JSON-RPC response, emit it over SSE to the client
       if (responseMessage) {
@@ -233,7 +468,9 @@ function createHttpHandler(mode: BridgeMode, routePrefix: string) {
   return router;
 }
 
-// Create both adapters with their respective modes
+// Create both adapters with their respective modes. The Claude Code harness
+// connects through `adapter-http` (the edge-bound tunnel path), carrying its
+// per-turn `X-MCPJam-Proxy-Token` which is validated-when-present above.
 export const adapterHttp = createHttpHandler("adapter", "adapter-http");
 export const managerHttp = createHttpHandler("manager", "manager-http");
 

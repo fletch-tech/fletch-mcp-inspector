@@ -32,18 +32,26 @@ function createTestApp(): Hono {
   // Unprotected routes
   app.get("/health", (c) => c.json({ status: "ok" }));
   app.get("/api/mcp/health", (c) => c.json({ status: "ok" }));
+  app.get("/api/mcp/models", (c) => c.json({ ok: true, data: [] }));
   app.get("/api/session-token", (c) => c.json({ token: "test" }));
-  app.get("/api/mcp-cli-config", (c) => c.json({ config: null }));
+  // Mock OIDC IdP endpoints (external browsers/RPs, no session possible)
+  app.get("/api/mcp/xaa/authorize", (c) => c.html("<html>authorize</html>"));
+  app.get("/api/mcp/xaa/authorize/confirm", (c) => c.json({ ok: true }));
+  app.get("/api/mcp/xaa/token", (c) => c.json({ ok: true }));
+  app.get("/api/mcp/xaa/userinfo", (c) => c.json({ ok: true }));
 
   // Unprotected prefixes
   app.get("/assets/main.js", (c) => c.text("console.log('hello')"));
   app.get("/api/mcp/oauth/callback", (c) => c.json({ oauth: "callback" }));
   app.get("/api/apps/mcp-apps/widget", (c) => c.json({ widget: "data" }));
-  app.get("/api/apps/chatgpt-apps/widget", (c) =>
-    c.json({ chatgpt: "widget" }),
-  );
   app.get("/api/apps/mcp-apps/sandbox-proxy/content", (c) =>
     c.text("sandbox content"),
+  );
+  // Widget file routes — DOWNLOAD is iframe-accessible (unauthenticated),
+  // UPLOAD is host-only (must require auth — see session-auth.ts).
+  app.get("/api/apps/files/file/file_abc", (c) => c.body("image-bytes"));
+  app.post("/api/apps/files/upload-file", (c) =>
+    c.json({ fileId: "file_abc" }),
   );
 
   // Non-API routes (HTML pages, etc.)
@@ -185,22 +193,37 @@ describe("sessionAuthMiddleware", () => {
       expect(res.status).toBe(200);
     });
 
+    it("allows /api/mcp/models without token (public catalog for guests)", async () => {
+      const res = await app.request("/api/mcp/models");
+
+      expect(res.status).toBe(200);
+    });
+
     it("allows /api/session-token without token", async () => {
       const res = await app.request("/api/session-token");
 
       expect(res.status).toBe(200);
     });
 
-    it("requires token for /api/mcp-cli-config", async () => {
-      const res = await app.request("/api/mcp-cli-config");
-      expect(res.status).toBe(401);
+    it("allows the mock OIDC IdP endpoints without token", async () => {
+      for (const route of [
+        "/api/mcp/xaa/authorize",
+        "/api/mcp/xaa/authorize/confirm",
+        "/api/mcp/xaa/token",
+        "/api/mcp/xaa/userinfo",
+      ]) {
+        const res = await app.request(route);
+        expect(res.status, route).toBe(200);
+      }
     });
 
-    it("allows /api/mcp-cli-config with valid token", async () => {
-      const res = await app.request("/api/mcp-cli-config", {
-        headers: { "X-MCP-Session-Auth": `Bearer ${validToken}` },
+    it("still requires a token for /api/mcp/xaa/token-exchange", async () => {
+      // Exact-match allowlist: /token must never make /token-exchange public.
+      const res = await app.request("/api/mcp/xaa/token-exchange", {
+        method: "POST",
       });
-      expect(res.status).toBe(200);
+
+      expect(res.status).toBe(401);
     });
   });
 
@@ -231,15 +254,41 @@ describe("sessionAuthMiddleware", () => {
       expect(res.status).toBe(200);
     });
 
-    it("allows /api/apps/chatgpt-apps/ without token", async () => {
-      const res = await app.request("/api/apps/chatgpt-apps/widget");
+    it("allows /api/apps/mcp-apps/sandbox-proxy without token", async () => {
+      const res = await app.request("/api/apps/mcp-apps/sandbox-proxy/content");
 
       expect(res.status).toBe(200);
     });
 
-    it("allows /api/apps/mcp-apps/sandbox-proxy without token", async () => {
-      const res = await app.request("/api/apps/mcp-apps/sandbox-proxy/content");
+    it("allows GET /api/apps/files/file/:fileId without token (iframe download)", async () => {
+      // The widget iframe fetches the download URL directly (img src, fetch,
+      // etc.) and can't carry session headers; download must stay public.
+      const res = await app.request("/api/apps/files/file/file_abc");
+      expect(res.status).toBe(200);
+    });
 
+    it("requires auth on POST /api/apps/files/upload-file (host-only)", async () => {
+      // Upload is called from the host page via authFetch, which CAN
+      // attach the session token. Allowing it through unauthenticated
+      // would let any caller fill the in-memory fileStore (20MB/req) by
+      // hitting this route directly. Pin the auth requirement.
+      const res = await app.request("/api/apps/files/upload-file", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ data: "dummy", mimeType: "image/png" }),
+      });
+      expect(res.status).toBe(401);
+    });
+
+    it("accepts upload-file POST when a valid session token is attached", async () => {
+      const res = await app.request("/api/apps/files/upload-file", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-MCP-Session-Auth": `Bearer ${validToken}`,
+        },
+        body: JSON.stringify({ data: "dummy", mimeType: "image/png" }),
+      });
       expect(res.status).toBe(200);
     });
   });
@@ -313,5 +362,19 @@ describe("scrubTokenFromUrl", () => {
   it("handles URL with no query params", () => {
     const url = "/api/test";
     expect(scrubTokenFromUrl(url)).toBe("/api/test");
+  });
+
+  it("scrubs a bare token= param (e.g. a stray computer terminal token)", () => {
+    const url = "/api/web/computers/terminal?token=eyJhbGciOi.abc.def&cols=80";
+    expect(scrubTokenFromUrl(url)).toBe(
+      "/api/web/computers/terminal?token=[REDACTED]&cols=80",
+    );
+  });
+
+  it("scrubs token= without clobbering _token= in the same URL", () => {
+    const url = "/api/test?_token=session123&token=terminal456";
+    expect(scrubTokenFromUrl(url)).toBe(
+      "/api/test?_token=[REDACTED]&token=[REDACTED]",
+    );
   });
 });

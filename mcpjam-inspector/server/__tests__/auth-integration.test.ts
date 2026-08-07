@@ -11,11 +11,16 @@
  * - Middleware ordering issues
  */
 
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { Hono } from "hono";
 import { sessionAuthMiddleware } from "../middleware/session-auth.js";
 import { originValidationMiddleware } from "../middleware/origin-validation.js";
 import { securityHeadersMiddleware } from "../middleware/security-headers.js";
+import {
+  applyHostedPartition,
+  mountHostedOpenRoutes,
+} from "../middleware/hosted-partition.js";
+import { __resetModelsCacheForTests } from "../routes/mcp/models.js";
 import {
   generateSessionToken,
   getSessionToken,
@@ -59,7 +64,6 @@ function createSecureTestApp(): Hono {
     return c.json({ token: getSessionToken() });
   });
   app.get("/api/apps/mcp-apps/widget", (c) => c.json({ widget: true }));
-  app.get("/api/apps/chatgpt-apps/widget", (c) => c.json({ chatgpt: true }));
 
   return app;
 }
@@ -120,7 +124,6 @@ describe("Auth Integration", () => {
       { path: "/health", description: "health check" },
       { path: "/api/mcp/health", description: "MCP health check" },
       { path: "/api/apps/mcp-apps/widget", description: "MCP apps widget" },
-      { path: "/api/apps/chatgpt-apps/widget", description: "ChatGPT widget" },
     ];
 
     for (const { path, description } of unprotectedRoutes) {
@@ -248,5 +251,83 @@ describe("Auth Integration", () => {
 
       expect(res.status).toBe(401);
     });
+  });
+});
+
+/**
+ * Hosted-mode partition: the /api/mcp and /api/apps families are 410'd in
+ * hosted deployments, except a small allowlist of read-only public paths. This
+ * exercises the REAL shared middleware (applyHostedPartition +
+ * mountHostedOpenRoutes) both production entries use, so the two entrypoints
+ * can't silently drift and the public model catalog stays reachable.
+ */
+describe("hosted-mode partition", () => {
+  let app: Hono;
+  const originalFetch = global.fetch;
+  const originalConvexUrl = process.env.CONVEX_HTTP_URL;
+
+  beforeEach(() => {
+    generateSessionToken();
+    process.env.CONVEX_HTTP_URL = "https://backend.test";
+    __resetModelsCacheForTests();
+    global.fetch = vi.fn(
+      async () =>
+        new Response(JSON.stringify({ items: [{ id: "openai/gpt-4o" }] }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }),
+    ) as unknown as typeof fetch;
+
+    // Assemble the hosted middleware stack in the same order as the real
+    // entries; calling applyHostedPartition unconditionally simulates
+    // HOSTED_MODE=true (the entries gate the call on that flag).
+    app = new Hono();
+    app.use("*", securityHeadersMiddleware);
+    app.use("*", originValidationMiddleware);
+    applyHostedPartition(app);
+    app.use("*", sessionAuthMiddleware);
+    mountHostedOpenRoutes(app);
+  });
+
+  afterEach(() => {
+    global.fetch = originalFetch;
+    __resetModelsCacheForTests();
+    if (originalConvexUrl === undefined) delete process.env.CONVEX_HTTP_URL;
+    else process.env.CONVEX_HTTP_URL = originalConvexUrl;
+  });
+
+  it("keeps the public model catalog reachable (not 410)", async () => {
+    const res = await app.request("/api/mcp/models");
+    expect(res.status).toBe(200);
+    const data = await res.json();
+    expect(data.ok).toBe(true);
+    expect(Array.isArray(data.data)).toBe(true);
+  });
+
+  it("keeps /api/mcp/health reachable", async () => {
+    const res = await app.request("/api/mcp/health");
+    expect(res.status).toBe(200);
+  });
+
+  it("410s a partitioned MCP sibling like /api/mcp/servers", async () => {
+    const res = await app.request("/api/mcp/servers");
+    expect(res.status).toBe(410);
+    expect((await res.json()).code).toBe("FEATURE_NOT_SUPPORTED");
+  });
+
+  it("keeps /api/apps/health reachable but 410s other apps routes", async () => {
+    expect((await app.request("/api/apps/health")).status).toBe(200);
+    const blocked = await app.request("/api/apps/mcp-apps/widget");
+    expect(blocked.status).toBe(410);
+  });
+
+  it("410s /api/session-token in hosted mode", async () => {
+    const res = await app.request("/api/session-token");
+    expect(res.status).toBe(410);
+  });
+
+  it("410s a trailing-slash /api/mcp/models/ (exact-match allowlist)", async () => {
+    const res = await app.request("/api/mcp/models/");
+    expect(res.status).toBe(410);
   });
 });

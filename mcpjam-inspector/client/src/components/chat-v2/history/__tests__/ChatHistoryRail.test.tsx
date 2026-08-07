@@ -1,0 +1,660 @@
+import type { ButtonHTMLAttributes, ReactNode } from "react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import type { ChatHistorySession } from "@/lib/apis/web/chat-history-api";
+import { ChatHistoryRail } from "../ChatHistoryRail";
+
+const {
+  refetchMock,
+  archiveManySessionIdsMock,
+  useChatHistoryMock,
+  useProjectMembersMock,
+  useFeatureFlagEnabledMock,
+  chatHistoryRowPropsSpy,
+} = vi.hoisted(() => {
+  const refetchMock = vi.fn();
+  const archiveManySessionIdsMock = vi.fn();
+  const chatHistoryRowPropsSpy = vi.fn();
+  const useFeatureFlagEnabledMock = vi.fn(() => true);
+  const useProjectMembersMock = vi.fn(() => ({
+    members: [],
+    activeMembers: [],
+    pendingMembers: [],
+    canManageMembers: false,
+    isLoading: false,
+    hasPendingMembers: false,
+  }));
+  const useChatHistoryMock = vi.fn(() => ({
+    personal: [] as ChatHistorySession[],
+    project: [] as ChatHistorySession[],
+    loading: false,
+    error: null,
+    isReactive: false,
+    refetch: refetchMock,
+    actions: {
+      rename: vi.fn(),
+      archive: vi.fn(),
+      unarchive: vi.fn(),
+      share: vi.fn(),
+      unshare: vi.fn(),
+      pin: vi.fn(),
+      unpin: vi.fn(),
+      archiveManySessionIds: archiveManySessionIdsMock,
+      archiveAllActive: vi.fn(),
+    },
+  }));
+  return {
+    refetchMock,
+    archiveManySessionIdsMock,
+    useChatHistoryMock,
+    useProjectMembersMock,
+    useFeatureFlagEnabledMock,
+    chatHistoryRowPropsSpy,
+  };
+});
+
+vi.mock("posthog-js/react", () => ({
+  useFeatureFlagEnabled: (...args: unknown[]) =>
+    useFeatureFlagEnabledMock(...args),
+}));
+
+vi.mock("@/hooks/useProjects", () => ({
+  useProjectMembers: (...args: unknown[]) => useProjectMembersMock(...args),
+}));
+
+vi.mock("../use-chat-history", () => ({
+  useChatHistory: useChatHistoryMock,
+}));
+
+vi.mock("../ChatHistoryRow", () => ({
+  ChatHistoryRow: (props: Record<string, unknown>) => {
+    const snapshot = { ...props } as Record<string, unknown>;
+    delete snapshot.key;
+    chatHistoryRowPropsSpy(snapshot);
+    return null;
+  },
+}));
+
+vi.mock("../convert-chat-session-dialog", () => ({
+  ConvertChatSessionDialog: () => null,
+}));
+
+vi.mock("@mcpjam/design-system/button", () => ({
+  Button: ({ children, ...props }: ButtonHTMLAttributes<HTMLButtonElement>) => (
+    <button {...props}>{children}</button>
+  ),
+}));
+
+vi.mock("@mcpjam/design-system/scroll-area", () => ({
+  ScrollArea: ({ children }: { children: ReactNode }) => <div>{children}</div>,
+}));
+
+vi.mock("@mcpjam/design-system/tooltip", () => ({
+  Tooltip: ({ children }: { children: ReactNode }) => <>{children}</>,
+  TooltipTrigger: ({ children }: { children: ReactNode }) => <>{children}</>,
+  TooltipContent: () => null,
+}));
+
+function sessionStub(
+  id: string,
+  overrides: Partial<ChatHistorySession> = {},
+): ChatHistorySession {
+  return {
+    _id: id,
+    chatSessionId: `chat-${id}`,
+    firstMessagePreview: "hi",
+    status: "active",
+    directVisibility: "private",
+    messageCount: 1,
+    version: 1,
+    startedAt: Date.now(),
+    lastActivityAt: Date.now(),
+    isPinned: false,
+    manualUnread: false,
+    isUnread: false,
+    ...overrides,
+  };
+}
+
+describe("ChatHistoryRail", () => {
+  beforeEach(() => {
+    refetchMock.mockReset();
+    archiveManySessionIdsMock.mockReset();
+    chatHistoryRowPropsSpy.mockReset();
+    useProjectMembersMock.mockReset();
+    useFeatureFlagEnabledMock.mockReset();
+    useFeatureFlagEnabledMock.mockReturnValue(true);
+    useProjectMembersMock.mockReturnValue({
+      members: [],
+      activeMembers: [],
+      pendingMembers: [],
+      canManageMembers: false,
+      isLoading: false,
+      hasPendingMembers: false,
+    });
+    useChatHistoryMock.mockImplementation(() => ({
+      personal: [],
+      project: [],
+      loading: false,
+      error: null,
+      isReactive: false,
+      refetch: refetchMock,
+      actions: {
+        rename: vi.fn(),
+        archive: vi.fn(),
+        unarchive: vi.fn(),
+        share: vi.fn(),
+        unshare: vi.fn(),
+        pin: vi.fn(),
+        unpin: vi.fn(),
+        archiveManySessionIds: archiveManySessionIdsMock,
+        archiveAllActive: vi.fn(),
+      },
+    }));
+  });
+
+  it("refetches history when streaming completes, including delayed retries", async () => {
+    vi.useFakeTimers();
+    try {
+      const { rerender } = render(
+        <ChatHistoryRail
+          activeSessionId={null}
+          isAuthenticated
+          isStreaming={false}
+          projectId="project-1"
+          onSelectThread={vi.fn()}
+          onNewChat={vi.fn()}
+        />,
+      );
+
+      expect(refetchMock).not.toHaveBeenCalled();
+
+      rerender(
+        <ChatHistoryRail
+          activeSessionId={null}
+          isAuthenticated
+          isStreaming
+          projectId="project-1"
+          onSelectThread={vi.fn()}
+          onNewChat={vi.fn()}
+        />,
+      );
+
+      expect(refetchMock).not.toHaveBeenCalled();
+
+      rerender(
+        <ChatHistoryRail
+          activeSessionId={null}
+          isAuthenticated
+          isStreaming={false}
+          projectId="project-1"
+          onSelectThread={vi.fn()}
+          onNewChat={vi.fn()}
+        />,
+      );
+
+      expect(refetchMock).toHaveBeenCalledTimes(1);
+
+      await vi.advanceTimersByTimeAsync(250);
+      expect(refetchMock).toHaveBeenCalledTimes(2);
+
+      await vi.advanceTimersByTimeAsync(550);
+      expect(refetchMock).toHaveBeenCalledTimes(3);
+
+      await vi.advanceTimersByTimeAsync(1200);
+      expect(refetchMock).toHaveBeenCalledTimes(4);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("only exposes chat-to-test-case conversion when authenticated", () => {
+    useChatHistoryMock.mockImplementation(() => ({
+      personal: [sessionStub("personal-1")],
+      project: [],
+      loading: false,
+      error: null,
+      isReactive: false,
+      refetch: refetchMock,
+      actions: {
+        rename: vi.fn(),
+        archive: vi.fn(),
+        unarchive: vi.fn(),
+        share: vi.fn(),
+        unshare: vi.fn(),
+        pin: vi.fn(),
+        unpin: vi.fn(),
+        archiveManySessionIds: archiveManySessionIdsMock,
+        archiveAllActive: vi.fn(),
+      },
+    }));
+
+    const { rerender } = render(
+      <ChatHistoryRail
+        activeSessionId={null}
+        isAuthenticated={false}
+        isStreaming={false}
+        projectId={null}
+        onSelectThread={vi.fn()}
+        onNewChat={vi.fn()}
+      />,
+    );
+
+    expect(chatHistoryRowPropsSpy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        canConvertToTestCase: false,
+      }),
+    );
+
+    chatHistoryRowPropsSpy.mockReset();
+
+    rerender(
+      <ChatHistoryRail
+        activeSessionId={null}
+        isAuthenticated
+        isStreaming={false}
+        projectId={null}
+        onSelectThread={vi.fn()}
+        onNewChat={vi.fn()}
+      />,
+    );
+
+    expect(chatHistoryRowPropsSpy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        canConvertToTestCase: true,
+      }),
+    );
+  });
+
+  it("skips fallback refetch retries when history is reactive", async () => {
+    vi.useFakeTimers();
+    useChatHistoryMock.mockImplementation(() => ({
+      personal: [],
+      project: [],
+      loading: false,
+      error: null,
+      isReactive: true,
+      refetch: refetchMock,
+      actions: {
+        rename: vi.fn(),
+        archive: vi.fn(),
+        unarchive: vi.fn(),
+        share: vi.fn(),
+        unshare: vi.fn(),
+        pin: vi.fn(),
+        unpin: vi.fn(),
+        archiveManySessionIds: archiveManySessionIdsMock,
+        archiveAllActive: vi.fn(),
+      },
+    }));
+
+    try {
+      const { rerender } = render(
+        <ChatHistoryRail
+          activeSessionId={null}
+          isAuthenticated
+          isStreaming={false}
+          projectId="project-1"
+          onSelectThread={vi.fn()}
+          onNewChat={vi.fn()}
+        />,
+      );
+
+      rerender(
+        <ChatHistoryRail
+          activeSessionId={null}
+          isAuthenticated
+          isStreaming
+          projectId="project-1"
+          onSelectThread={vi.fn()}
+          onNewChat={vi.fn()}
+        />,
+      );
+
+      rerender(
+        <ChatHistoryRail
+          activeSessionId={null}
+          isAuthenticated
+          isStreaming={false}
+          projectId="project-1"
+          onSelectThread={vi.fn()}
+          onNewChat={vi.fn()}
+        />,
+      );
+
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(refetchMock).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("passes projectThreadOwner into project rows from member roster", () => {
+    useProjectMembersMock.mockReturnValue({
+      members: [],
+      activeMembers: [
+        {
+          _id: "mem-peer",
+          projectId: "project-1",
+          userId: "user-peer",
+          email: "peer@test.com",
+          projectRole: "editor",
+          canChangeRole: false,
+          addedBy: "x",
+          addedAt: 0,
+          isOwner: false,
+          isPending: false,
+          hasAccess: true,
+          accessSource: "project",
+          canRemove: false,
+          user: {
+            name: "Peer User",
+            email: "peer@test.com",
+            imageUrl: "https://example.com/p.png",
+          },
+        },
+      ],
+      pendingMembers: [],
+      canManageMembers: false,
+      isLoading: false,
+      hasPendingMembers: false,
+    });
+
+    useChatHistoryMock.mockImplementation(() => ({
+      personal: [],
+      project: [
+        sessionStub("ws-row-1", {
+          directVisibility: "project",
+          userId: "user-peer",
+        }),
+      ],
+      loading: false,
+      error: null,
+      isReactive: false,
+      refetch: refetchMock,
+      actions: {
+        rename: vi.fn(),
+        archive: vi.fn(),
+        unarchive: vi.fn(),
+        share: vi.fn(),
+        unshare: vi.fn(),
+        pin: vi.fn(),
+        unpin: vi.fn(),
+        archiveManySessionIds: archiveManySessionIdsMock,
+        archiveAllActive: vi.fn(),
+      },
+    }));
+
+    render(
+      <ChatHistoryRail
+        activeSessionId={null}
+        isAuthenticated
+        isStreaming={false}
+        projectId="project-1"
+        onSelectThread={vi.fn()}
+        onNewChat={vi.fn()}
+      />,
+    );
+
+    const projectCalls = chatHistoryRowPropsSpy.mock.calls
+      .map((c) => c[0] as { session?: ChatHistorySession })
+      .filter((p) => p.session?._id === "ws-row-1");
+    expect(projectCalls).toHaveLength(1);
+    expect(projectCalls[0]).toMatchObject({
+      projectThreadOwner: {
+        status: "show",
+        displayName: "Peer User",
+        imageUrl: "https://example.com/p.png",
+      },
+    });
+  });
+
+  it("omits projectThreadOwner for personal history rows", () => {
+    useChatHistoryMock.mockImplementation(() => ({
+      personal: [sessionStub("p-only")],
+      project: [],
+      loading: false,
+      error: null,
+      isReactive: false,
+      refetch: refetchMock,
+      actions: {
+        rename: vi.fn(),
+        archive: vi.fn(),
+        unarchive: vi.fn(),
+        share: vi.fn(),
+        unshare: vi.fn(),
+        pin: vi.fn(),
+        unpin: vi.fn(),
+        archiveManySessionIds: archiveManySessionIdsMock,
+        archiveAllActive: vi.fn(),
+      },
+    }));
+
+    render(
+      <ChatHistoryRail
+        activeSessionId={null}
+        isAuthenticated
+        isStreaming={false}
+        projectId="project-1"
+        onSelectThread={vi.fn()}
+        onNewChat={vi.fn()}
+      />,
+    );
+
+    const personalCall = chatHistoryRowPropsSpy.mock.calls.find(
+      (c) =>
+        (c[0] as { session?: ChatHistorySession }).session?._id === "p-only",
+    );
+    expect(personalCall?.[0]).not.toHaveProperty("projectThreadOwner");
+  });
+
+  it("renders archive-all buttons in both history sections", () => {
+    useChatHistoryMock.mockImplementation(() => ({
+      personal: [sessionStub("p1")],
+      project: [sessionStub("w1")],
+      loading: false,
+      error: null,
+      isReactive: false,
+      refetch: refetchMock,
+      actions: {
+        rename: vi.fn(),
+        archive: vi.fn(),
+        unarchive: vi.fn(),
+        share: vi.fn(),
+        unshare: vi.fn(),
+        pin: vi.fn(),
+        unpin: vi.fn(),
+        archiveManySessionIds: archiveManySessionIdsMock,
+        archiveAllActive: vi.fn(),
+      },
+    }));
+
+    render(
+      <ChatHistoryRail
+        activeSessionId={null}
+        isAuthenticated
+        isStreaming={false}
+        projectId="project-1"
+        onSelectThread={vi.fn()}
+        onNewChat={vi.fn()}
+      />,
+    );
+
+    expect(
+      screen.getByRole("button", {
+        name: /archive all sessions in sessions/i,
+      }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", {
+        name: /archive all sessions in shared sessions/i,
+      }),
+    ).toBeInTheDocument();
+  });
+
+  it("routes shared-thread new chat requests with the shared visibility option", () => {
+    const onNewChat = vi.fn();
+
+    render(
+      <ChatHistoryRail
+        activeSessionId={null}
+        isAuthenticated
+        isStreaming={false}
+        projectId="project-1"
+        onSelectThread={vi.fn()}
+        onNewChat={onNewChat}
+      />,
+    );
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "New chat in Sessions" }),
+    );
+    fireEvent.click(
+      screen.getByRole("button", { name: "New chat in Shared Sessions" }),
+    );
+
+    expect(onNewChat).toHaveBeenNthCalledWith(1);
+    expect(onNewChat).toHaveBeenNthCalledWith(2, { shared: true });
+  });
+
+  it("hides project sharing when there is no project scope", () => {
+    useChatHistoryMock.mockImplementation(() => ({
+      personal: [sessionStub("p1")],
+      project: [sessionStub("w1", { directVisibility: "project" })],
+      loading: false,
+      error: null,
+      isReactive: false,
+      refetch: refetchMock,
+      actions: {
+        rename: vi.fn(),
+        archive: vi.fn(),
+        unarchive: vi.fn(),
+        share: vi.fn(),
+        unshare: vi.fn(),
+        pin: vi.fn(),
+        unpin: vi.fn(),
+        archiveManySessionIds: archiveManySessionIdsMock,
+        archiveAllActive: vi.fn(),
+      },
+    }));
+
+    render(
+      <ChatHistoryRail
+        activeSessionId={null}
+        isAuthenticated
+        isStreaming={false}
+        projectId={null}
+        onSelectThread={vi.fn()}
+        onNewChat={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText("Sessions")).toBeInTheDocument();
+    expect(screen.queryByText("Shared Sessions")).not.toBeInTheDocument();
+
+    const personalCall = chatHistoryRowPropsSpy.mock.calls.find(
+      (c) =>
+        (c[0] as { session?: ChatHistorySession }).session?._id === "p1",
+    );
+    expect(personalCall?.[0]).toMatchObject({
+      sharedThreadsEnabled: false,
+    });
+    expect(
+      chatHistoryRowPropsSpy.mock.calls.some(
+        (c) =>
+          (c[0] as { session?: ChatHistorySession }).session?._id === "w1",
+      ),
+    ).toBe(false);
+  });
+
+  it("awaits async beforeResetChatAfterArchiveAll and skips archive-all when false", async () => {
+    archiveManySessionIdsMock.mockResolvedValue(undefined);
+    const beforeReset = vi.fn().mockResolvedValue(false);
+    useChatHistoryMock.mockImplementation(() => ({
+      personal: [sessionStub("p1")],
+      project: [],
+      loading: false,
+      error: null,
+      isReactive: false,
+      refetch: refetchMock,
+      actions: {
+        rename: vi.fn(),
+        archive: vi.fn(),
+        unarchive: vi.fn(),
+        share: vi.fn(),
+        unshare: vi.fn(),
+        pin: vi.fn(),
+        unpin: vi.fn(),
+        archiveManySessionIds: archiveManySessionIdsMock,
+        archiveAllActive: vi.fn(),
+      },
+    }));
+
+    render(
+      <ChatHistoryRail
+        activeSessionId="p1"
+        isAuthenticated
+        isStreaming={false}
+        projectId="project-1"
+        onSelectThread={vi.fn()}
+        onNewChat={vi.fn()}
+        beforeResetChatAfterArchiveAll={beforeReset}
+      />,
+    );
+
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: /archive all sessions in sessions/i,
+      }),
+    );
+
+    await waitFor(() => expect(beforeReset).toHaveBeenCalledTimes(1));
+    expect(archiveManySessionIdsMock).not.toHaveBeenCalled();
+  });
+
+  it("awaits async beforeResetChatAfterArchiveAll and archives when true", async () => {
+    archiveManySessionIdsMock.mockResolvedValue(undefined);
+    const beforeReset = vi.fn().mockResolvedValue(true);
+    useChatHistoryMock.mockImplementation(() => ({
+      personal: [sessionStub("p1")],
+      project: [],
+      loading: false,
+      error: null,
+      isReactive: false,
+      refetch: refetchMock,
+      actions: {
+        rename: vi.fn(),
+        archive: vi.fn(),
+        unarchive: vi.fn(),
+        share: vi.fn(),
+        unshare: vi.fn(),
+        pin: vi.fn(),
+        unpin: vi.fn(),
+        archiveManySessionIds: archiveManySessionIdsMock,
+        archiveAllActive: vi.fn(),
+      },
+    }));
+
+    render(
+      <ChatHistoryRail
+        activeSessionId="p1"
+        isAuthenticated
+        isStreaming={false}
+        projectId="project-1"
+        onSelectThread={vi.fn()}
+        onNewChat={vi.fn()}
+        beforeResetChatAfterArchiveAll={beforeReset}
+      />,
+    );
+
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: /archive all sessions in sessions/i,
+      }),
+    );
+
+    await waitFor(() =>
+      expect(archiveManySessionIdsMock).toHaveBeenCalledWith(["p1"]),
+    );
+  });
+});

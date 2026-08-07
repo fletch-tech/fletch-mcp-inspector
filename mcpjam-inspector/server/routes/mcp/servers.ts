@@ -1,9 +1,70 @@
 import { Hono } from "hono";
-import type { MCPServerConfig } from "@mcpjam/sdk";
 import "../../types/hono"; // Type extensions
-import { rpcLogBus, type RpcLogEvent } from "../../services/rpc-log-bus";
+import {
+  rpcLogBus,
+  type DeliveredRpcLogEvent,
+} from "../../services/rpc-log-bus";
 import { logger } from "../../utils/logger";
-import { HOSTED_MODE } from "../../config";
+import {
+  executeLocalServerConnect,
+  parseLocalConnectRequestBody,
+  respondWithLocalRouteError,
+} from "../../utils/local-server-resolver.js";
+import { releasePluginLease } from "../../services/plugins/local-stdio.js";
+
+function hasBearerAuthorizationHeader(headers: unknown): boolean {
+  if (!headers || typeof headers !== "object") {
+    return false;
+  }
+  for (const [key, value] of Object.entries(headers as Record<string, unknown>)) {
+    if (
+      key.trim().toLowerCase() === "authorization" &&
+      typeof value === "string" &&
+      value.startsWith("Bearer ")
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function redactServerConfig(config: unknown) {
+  if (!config || typeof config !== "object") {
+    return config;
+  }
+  const record = config as Record<string, unknown>;
+  const redacted: Record<string, unknown> = { ...record };
+  if ("env" in redacted) {
+    redacted.hasEnv =
+      !!redacted.env &&
+      typeof redacted.env === "object" &&
+      Object.keys(redacted.env as Record<string, unknown>).length > 0;
+    delete redacted.env;
+  }
+  const requestInit = redacted.requestInit;
+  if (
+    requestInit &&
+    typeof requestInit === "object" &&
+    !Array.isArray(requestInit)
+  ) {
+    const nextRequestInit = { ...(requestInit as Record<string, unknown>) };
+    if ("headers" in nextRequestInit) {
+      redacted.hasHeaders =
+        !!nextRequestInit.headers &&
+        typeof nextRequestInit.headers === "object" &&
+        Object.keys(nextRequestInit.headers as Record<string, unknown>).length >
+          0;
+      // Flag bearer auth before the header value is stripped, so the edit form
+      // can keep the auth type as "bearer" and preserve the hidden token.
+      redacted.hasBearerToken = hasBearerAuthorizationHeader(
+        nextRequestInit.headers
+      );
+      delete nextRequestInit.headers;
+    }
+    redacted.requestInit = nextRequestInit;
+  }
+  return redacted;
+}
 
 const servers = new Hono();
 
@@ -17,7 +78,7 @@ servers.get("/", async (c) => {
         id,
         name: id,
         status,
-        config,
+        config: redactServerConfig(config),
       }));
 
     return c.json({
@@ -31,7 +92,7 @@ servers.get("/", async (c) => {
         success: false,
         error: error instanceof Error ? error.message : "Unknown error",
       },
-      500,
+      500
     );
   }
 });
@@ -41,12 +102,17 @@ servers.get("/status/:serverId", async (c) => {
   try {
     serverId = c.req.param("serverId");
     const mcpClientManager = c.mcpClientManager;
-    const status = mcpClientManager.pingServer(serverId);
+    const connectionStatus = mcpClientManager.getConnectionStatus(serverId);
+    const ping =
+      connectionStatus === "connected"
+        ? await mcpClientManager.pingServer(serverId)
+        : null;
 
     return c.json({
       success: true,
       serverId,
-      status,
+      status: connectionStatus,
+      ping,
     });
   } catch (error) {
     logger.error("Error getting server status", error, { serverId });
@@ -55,7 +121,7 @@ servers.get("/status/:serverId", async (c) => {
         success: false,
         error: error instanceof Error ? error.message : "Unknown error",
       },
-      500,
+      500
     );
   }
 });
@@ -74,7 +140,7 @@ servers.get("/init-info/:serverId", async (c) => {
           success: false,
           error: `Server "${serverId}" is not connected or initialization info not available`,
         },
-        404,
+        404
       );
     }
 
@@ -90,7 +156,7 @@ servers.get("/init-info/:serverId", async (c) => {
         success: false,
         error: error instanceof Error ? error.message : "Unknown error",
       },
-      500,
+      500
     );
   }
 });
@@ -103,19 +169,26 @@ servers.delete("/:serverId", async (c) => {
     const mcpClientManager = c.mcpClientManager;
 
     try {
-      const client = mcpClientManager.getClient(serverId);
-      if (client) {
+      // `getClient()` returns undefined for stateless connections (no
+      // wrapped upstream Client). Use `getManagedClient()` so this guard
+      // recognizes both adapters and we actually call `disconnectServer`
+      // for stateless preview connections instead of leaking them.
+      const managedClient = mcpClientManager.getManagedClient(serverId);
+      if (managedClient) {
         await mcpClientManager.disconnectServer(serverId);
       }
     } catch (error) {
       // Ignore disconnect errors for already disconnected servers
-      console.debug(
-        `Failed to disconnect MCP server ${serverId} during removal`,
-        error,
-      );
+      logger.debug("Failed to disconnect MCP server during removal", {
+        serverId,
+        error: error instanceof Error ? error.message : String(error),
+      });
     }
 
     mcpClientManager.removeServer(serverId);
+    // The plugin bundle this entry may have been running from is now
+    // unreferenced, so cache GC may reclaim it. No-op for ordinary servers.
+    releasePluginLease(serverId);
 
     return c.json({
       success: true,
@@ -128,110 +201,40 @@ servers.delete("/:serverId", async (c) => {
         success: false,
         error: error instanceof Error ? error.message : "Unknown error",
       },
-      500,
+      500
     );
   }
 });
 
-// Reconnect to a server
+// Reconnect to a server. Body shape: {projectId, serverId, serverName}; the
+// local Hono server resolves the config (and any OAuth tokens) from Convex
+// via /web/authorize-batch-local.
 servers.post("/reconnect", async (c) => {
-  let serverId: string | undefined;
+  let body: unknown;
   try {
-    const body = (await c.req.json()) as {
-      serverId?: string;
-      serverConfig?: MCPServerConfig;
-    };
-
-    serverId = body.serverId;
-    const serverConfig = body.serverConfig;
-
-    if (!serverId || !serverConfig) {
-      return c.json(
-        {
-          success: false,
-          error: "serverId and serverConfig are required",
-        },
-        400,
-      );
-    }
-
-    const mcpClientManager = c.mcpClientManager;
-
-    const normalizedConfig: MCPServerConfig = { ...serverConfig };
-    if (
-      "url" in normalizedConfig &&
-      normalizedConfig.url !== undefined &&
-      normalizedConfig.url !== null
-    ) {
-      const urlValue = normalizedConfig.url as unknown;
-      if (typeof urlValue === "string") {
-        normalizedConfig.url = urlValue;
-      } else if (urlValue instanceof URL) {
-        // already normalized
-      } else if (
-        typeof urlValue === "object" &&
-        urlValue !== null &&
-        "href" in (urlValue as Record<string, unknown>) &&
-        typeof (urlValue as { href?: unknown }).href === "string"
-      ) {
-        normalizedConfig.url = new URL(
-          (urlValue as { href: string }).href,
-        ).toString();
-      }
-    }
-
-    // Block STDIO connections in hosted mode
-    if (HOSTED_MODE && normalizedConfig.command) {
-      return c.json(
-        {
-          success: false,
-          error: "STDIO transport is disabled in the web app",
-        },
-        403,
-      );
-    }
-
-    // Enforce HTTPS in hosted mode
-    if (HOSTED_MODE && normalizedConfig.url) {
-      if (new URL(normalizedConfig.url).protocol !== "https:") {
-        return c.json(
-          {
-            success: false,
-            error:
-              "HTTPS is required in the web app. Please use an https:// URL.",
-          },
-          400,
-        );
-      }
-    }
-
-    await mcpClientManager.disconnectServer(serverId);
-    await mcpClientManager.connectToServer(serverId, normalizedConfig);
-
-    const status = mcpClientManager.getConnectionStatus(serverId);
-    const message =
-      status === "connected"
-        ? `Reconnected to server: ${serverId}`
-        : `Server ${serverId} reconnected with status '${status}'`;
-    const success = status === "connected";
-
-    return c.json({
-      success,
-      serverId,
-      status,
-      message,
-      ...(success ? {} : { error: message }),
-    });
+    body = await c.req.json();
   } catch (error) {
-    logger.error("Error reconnecting server", error, { serverId });
     return c.json(
       {
         success: false,
-        error: error instanceof Error ? error.message : "Unknown error",
+        error: "Failed to parse request body",
+        details: error instanceof Error ? error.message : "Unknown error",
       },
-      500,
+      400
     );
   }
+
+  const parsed = parseLocalConnectRequestBody(c, body);
+  if (!parsed.ok) {
+    return respondWithLocalRouteError(c, parsed.error);
+  }
+
+  // Reconnect leaves the manager entry in place on failure — the caller
+  // intends to retry, and removing it would also drop any in-flight
+  // streams (tools/RPC) that pointed at this name.
+  return executeLocalServerConnect(c, parsed.params, {
+    removeOnFailure: false,
+  });
 });
 
 // Stream JSON-RPC messages over SSE for all servers.
@@ -246,26 +249,40 @@ servers.get("/rpc/stream", async (c) => {
       const send = (data: unknown) => {
         try {
           controller.enqueue(
-            encoder.encode(`data: ${JSON.stringify(data)}\n\n`),
+            encoder.encode(`data: ${JSON.stringify(data)}\n\n`)
           );
         } catch {}
       };
 
-      // Replay recent messages for all known servers
+      // Replay recent messages for all known servers.
+      //
+      // Every event carries the bus-assigned `eventId`, and the browser store
+      // keys rows on it — so a client that already holds a replayed event
+      // updates that row instead of appending a second copy of it.
+      //
+      // The spread below is what puts `eventId` on the wire. Keep it a spread:
+      // picking fields explicitly here would drop the identity and silently
+      // reintroduce duplicate rows in the Logs panel. Guarded by
+      // `__tests__/rpc-stream-event-id.test.ts`, which parses these frames.
       try {
         const recent = rpcLogBus.getBuffer(
           serverIds,
-          isNaN(replay) ? 0 : replay,
+          isNaN(replay) ? 0 : replay
         );
         for (const evt of recent) {
-          send({ type: "rpc", ...evt });
+          send({ type: evt.kind === "http" ? "http" : "rpc", ...evt });
         }
       } catch {}
 
-      // Subscribe to live events for all known servers
-      const unsubscribe = rpcLogBus.subscribe(serverIds, (evt: RpcLogEvent) => {
-        send({ type: "rpc", ...evt });
-      });
+      // Subscribe to live events for all known servers. Same spread, same
+      // reason as the replay loop above — this is the second of the two places
+      // `eventId` reaches the wire.
+      const unsubscribe = rpcLogBus.subscribe(
+        serverIds,
+        (evt: DeliveredRpcLogEvent) => {
+          send({ type: evt.kind === "http" ? "http" : "rpc", ...evt });
+        }
+      );
 
       // Keepalive comments
       const keepalive = setInterval(() => {

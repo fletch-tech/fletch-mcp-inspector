@@ -1,48 +1,389 @@
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
+import { useEffect, useState } from "react";
+import { useFeatureFlagEnabled } from "posthog-js/react";
+import { Button } from "@mcpjam/design-system/button";
+import { Input } from "@mcpjam/design-system/input";
+import { Switch } from "@mcpjam/design-system/switch";
+import {
+  Check,
+  ChevronDown,
+  ChevronRight,
+  Copy,
+  Eye,
+  EyeOff,
+  Loader2,
+} from "lucide-react";
 import {
   Select,
   SelectContent,
   SelectItem,
   SelectTrigger,
   SelectValue,
-} from "@/components/ui/select";
+} from "@mcpjam/design-system/select";
+import {
+  readXaaEnterprisePolicy,
+  resolveAuthorizationPlan,
+  type McpProtocolVersion,
+} from "@mcpjam/sdk/browser";
+import { useActiveMcpProfile } from "@/contexts/active-mcp-profile-context";
+import type { RegistrationMode, XaaClientAuthMethod } from "@/shared/xaa.js";
+import type { ConfidentialCimdCapabilityStatus } from "@/hooks/use-confidential-cimd-capability";
+import {
+  resolveEffectiveOauthProtocolMode,
+  type ServerFormAuthType,
+  type ServerFormOAuthProtocolMode,
+} from "@/shared/types.js";
+import { REGISTRATION_MODE_OPTIONS } from "@/lib/registration-strategy";
+import { fetchOAuthClientSecret } from "@/lib/apis/hosted-oauth-client-secret-api";
+import { XaaCredentialFields } from "./XaaCredentialFields";
+import { XaaDcrRegistrationStatus } from "./XaaDcrRegistrationStatus";
 
 interface AuthenticationSectionProps {
-  authType: "oauth" | "bearer" | "none";
-  onAuthTypeChange: (value: "oauth" | "bearer" | "none") => void;
+  serverUrl?: string;
+  authType: ServerFormAuthType;
+  onAuthTypeChange: (value: ServerFormAuthType) => void;
   showAuthSettings: boolean;
   bearerToken: string;
   onBearerTokenChange: (value: string) => void;
+  /** True when a saved bearer token exists but its value is hidden. */
+  hasStoredBearerToken?: boolean;
+  /** Hosted-mode reveal for the saved bearer token. */
+  onRevealBearerToken?: () => void;
+  isRevealingBearerToken?: boolean;
+  bearerRevealError?: string | null;
   oauthScopesInput: string;
   onOauthScopesChange: (value: string) => void;
+  oauthProtocolMode: ServerFormOAuthProtocolMode;
+  onOauthProtocolModeChange: (value: ServerFormOAuthProtocolMode) => void;
+  /**
+   * The server's explicit MCP wire pin. Used only for the concrete OAuth-plan
+   * preview; the dropdown continues to display and persist canonical "Auto".
+   */
+  serverMcpProtocolVersion?: McpProtocolVersion;
+  /**
+   * Active host wire pin used by the concrete OAuth-plan preview when there is
+   * no per-server pin.
+   */
+  hostDefaultMcpProtocolVersion?: McpProtocolVersion;
+  registrationMode: RegistrationMode;
+  onOauthRegistrationModeChange: (value: RegistrationMode) => void;
+  /**
+   * OAuth counterpart of `xaaAllowPathScopedIssuer`: accept an authorization
+   * server that advertises the origin root as issuer while scoping its
+   * endpoints under a path. Off = strict RFC 8414 issuer match.
+   */
+  oauthAllowPathScopedIssuer?: boolean;
+  onOauthAllowPathScopedIssuerChange?: (value: boolean) => void;
+  xaaClientAuth?: XaaClientAuthMethod;
+  onXaaClientAuthChange?: (value: XaaClientAuthMethod) => void;
+  confidentialCimdStatus?: ConfidentialCimdCapabilityStatus;
+  confidentialCimdBlockReason?: string | null;
+  onRetryConfidentialCimd?: () => void;
   useCustomClientId: boolean;
   onUseCustomClientIdChange: (value: boolean) => void;
   clientId: string;
   onClientIdChange: (value: string) => void;
   clientSecret: string;
   onClientSecretChange: (value: string) => void;
+  hasStoredClientSecret?: boolean;
+  clearClientSecret?: boolean;
+  onClearClientSecret?: () => void;
+  onUndoClearClientSecret?: () => void;
   clientIdError: string | null;
   clientSecretError: string | null;
+  /** Hosted-mode reveal context. Both must be provided to enable the Reveal button. */
+  projectId?: string | null;
+  hostedServerId?: string | null;
+  // Cross-App Access (XAA) fields. Client id / secret / scopes reuse the props
+  // above; these are XAA-specific.
+  xaaAuthzIssuer?: string;
+  onXaaAuthzIssuerChange?: (value: string) => void;
+  xaaAllowPathScopedIssuer?: boolean;
+  onXaaAllowPathScopedIssuerChange?: (value: boolean) => void;
+  xaaSubject?: string;
+  onXaaSubjectChange?: (value: string) => void;
+  xaaEmail?: string;
+  onXaaEmailChange?: (value: string) => void;
+  /**
+   * True when Auto would select XAA for this server (an IdP mode is chosen
+   * and a client id is stored — same rule as the server's xaaConfigured).
+   * Drives the helper copy under the select.
+   */
+  autoSelectsXaa?: boolean;
+  /** Project default test identity — shown as the override placeholders. */
+  projectDefaultIdentity?: { subject: string; email: string } | null;
+  xaaDcrClientId?: string;
+  xaaDcrTokenEndpointAuthMethod?:
+    | "client_secret_post"
+    | "client_secret_basic"
+    | "none";
+  xaaDcrIssuer?: string;
+  xaaDcrClientSecretExpiresAt?: number;
+  xaaDcrRegisteredAt?: number;
+  xaaDcrStatus?: "registered" | "registering" | "uncertain";
 }
 
+const PROTOCOL_OPTIONS: Array<{
+  value: ServerFormOAuthProtocolMode;
+  label: string;
+}> = [
+  { value: "auto", label: "Auto" },
+  { value: "2026-07-28", label: "2026-07-28 (Draft)" },
+  { value: "2025-11-25", label: "2025-11-25 (Latest)" },
+  { value: "2025-06-18", label: "2025-06-18" },
+  { value: "2025-03-26", label: "2025-03-26 (Legacy)" },
+];
+
+// Options come from the shared registration-vocabulary label module, so the
+// Connect page and the XAA debugger stay keyed on the same union.
+const REGISTRATION_OPTIONS = REGISTRATION_MODE_OPTIONS;
+
 export function AuthenticationSection({
+  serverUrl,
   authType,
   onAuthTypeChange,
   showAuthSettings,
   bearerToken,
   onBearerTokenChange,
+  hasStoredBearerToken = false,
+  onRevealBearerToken,
+  isRevealingBearerToken = false,
+  bearerRevealError = null,
   oauthScopesInput,
   onOauthScopesChange,
+  oauthProtocolMode,
+  onOauthProtocolModeChange,
+  serverMcpProtocolVersion,
+  hostDefaultMcpProtocolVersion,
+  registrationMode,
+  onOauthRegistrationModeChange,
+  oauthAllowPathScopedIssuer = false,
+  onOauthAllowPathScopedIssuerChange,
+  xaaClientAuth = "none",
+  onXaaClientAuthChange,
+  confidentialCimdStatus = "idle",
+  confidentialCimdBlockReason = null,
+  onRetryConfidentialCimd,
   useCustomClientId,
   onUseCustomClientIdChange,
   clientId,
   onClientIdChange,
   clientSecret,
   onClientSecretChange,
+  hasStoredClientSecret = false,
+  clearClientSecret = false,
+  onClearClientSecret,
+  onUndoClearClientSecret,
   clientIdError,
   clientSecretError,
+  projectId = null,
+  hostedServerId = null,
+  xaaAuthzIssuer = "",
+  onXaaAuthzIssuerChange,
+  xaaAllowPathScopedIssuer = false,
+  onXaaAllowPathScopedIssuerChange,
+  xaaSubject = "",
+  onXaaSubjectChange,
+  xaaEmail = "",
+  onXaaEmailChange,
+  autoSelectsXaa = false,
+  projectDefaultIdentity = null,
+  xaaDcrClientId,
+  xaaDcrTokenEndpointAuthMethod,
+  xaaDcrIssuer,
+  xaaDcrClientSecretExpiresAt,
+  xaaDcrRegisteredAt,
+  xaaDcrStatus,
 }: AuthenticationSectionProps) {
+  const [showAdvancedOAuth, setShowAdvancedOAuth] = useState(false);
+  // Active host's enterprise-managed authorization policy (ProtocolTab
+  // Switch → mcpProfile.extensions). When on, Auto routes this server
+  // through XAA regardless of per-server configuration and an explicit
+  // method here overrides — the helper copy under the select says which.
+  // `invalid` renders as off here; the connect path surfaces the config
+  // error, this component only shapes helper text.
+  const activeMcpProfile = useActiveMcpProfile();
+  const hostPolicyEnterpriseManaged =
+    readXaaEnterprisePolicy(activeMcpProfile).kind === "on";
+  const [revealedClientSecret, setRevealedClientSecret] = useState<
+    string | null
+  >(null);
+  const [revealedClientSecretContextKey, setRevealedClientSecretContextKey] =
+    useState<string | null>(null);
+  const [isRevealedSecretVisible, setIsRevealedSecretVisible] = useState(false);
+  const [isRevealingClientSecret, setIsRevealingClientSecret] = useState(false);
+  const [revealError, setRevealError] = useState<string | null>(null);
+  const [didCopyRevealedSecret, setDidCopyRevealedSecret] = useState(false);
+  // True once the user edits the revealed value, so the field switches from
+  // showing the saved secret to showing their replacement (and won't refill
+  // itself if they clear it back to empty).
+  const [isReplacingSecret, setIsReplacingSecret] = useState(false);
+  const [isBearerTokenVisible, setIsBearerTokenVisible] = useState(false);
+
+  const xaaFlagEnabled = useFeatureFlagEnabled("xaa");
+  // Keep the XAA option visible if a server is already configured with it,
+  // even when the flag is off, so the trigger doesn't render blank for it.
+  // Auto is un-gated: its discover behavior (no auth first, OAuth on 401) is
+  // for everyone — only the XAA leg and its mention stay behind the flag.
+  const showXaaOption = xaaFlagEnabled === true || authType === "xaa";
+
+  const canRevealClientSecret =
+    hasStoredClientSecret &&
+    !clearClientSecret &&
+    !!projectId &&
+    !!hostedServerId;
+  const revealContextKey = canRevealClientSecret
+    ? `${projectId}:${hostedServerId}`
+    : null;
+  const visibleRevealedClientSecret =
+    revealedClientSecretContextKey === revealContextKey
+      ? revealedClientSecret
+      : null;
+
+  const canRevealBearerToken =
+    hasStoredBearerToken &&
+    !bearerToken &&
+    !!projectId &&
+    !!hostedServerId &&
+    !!onRevealBearerToken;
+
+  // Drop any revealed value if the saved-secret context disappears (e.g.
+  // user pasted a replacement, toggled Clear, or switched servers).
+  useEffect(() => {
+    if (revealedClientSecretContextKey !== revealContextKey) {
+      setRevealedClientSecret(null);
+      setRevealedClientSecretContextKey(null);
+      setIsRevealedSecretVisible(false);
+      setRevealError(null);
+      setDidCopyRevealedSecret(false);
+      setIsReplacingSecret(false);
+    }
+  }, [revealContextKey, revealedClientSecretContextKey]);
+
+  const handleRevealClientSecret = async () => {
+    if (
+      !projectId ||
+      !hostedServerId ||
+      !revealContextKey ||
+      isRevealingClientSecret
+    )
+      return;
+    setIsRevealingClientSecret(true);
+    setRevealError(null);
+    setIsReplacingSecret(false);
+    try {
+      const result = await fetchOAuthClientSecret({
+        projectId,
+        serverId: hostedServerId,
+      });
+      setRevealedClientSecret(result.clientSecret);
+      setRevealedClientSecretContextKey(revealContextKey);
+      setIsRevealedSecretVisible(true);
+    } catch (error) {
+      setRevealedClientSecret(null);
+      setRevealedClientSecretContextKey(null);
+      setIsRevealedSecretVisible(false);
+      setRevealError(
+        error instanceof Error
+          ? error.message
+          : "Failed to reveal client secret"
+      );
+    } finally {
+      setIsRevealingClientSecret(false);
+    }
+  };
+
+  const handleHideRevealedSecret = () => {
+    setRevealedClientSecret(null);
+    setRevealedClientSecretContextKey(null);
+    setIsRevealedSecretVisible(false);
+    setRevealError(null);
+    setDidCopyRevealedSecret(false);
+    // Collapsing back to the idle state removes the only input, so discard any
+    // in-progress replacement rather than leaving a hidden pending change.
+    if (isReplacingSecret) {
+      onClientSecretChange("");
+    }
+    setIsReplacingSecret(false);
+  };
+
+  const handleClearClientSecret = () => {
+    onClientSecretChange("");
+    setRevealedClientSecret(null);
+    setRevealedClientSecretContextKey(null);
+    setIsRevealedSecretVisible(false);
+    setRevealError(null);
+    setDidCopyRevealedSecret(false);
+    setIsReplacingSecret(false);
+    onClearClientSecret?.();
+  };
+
+  const handleCopyRevealedSecret = async (value: string) => {
+    if (!value) return;
+    try {
+      await navigator.clipboard.writeText(value);
+      setDidCopyRevealedSecret(true);
+      setTimeout(() => setDidCopyRevealedSecret(false), 2000);
+    } catch {
+      // Clipboard failures are non-fatal; surface nothing rather than overwrite reveal state.
+    }
+  };
+
+  // While the field is showing the saved secret (not yet edited) it renders the
+  // revealed value; once the user starts editing it tracks their replacement.
+  const secretFieldValue = isReplacingSecret
+    ? clientSecret
+    : visibleRevealedClientSecret ?? "";
+  const showClientCredentials =
+    registrationMode === "preregistered" || useCustomClientId;
+  const effectiveXaaRegistrationMode =
+    registrationMode === "cimd" || registrationMode === "dcr"
+      ? registrationMode
+      : "preregistered";
+  const showXaaClientCredentials =
+    effectiveXaaRegistrationMode === "preregistered";
+  const showXaaClientAuthPicker =
+    confidentialCimdStatus === "ready" || xaaClientAuth === "private_key_jwt";
+  // The plan preview needs a concrete version, but the form state and dropdown
+  // retain "auto". Fresh negotiated MCP evidence is applied later when a flow
+  // actually starts; this preview only has explicit wire-pin evidence.
+  const effectiveWireProtocolVersion =
+    serverMcpProtocolVersion ??
+    hostDefaultMcpProtocolVersion ??
+    activeMcpProfile?.mcpProtocolVersion;
+  const effectiveOauthProtocolMode = resolveEffectiveOauthProtocolMode(
+    oauthProtocolMode,
+    effectiveWireProtocolVersion
+  );
+  const oauthPlan =
+    authType === "oauth" || authType === "auto"
+      ? resolveAuthorizationPlan({
+          serverUrl,
+          protocolMode: effectiveOauthProtocolMode,
+          registrationMode: registrationMode,
+          clientId: showClientCredentials ? clientId : undefined,
+          clientSecret: showClientCredentials ? clientSecret : undefined,
+          hasClientSecret: showClientCredentials
+            ? hasStoredClientSecret && !clearClientSecret
+            : undefined,
+          authMode: "interactive",
+        })
+      : null;
+
+  const oauthPlanVisibleBlockers =
+    oauthPlan?.status === "blocked"
+      ? (oauthPlan.blockerDetails ?? []).filter(
+          (blocker) =>
+            !(
+              registrationMode === "preregistered" &&
+              clientId.trim() === "" &&
+              blocker.code === "PREREGISTERED_MISSING_CLIENT_ID"
+            )
+        )
+      : [];
+  const showOauthPlanBanner =
+    oauthPlan != null &&
+    (oauthPlanVisibleBlockers.length > 0 || oauthPlan.warnings.length > 0);
+
   return (
     <div className="space-y-4">
       <div className="border border-border rounded-lg overflow-hidden">
@@ -50,110 +391,586 @@ export function AuthenticationSection({
           <label className="block text-sm font-medium text-foreground">
             Authentication
           </label>
-          <Select value={authType} onValueChange={onAuthTypeChange}>
+          <Select
+            value={authType}
+            onValueChange={(value: ServerFormAuthType) => {
+              if (value !== "oauth" && value !== "auto") {
+                setShowAdvancedOAuth(false);
+              }
+              onAuthTypeChange(value);
+            }}
+          >
             <SelectTrigger className="w-full">
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
+              <SelectItem value="auto">Auto</SelectItem>
               <SelectItem value="none">No Authentication</SelectItem>
               <SelectItem value="bearer">Bearer Token</SelectItem>
-              <SelectItem value="oauth">OAuth 2.0</SelectItem>
+              <SelectItem value="oauth">OAuth</SelectItem>
+              {showXaaOption && (
+                <SelectItem value="xaa">Cross-App Access (XAA)</SelectItem>
+              )}
             </SelectContent>
           </Select>
+          {authType === "auto" && (
+            <p className="text-xs text-muted-foreground/80">
+              {hostPolicyEnterpriseManaged
+                ? autoSelectsXaa
+                  ? "Host policy: enterprise-managed — uses Cross-App Access for this server."
+                  : "Host policy: enterprise-managed — fails to connect until an XAA client registration is added or an explicit method overrides."
+                : autoSelectsXaa
+                ? "Uses Cross-App Access for this server."
+                : "Anonymous first, then OAuth if required."}
+            </p>
+          )}
+          {hostPolicyEnterpriseManaged && authType !== "auto" && (
+            <p className="text-xs text-muted-foreground/80">
+              Overrides the host&apos;s enterprise-managed authorization policy.
+            </p>
+          )}
         </div>
 
         {/* Bearer Token Settings */}
         {showAuthSettings && authType === "bearer" && (
           <div className="px-3 pb-3 space-y-2 border-t border-border bg-muted/30">
-            <label className="block text-sm font-medium text-foreground pt-3">
-              Bearer Token
-            </label>
-            <Input
-              type="password"
-              value={bearerToken}
-              onChange={(e) => onBearerTokenChange(e.target.value)}
-              placeholder="Enter your bearer token"
-              className="h-10"
-            />
+            <div className="flex items-center justify-between gap-3 pt-3">
+              <label className="block text-sm font-medium text-foreground">
+                Bearer Token
+              </label>
+              {canRevealBearerToken && (
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  className="h-8 px-2 text-xs"
+                  onClick={() => onRevealBearerToken?.()}
+                  disabled={isRevealingBearerToken}
+                >
+                  {isRevealingBearerToken ? (
+                    <Loader2 className="h-3 w-3 animate-spin" />
+                  ) : (
+                    "Reveal"
+                  )}
+                </Button>
+              )}
+            </div>
+            <div className="relative">
+              <Input
+                type={isBearerTokenVisible ? "text" : "password"}
+                value={bearerToken}
+                onChange={(e) => onBearerTokenChange(e.target.value)}
+                placeholder={
+                  hasStoredBearerToken && !bearerToken
+                    ? "Saved — enter a new value to replace"
+                    : "Enter your bearer token"
+                }
+                className="h-10 pr-10"
+              />
+              <button
+                type="button"
+                aria-label={
+                  isBearerTokenVisible
+                    ? "Hide bearer token"
+                    : "Show bearer token"
+                }
+                title={
+                  isBearerTokenVisible
+                    ? "Hide bearer token"
+                    : "Show bearer token"
+                }
+                onClick={() => setIsBearerTokenVisible((prev) => !prev)}
+                className="absolute right-2 top-1/2 -translate-y-1/2 p-1 text-muted-foreground/60 transition-colors hover:text-foreground cursor-pointer"
+              >
+                {isBearerTokenVisible ? (
+                  <EyeOff className="h-4 w-4" />
+                ) : (
+                  <Eye className="h-4 w-4" />
+                )}
+              </button>
+            </div>
+            {hasStoredBearerToken && !bearerToken && (
+              <p className="text-xs text-muted-foreground">
+                A saved token is hidden. Leave blank to keep it, or enter a new
+                value to replace it.
+              </p>
+            )}
+            {bearerRevealError && (
+              <p className="text-xs text-red-500">{bearerRevealError}</p>
+            )}
           </div>
         )}
 
         {/* OAuth Settings */}
-        {showAuthSettings && authType === "oauth" && (
-          <div className="px-3 pb-3 space-y-3 border-t border-border bg-muted/30">
-            <div className="space-y-2 pt-3">
-              <label className="block text-sm font-medium text-foreground">
-                OAuth Scopes
-              </label>
-              <Input
-                value={oauthScopesInput}
-                onChange={(e) => onOauthScopesChange(e.target.value)}
-                placeholder="mcp:* or custom scopes separated by spaces"
-                className="h-10"
-              />
-              <p className="text-xs text-muted-foreground">
-                Default: mcp:* (space-separated for multiple scopes)
-              </p>
-            </div>
-
-            <div className="space-y-2">
-              <div className="flex items-center space-x-2">
-                <input
-                  type="checkbox"
-                  id="useCustomClientId"
-                  checked={useCustomClientId}
-                  onChange={(e) => onUseCustomClientIdChange(e.target.checked)}
-                  className="rounded"
-                />
-                <label
-                  htmlFor="useCustomClientId"
-                  className="text-sm font-medium text-foreground"
-                >
-                  Use custom OAuth credentials
-                </label>
-              </div>
-              <p className="text-xs text-muted-foreground">
-                Leave unchecked to use the server's default OAuth flow
-              </p>
-            </div>
-
-            {useCustomClientId && (
-              <div className="space-y-3">
-                <div className="space-y-2">
-                  <label className="block text-sm font-medium text-foreground">
-                    Client ID
-                  </label>
-                  <Input
-                    value={clientId}
-                    onChange={(e) => onClientIdChange(e.target.value)}
-                    placeholder="Your OAuth Client ID"
-                    className={`h-10 ${clientIdError ? "border-red-500" : ""}`}
-                  />
-                  {clientIdError && (
-                    <p className="text-xs text-red-500">{clientIdError}</p>
-                  )}
-                </div>
-
-                <div className="space-y-2">
-                  <label className="block text-sm font-medium text-foreground">
-                    Client Secret (Optional)
-                  </label>
-                  <Input
-                    type="password"
-                    value={clientSecret}
-                    onChange={(e) => onClientSecretChange(e.target.value)}
-                    placeholder="Your OAuth Client Secret"
-                    className={`h-10 ${clientSecretError ? "border-red-500" : ""}`}
-                  />
-                  {clientSecretError && (
-                    <p className="text-xs text-red-500">{clientSecretError}</p>
-                  )}
-                  <p className="text-xs text-muted-foreground">
-                    Optional for public clients using PKCE
+        {showAuthSettings && (authType === "oauth" || authType === "auto") && (
+          <div className="border-t border-border bg-muted/30">
+            {oauthPlan && showOauthPlanBanner && (
+              <div className="px-3 py-3 space-y-2 border-b border-border bg-background/60">
+                {oauthPlanVisibleBlockers.length > 0 && (
+                  <p className="text-sm text-destructive">
+                    {oauthPlanVisibleBlockers[0]?.message}
                   </p>
-                </div>
+                )}
+                {oauthPlan.warnings.length > 0 && (
+                  <p className="text-xs text-amber-700">
+                    {oauthPlan.warnings[0]}
+                  </p>
+                )}
               </div>
             )}
+
+            <button
+              type="button"
+              onClick={() => setShowAdvancedOAuth(!showAdvancedOAuth)}
+              className="w-full flex items-center gap-2 px-3 py-2 hover:bg-muted/50 transition-colors cursor-pointer"
+            >
+              {showAdvancedOAuth ? (
+                <ChevronDown className="h-3.5 w-3.5 text-muted-foreground" />
+              ) : (
+                <ChevronRight className="h-3.5 w-3.5 text-muted-foreground" />
+              )}
+              <span className="text-xs font-medium text-muted-foreground">
+                Advanced Settings
+              </span>
+            </button>
+
+            {showAdvancedOAuth && (
+              <div className="px-3 pb-3 space-y-3">
+                <div className="grid gap-3 md:grid-cols-2">
+                  <div className="space-y-2">
+                    <label className="block text-sm font-medium text-foreground">
+                      Protocol
+                    </label>
+                    <Select
+                      value={oauthProtocolMode}
+                      onValueChange={(value: ServerFormOAuthProtocolMode) =>
+                        onOauthProtocolModeChange(value)
+                      }
+                    >
+                      <SelectTrigger className="w-full h-10">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {PROTOCOL_OPTIONS.map((option) => (
+                          <SelectItem key={option.value} value={option.value}>
+                            {option.label}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+
+                  <div className="space-y-2">
+                    <label className="block text-sm font-medium text-foreground">
+                      Registration Strategy
+                    </label>
+                    <Select
+                      value={registrationMode}
+                      onValueChange={(value: RegistrationMode) => {
+                        onOauthRegistrationModeChange(value);
+                        onUseCustomClientIdChange(value === "preregistered");
+                      }}
+                    >
+                      <SelectTrigger className="w-full h-10">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {REGISTRATION_OPTIONS.map((option) => (
+                          <SelectItem key={option.value} value={option.value}>
+                            {option.label}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                    {registrationMode === "cimd" &&
+                      oauthPlan?.clientIdMetadataUrl && (
+                        <p className="text-xs text-muted-foreground break-all">
+                          SDK client metadata URL:{" "}
+                          {oauthPlan.clientIdMetadataUrl}
+                        </p>
+                      )}
+                  </div>
+                </div>
+
+                <div className="space-y-2">
+                  <label className="block text-sm font-medium text-foreground">
+                    Scope Override
+                  </label>
+                  <Input
+                    value={oauthScopesInput}
+                    onChange={(e) => onOauthScopesChange(e.target.value)}
+                    placeholder="Optional scopes separated by spaces"
+                    spellCheck={false}
+                    autoComplete="off"
+                    data-1p-ignore
+                    data-lpignore="true"
+                    data-form-type="other"
+                    className="h-10"
+                  />
+                </div>
+
+                <div className="flex items-start gap-2 pt-1">
+                  <Switch
+                    id="oauth-allow-path-scoped-issuer"
+                    checked={oauthAllowPathScopedIssuer}
+                    onCheckedChange={(checked) =>
+                      onOauthAllowPathScopedIssuerChange?.(checked)
+                    }
+                  />
+                  <div className="space-y-0.5">
+                    <label
+                      htmlFor="oauth-allow-path-scoped-issuer"
+                      className="block text-xs font-medium text-foreground"
+                    >
+                      Path-scoped authorization server
+                    </label>
+                    <p className="text-xs text-muted-foreground">
+                      Allow the metadata to advertise the origin root as issuer
+                      while the OAuth endpoints live under a different path. Off
+                      keeps the strict RFC 8414 issuer match.
+                    </p>
+                  </div>
+                </div>
+
+                {showClientCredentials && (
+                  <div className="space-y-3">
+                    <div className="space-y-2">
+                      <label className="block text-sm font-medium text-foreground">
+                        Client ID
+                        {registrationMode === "preregistered" ? (
+                          <span className="text-destructive" aria-hidden="true">
+                            {" *"}
+                          </span>
+                        ) : null}
+                      </label>
+                      <Input
+                        value={clientId}
+                        onChange={(e) => onClientIdChange(e.target.value)}
+                        placeholder="Your OAuth Client ID"
+                        aria-required={
+                          registrationMode === "preregistered"
+                            ? true
+                            : undefined
+                        }
+                        spellCheck={false}
+                        autoComplete="off"
+                        data-1p-ignore
+                        data-lpignore="true"
+                        data-form-type="other"
+                        className={`h-10 ${
+                          clientIdError ? "border-red-500" : ""
+                        }`}
+                      />
+                      {clientIdError && (
+                        <p className="text-xs text-red-500">{clientIdError}</p>
+                      )}
+                    </div>
+
+                    <div className="space-y-2">
+                      <div className="flex items-center justify-between gap-3">
+                        <label className="block text-sm font-medium text-foreground">
+                          Client Secret (Optional)
+                        </label>
+                        <div className="flex items-center gap-1">
+                          {canRevealClientSecret &&
+                            !visibleRevealedClientSecret && (
+                              <Button
+                                type="button"
+                                variant="ghost"
+                                size="sm"
+                                className="h-8 px-2 text-xs"
+                                onClick={() => void handleRevealClientSecret()}
+                                disabled={isRevealingClientSecret}
+                              >
+                                {isRevealingClientSecret ? (
+                                  <Loader2 className="h-3 w-3 animate-spin" />
+                                ) : (
+                                  "Reveal"
+                                )}
+                              </Button>
+                            )}
+                          {visibleRevealedClientSecret && (
+                            <Button
+                              type="button"
+                              variant="ghost"
+                              size="sm"
+                              className="h-8 px-2 text-xs"
+                              onClick={handleHideRevealedSecret}
+                            >
+                              Hide
+                            </Button>
+                          )}
+                          {hasStoredClientSecret && !clearClientSecret && (
+                            <Button
+                              type="button"
+                              variant="ghost"
+                              size="sm"
+                              className="h-8 px-2 text-xs"
+                              onClick={handleClearClientSecret}
+                            >
+                              Clear
+                            </Button>
+                          )}
+                          {hasStoredClientSecret && clearClientSecret && (
+                            <Button
+                              type="button"
+                              variant="ghost"
+                              size="sm"
+                              className="h-8 px-2 text-xs"
+                              onClick={onUndoClearClientSecret}
+                            >
+                              Undo
+                            </Button>
+                          )}
+                        </div>
+                      </div>
+                      {hasStoredClientSecret && clearClientSecret ? (
+                        <p className="text-xs text-muted-foreground">
+                          Saved client secret will be removed when you save.
+                        </p>
+                      ) : visibleRevealedClientSecret !== null ? (
+                        <>
+                          <div className="relative">
+                            <Input
+                              type={
+                                isRevealedSecretVisible ? "text" : "password"
+                              }
+                              value={secretFieldValue}
+                              onChange={(e) => {
+                                if (!isReplacingSecret)
+                                  setIsReplacingSecret(true);
+                                onClientSecretChange(e.target.value);
+                              }}
+                              placeholder="Enter a new value to replace."
+                              data-testid="revealed-client-secret"
+                              spellCheck={false}
+                              autoComplete="off"
+                              data-1p-ignore
+                              data-lpignore="true"
+                              data-form-type="other"
+                              className={`h-10 pr-16 font-mono ${
+                                clientSecretError ? "border-red-500" : ""
+                              }`}
+                            />
+                            <div className="absolute right-2 top-1/2 flex -translate-y-1/2 items-center gap-1">
+                              <button
+                                type="button"
+                                aria-label={
+                                  isRevealedSecretVisible
+                                    ? "Hide client secret"
+                                    : "Show client secret"
+                                }
+                                title={
+                                  isRevealedSecretVisible
+                                    ? "Hide client secret"
+                                    : "Show client secret"
+                                }
+                                onClick={() =>
+                                  setIsRevealedSecretVisible((prev) => !prev)
+                                }
+                                className="p-1 text-muted-foreground/60 transition-colors hover:text-foreground cursor-pointer"
+                              >
+                                {isRevealedSecretVisible ? (
+                                  <EyeOff className="h-4 w-4" />
+                                ) : (
+                                  <Eye className="h-4 w-4" />
+                                )}
+                              </button>
+                              <button
+                                type="button"
+                                aria-label="Copy client secret"
+                                title="Copy client secret"
+                                onClick={() =>
+                                  void handleCopyRevealedSecret(
+                                    secretFieldValue
+                                  )
+                                }
+                                className="p-1 text-muted-foreground/50 transition-colors hover:text-foreground cursor-pointer"
+                              >
+                                {didCopyRevealedSecret ? (
+                                  <Check className="h-4 w-4 text-green-500" />
+                                ) : (
+                                  <Copy className="h-4 w-4" />
+                                )}
+                              </button>
+                            </div>
+                          </div>
+                          {!isReplacingSecret && (
+                            <p className="text-xs text-muted-foreground">
+                              Editing this replaces the saved secret when you
+                              save.
+                            </p>
+                          )}
+                        </>
+                      ) : canRevealClientSecret ? (
+                        <p className="text-xs text-muted-foreground">
+                          A client secret is saved. Reveal it to view or replace
+                          it.
+                        </p>
+                      ) : (
+                        <Input
+                          type="password"
+                          value={clientSecret}
+                          onChange={(e) => onClientSecretChange(e.target.value)}
+                          placeholder={
+                            hasStoredClientSecret
+                              ? "Enter a new value to replace."
+                              : "Your OAuth Client Secret"
+                          }
+                          spellCheck={false}
+                          autoComplete="off"
+                          data-1p-ignore
+                          data-lpignore="true"
+                          data-form-type="other"
+                          className={`h-10 ${
+                            clientSecretError ? "border-red-500" : ""
+                          }`}
+                        />
+                      )}
+                      {clientSecretError && (
+                        <p className="text-xs text-red-500">
+                          {clientSecretError}
+                        </p>
+                      )}
+                      {revealError && (
+                        <p className="text-xs text-red-500">{revealError}</p>
+                      )}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Cross-App Access (XAA) Settings */}
+        {showAuthSettings && authType === "xaa" && (
+          <div className="px-3 pb-3 pt-3 border-t border-border bg-muted/30 space-y-3">
+            <div className="grid gap-3 md:grid-cols-2">
+              <div className="space-y-2">
+                <div className="flex items-center gap-1 text-sm font-medium text-foreground">
+                  <span>Registration Strategy</span>
+                  {effectiveXaaRegistrationMode === "dcr" && (
+                    <XaaDcrRegistrationStatus
+                      status={xaaDcrStatus}
+                      clientId={xaaDcrClientId}
+                      issuer={xaaDcrIssuer}
+                      registeredAt={xaaDcrRegisteredAt}
+                      clientSecretExpiresAt={xaaDcrClientSecretExpiresAt}
+                      tokenEndpointAuthMethod={xaaDcrTokenEndpointAuthMethod}
+                    />
+                  )}
+                </div>
+                <Select
+                  value={registrationMode}
+                  onValueChange={(value: RegistrationMode) =>
+                    onOauthRegistrationModeChange(value)
+                  }
+                >
+                  <SelectTrigger
+                    className="w-full h-10"
+                    aria-label="XAA registration"
+                  >
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {REGISTRATION_OPTIONS.map((option) => (
+                      <SelectItem key={option.value} value={option.value}>
+                        {option.label}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                {registrationMode === "auto" && (
+                  <p className="text-xs text-muted-foreground">
+                    Automatic keeps the existing XAA preregistered behavior. DCR
+                    runs only when explicitly selected.
+                  </p>
+                )}
+              </div>
+
+              {effectiveXaaRegistrationMode === "cimd" &&
+                showXaaClientAuthPicker && (
+                  <div className="space-y-2">
+                    <label className="block text-sm font-medium text-foreground">
+                      Client authentication
+                    </label>
+                    <Select
+                      value={xaaClientAuth}
+                      onValueChange={(value: XaaClientAuthMethod) =>
+                        onXaaClientAuthChange?.(value)
+                      }
+                    >
+                      <SelectTrigger className="w-full h-10">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="none">Public</SelectItem>
+                        <SelectItem
+                          value="private_key_jwt"
+                          disabled={
+                            confidentialCimdStatus !== "ready" &&
+                            xaaClientAuth !== "private_key_jwt"
+                          }
+                        >
+                          Confidential (private_key_jwt)
+                        </SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+                )}
+            </div>
+
+            {effectiveXaaRegistrationMode === "cimd" &&
+              xaaClientAuth === "private_key_jwt" &&
+              confidentialCimdBlockReason && (
+                <div className="flex items-start justify-between gap-3">
+                  <p className="text-xs text-destructive">
+                    {confidentialCimdBlockReason}
+                  </p>
+                  {confidentialCimdStatus === "error" &&
+                    onRetryConfidentialCimd && (
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="outline"
+                        className="h-7 shrink-0 px-2 text-xs"
+                        onClick={onRetryConfidentialCimd}
+                      >
+                        Retry
+                      </Button>
+                    )}
+                </div>
+              )}
+            <XaaCredentialFields
+              clientId={clientId}
+              onClientIdChange={onClientIdChange}
+              clientIdError={clientIdError}
+              clientIdRequired={showXaaClientCredentials}
+              showClientCredentials={showXaaClientCredentials}
+              clientSecret={clientSecret}
+              onClientSecretChange={onClientSecretChange}
+              hasStoredClientSecret={hasStoredClientSecret}
+              clearClientSecret={clearClientSecret}
+              onClearClientSecret={onClearClientSecret}
+              onUndoClearClientSecret={onUndoClearClientSecret}
+              clientSecretError={clientSecretError}
+              scopes={oauthScopesInput}
+              onScopesChange={onOauthScopesChange}
+              xaaAuthzIssuer={xaaAuthzIssuer}
+              onXaaAuthzIssuerChange={(v) => onXaaAuthzIssuerChange?.(v)}
+              xaaAllowPathScopedIssuer={xaaAllowPathScopedIssuer}
+              onXaaAllowPathScopedIssuerChange={(v) =>
+                onXaaAllowPathScopedIssuerChange?.(v)
+              }
+              xaaSubject={xaaSubject}
+              onXaaSubjectChange={(v) => onXaaSubjectChange?.(v)}
+              xaaEmail={xaaEmail}
+              onXaaEmailChange={(v) => onXaaEmailChange?.(v)}
+              projectDefaultIdentity={projectDefaultIdentity}
+              projectId={projectId}
+              hostedServerId={hostedServerId}
+            />
           </div>
         )}
       </div>

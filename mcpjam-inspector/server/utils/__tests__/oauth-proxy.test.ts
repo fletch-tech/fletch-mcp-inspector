@@ -1,155 +1,198 @@
-import { describe, it, expect } from "vitest";
-import { validateUrl, OAuthProxyError } from "../oauth-proxy.js";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { EventEmitter } from "node:events";
+import { Readable } from "node:stream";
+import { executeOAuthProxy, OAuthProxyError } from "../oauth-proxy.js";
 
-describe("validateUrl", () => {
-  describe("basic validation", () => {
-    it("accepts valid HTTPS URL", () => {
-      const url = validateUrl("https://auth.example.com/token");
-      expect(url.hostname).toBe("auth.example.com");
-    });
+const httpRequestMock = vi.hoisted(() => vi.fn());
+const httpsRequestMock = vi.hoisted(() => vi.fn());
+const dnsLookupMock = vi.hoisted(() => vi.fn());
 
-    it("accepts valid HTTP URL", () => {
-      const url = validateUrl("http://auth.example.com/token");
-      expect(url.hostname).toBe("auth.example.com");
-    });
+vi.mock("node:dns", () => ({
+  lookup: dnsLookupMock,
+}));
+vi.mock("node:http", () => ({
+  default: { request: httpRequestMock },
+  request: httpRequestMock,
+}));
+vi.mock("node:https", () => ({
+  default: { request: httpsRequestMock },
+  request: httpsRequestMock,
+}));
 
-    it("rejects empty URL", () => {
-      expect(() => validateUrl("")).toThrow(OAuthProxyError);
-      expect(() => validateUrl("")).toThrow("Missing url parameter");
-    });
+function installSuccessfulRequestMock(requestMock: ReturnType<typeof vi.fn>) {
+  requestMock.mockImplementation(
+    (
+      _url: URL,
+      _options: unknown,
+      onResponse: (response: Readable) => void,
+    ) => {
+      const request = new EventEmitter() as EventEmitter & {
+        end: () => void;
+        write: () => void;
+      };
+      request.write = vi.fn();
+      request.end = () => {
+        queueMicrotask(() => {
+          const response = Readable.from([JSON.stringify({ ok: true })]);
+          Object.assign(response, {
+            statusCode: 200,
+            statusMessage: "OK",
+            headers: { "content-type": "application/json" },
+          });
+          onResponse(response);
+        });
+      };
+      return request;
+    },
+  );
+}
 
-    it("rejects invalid URL format", () => {
-      expect(() => validateUrl("not-a-url")).toThrow("Invalid URL format");
-    });
+beforeEach(() => {
+  vi.clearAllMocks();
+  dnsLookupMock.mockImplementation(
+    (
+      _hostname: string,
+      _options: unknown,
+      callback: (error: Error | null, addresses: unknown) => void,
+    ) => callback(null, [{ address: "93.184.216.34", family: 4 }]),
+  );
+  installSuccessfulRequestMock(httpRequestMock);
+  installSuccessfulRequestMock(httpsRequestMock);
+});
 
-    it("rejects non-HTTP protocols", () => {
-      expect(() => validateUrl("ftp://example.com")).toThrow("Invalid protocol");
-      expect(() => validateUrl("file:///etc/passwd")).toThrow(
-        "Invalid protocol",
+describe("validateUrl — private IP blocking (httpsOnly)", () => {
+  const privateHosts = [
+    "https://127.0.0.1/foo",
+    "https://10.0.0.1/foo",
+    "https://172.16.0.1/foo",
+    "https://192.168.1.1/foo",
+    "https://169.254.169.254/foo",
+    "https://[::1]/foo",
+    "https://0.0.0.0/foo",
+    "https://localhost/foo",
+    "https://[::]/foo",
+    "https://[fc00::1]/foo",
+    "https://[fd12::1]/foo",
+    "https://[fe80::1]/foo",
+    "https://[fe90::1]/foo",
+    "https://[fea0::1]/foo",
+    "https://[febf::1]/foo",
+  ];
+
+  for (const url of privateHosts) {
+    it(`blocks ${url} when httpsOnly`, async () => {
+      await expect(executeOAuthProxy({ url, httpsOnly: true })).rejects.toThrow(
+        OAuthProxyError,
       );
+
+      await expect(
+        executeOAuthProxy({ url, httpsOnly: true }),
+      ).rejects.toMatchObject({ status: 400 });
     });
+  }
+
+  it("allows https://example.com/foo when httpsOnly", async () => {
+    const result = await executeOAuthProxy({
+      url: "https://example.com/foo",
+      httpsOnly: true,
+    });
+    expect(result.status).toBe(200);
   });
 
-  describe("httpsOnly mode", () => {
-    it("accepts HTTPS when httpsOnly is true", () => {
-      const url = validateUrl("https://auth.example.com/token", true);
-      expect(url.protocol).toBe("https:");
+  it("allows an explicit loopback URL when httpsOnly is false", async () => {
+    const result = await executeOAuthProxy({
+      url: "http://127.0.0.1",
+      httpsOnly: false,
     });
+    expect(result.status).toBe(200);
+  });
+});
 
-    it("rejects HTTP when httpsOnly is true", () => {
-      expect(() =>
-        validateUrl("http://auth.example.com/token", true),
-      ).toThrow("Only HTTPS targets are allowed");
+describe("IPv6 checks must not false-positive on hostnames", () => {
+  it("allows https://fdroid.org (hostname starts with 'fd')", async () => {
+    const result = await executeOAuthProxy({
+      url: "https://fdroid.org/foo",
+      httpsOnly: true,
     });
+    expect(result.status).toBe(200);
   });
 
-  describe("private IP blocking (SSRF prevention)", () => {
-    it("blocks localhost", () => {
-      expect(() => validateUrl("http://localhost/api")).toThrow(
-        "private/internal",
-      );
-      expect(() => validateUrl("http://localhost:8080/api")).toThrow(
-        "private/internal",
-      );
+  it("allows https://fc-example.com (hostname starts with 'fc')", async () => {
+    const result = await executeOAuthProxy({
+      url: "https://fc-example.com/foo",
+      httpsOnly: true,
+    });
+    expect(result.status).toBe(200);
+  });
+
+  it("allows https://fe90.example.com (hostname matches fe80::/10 regex)", async () => {
+    const result = await executeOAuthProxy({
+      url: "https://fe90.example.com/foo",
+      httpsOnly: true,
+    });
+    expect(result.status).toBe(200);
+  });
+
+  it("still blocks actual IPv6 private addresses like [fc00::1]", async () => {
+    await expect(
+      executeOAuthProxy({ url: "https://[fc00::1]/foo", httpsOnly: true }),
+    ).rejects.toMatchObject({ status: 400 });
+  });
+
+  it("still blocks actual IPv6 link-local like [fe80::1]", async () => {
+    await expect(
+      executeOAuthProxy({ url: "https://[fe80::1]/foo", httpsOnly: true }),
+    ).rejects.toMatchObject({ status: 400 });
+  });
+});
+
+describe("DNS validation — pinned request preserves original hostname for TLS", () => {
+  it("uses the original hostname while pinning the validated address", async () => {
+    await executeOAuthProxy({
+      url: "https://example.com/path",
+      httpsOnly: true,
     });
 
-    it("blocks 127.0.0.1", () => {
-      expect(() => validateUrl("http://127.0.0.1/")).toThrow(
-        "private/internal",
-      );
-      expect(() => validateUrl("http://127.0.0.1:3000/")).toThrow(
-        "private/internal",
-      );
-    });
+    expect(httpsRequestMock.mock.calls[0][0]).toEqual(
+      new URL("https://example.com/path"),
+    );
+    expect(httpsRequestMock.mock.calls[0][1].servername).toBe("example.com");
+    expect(httpsRequestMock.mock.calls[0][1].lookup).toBeTypeOf("function");
+  });
+});
 
-    it("blocks 127.x.x.x range", () => {
-      expect(() => validateUrl("http://127.0.0.2/")).toThrow(
-        "private/internal",
-      );
-      expect(() => validateUrl("http://127.255.255.255/")).toThrow(
-        "private/internal",
-      );
-    });
+describe("DNS rebinding protection (httpsOnly)", () => {
+  it("blocks a hostname that resolves to a private IPv4", async () => {
+    dnsLookupMock.mockImplementationOnce(
+      (
+        _hostname: string,
+        _options: unknown,
+        callback: (error: Error | null, addresses: unknown) => void,
+      ) => callback(null, [{ address: "127.0.0.1", family: 4 }]),
+    );
 
-    it("blocks 10.x.x.x (private class A)", () => {
-      expect(() => validateUrl("http://10.0.0.1/")).toThrow(
-        "private/internal",
-      );
-      expect(() => validateUrl("http://10.255.255.255/")).toThrow(
-        "private/internal",
-      );
-    });
+    await expect(
+      executeOAuthProxy({
+        url: "https://evil.example.com/foo",
+        httpsOnly: true,
+      }),
+    ).rejects.toMatchObject({ status: 400 });
+  });
 
-    it("blocks 172.16-31.x.x (private class B)", () => {
-      expect(() => validateUrl("http://172.16.0.1/")).toThrow(
-        "private/internal",
-      );
-      expect(() => validateUrl("http://172.31.255.255/")).toThrow(
-        "private/internal",
-      );
-    });
+  it("blocks a hostname that resolves to a private IPv6", async () => {
+    dnsLookupMock.mockImplementationOnce(
+      (
+        _hostname: string,
+        _options: unknown,
+        callback: (error: Error | null, addresses: unknown) => void,
+      ) => callback(null, [{ address: "::1", family: 6 }]),
+    );
 
-    it("allows 172.15.x.x and 172.32.x.x (not private)", () => {
-      expect(() => validateUrl("http://172.15.0.1/")).not.toThrow();
-      expect(() => validateUrl("http://172.32.0.1/")).not.toThrow();
-    });
-
-    it("blocks 192.168.x.x (private class C)", () => {
-      expect(() => validateUrl("http://192.168.0.1/")).toThrow(
-        "private/internal",
-      );
-      expect(() => validateUrl("http://192.168.1.1/")).toThrow(
-        "private/internal",
-      );
-    });
-
-    it("blocks 169.254.x.x (link-local / cloud metadata)", () => {
-      expect(() => validateUrl("http://169.254.169.254/")).toThrow(
-        "private/internal",
-      );
-      expect(() =>
-        validateUrl(
-          "http://169.254.169.254/latest/meta-data/iam/security-credentials/",
-        ),
-      ).toThrow("private/internal");
-    });
-
-    it("blocks metadata.google.internal", () => {
-      expect(() =>
-        validateUrl("http://metadata.google.internal/computeMetadata/v1/"),
-      ).toThrow("private/internal");
-    });
-
-    it("blocks 0.0.0.0", () => {
-      expect(() => validateUrl("http://0.0.0.0/")).toThrow("private/internal");
-    });
-
-    it("blocks IPv6 loopback", () => {
-      expect(() => validateUrl("http://[::1]/")).toThrow("private/internal");
-    });
-
-    it("allows public IPs", () => {
-      expect(() => validateUrl("https://8.8.8.8/")).not.toThrow();
-      expect(() => validateUrl("https://1.1.1.1/")).not.toThrow();
-      expect(() => validateUrl("https://203.0.113.1/")).not.toThrow();
-    });
-
-    it("allows public domains", () => {
-      expect(() =>
-        validateUrl("https://accounts.google.com/o/oauth2/token"),
-      ).not.toThrow();
-      expect(() =>
-        validateUrl("https://login.microsoftonline.com/token"),
-      ).not.toThrow();
-    });
-
-    it("blocks private IPs even with HTTPS", () => {
-      expect(() => validateUrl("https://10.0.0.1/", true)).toThrow(
-        "private/internal",
-      );
-      expect(() => validateUrl("https://192.168.1.1/", true)).toThrow(
-        "private/internal",
-      );
-    });
+    await expect(
+      executeOAuthProxy({
+        url: "https://evil.example.com/bar",
+        httpsOnly: true,
+      }),
+    ).rejects.toMatchObject({ status: 400 });
   });
 });

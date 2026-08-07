@@ -6,7 +6,11 @@
  */
 
 import { describe, it, expect } from "vitest";
-import { isLocalhostRequest, isAllowedHost } from "../localhost-check.js";
+import {
+  isLocalhostRequest,
+  isTunnelHost,
+  mayServeSessionToken,
+} from "../localhost-check.js";
 
 describe("isLocalhostRequest", () => {
   describe("valid localhost values", () => {
@@ -176,127 +180,133 @@ describe("isLocalhostRequest", () => {
       expect(isLocalhostRequest("127.0.0.1:6274")).toBe(true);
     });
   });
+});
 
-  describe("local.fletch.co (custom local dev domain)", () => {
-    it("returns true for 'local.fletch.co'", () => {
-      expect(isLocalhostRequest("local.fletch.co")).toBe(true);
-    });
+describe("isTunnelHost", () => {
+  it("matches the relay suffix regardless of subdomain", () => {
+    expect(isTunnelHost("x7d9j2m1p9k3.tunnels.mcpjam.com")).toBe(true);
+    expect(isTunnelHost("x7d9j2m1p9k3.tunnels.mcpjam.com:443")).toBe(true);
+    // Suffix-anchored: lookalike hosts must not match.
+    expect(isTunnelHost("eviltunnels.mcpjam.com")).toBe(false);
+    expect(isTunnelHost("tunnels.mcpjam.com.evil.example")).toBe(false);
+  });
 
-    it("returns true for 'local.fletch.co:6274' (with port)", () => {
-      expect(isLocalhostRequest("local.fletch.co:6274")).toBe(true);
-    });
+  it("matches legacy ngrok suffixes regardless of subdomain (defense-in-depth)", () => {
+    expect(isTunnelHost("x7d9j2m1p9k3.ngrok.app")).toBe(true);
+    expect(isTunnelHost("foo.ngrok.dev")).toBe(true);
+    expect(isTunnelHost("foo.ngrok-free.app")).toBe(true);
+    expect(isTunnelHost("foo.ngrok.io")).toBe(true);
+  });
 
-    it("returns true for any port on local.fletch.co", () => {
-      expect(isLocalhostRequest("local.fletch.co:5173")).toBe(true);
-      expect(isLocalhostRequest("local.fletch.co:8080")).toBe(true);
-      expect(isLocalhostRequest("local.fletch.co:3000")).toBe(true);
-    });
+  it("matches with a port and mixed case", () => {
+    expect(isTunnelHost("Foo.NGROK.app:443")).toBe(true);
+  });
 
-    it("handles uppercase 'LOCAL.FLETCH.CO'", () => {
-      expect(isLocalhostRequest("LOCAL.FLETCH.CO")).toBe(true);
-      expect(isLocalhostRequest("LOCAL.FLETCH.CO:6274")).toBe(true);
-    });
+  it("matches explicitly registered active tunnel domains", () => {
+    expect(isTunnelHost("tunnel.example.com", ["tunnel.example.com"])).toBe(
+      true
+    );
+  });
 
-    it("does not match other *.fletch.co subdomains", () => {
-      expect(isLocalhostRequest("app.fletch.co")).toBe(false);
-      expect(isLocalhostRequest("staging.fletch.co")).toBe(false);
-      expect(isLocalhostRequest("fletch.co")).toBe(false);
-    });
+  it("does not match localhost or ordinary hosts", () => {
+    expect(isTunnelHost("localhost:6274")).toBe(false);
+    expect(isTunnelHost("127.0.0.1")).toBe(false);
+    expect(isTunnelHost("example.com")).toBe(false);
+    expect(isTunnelHost(undefined)).toBe(false);
+  });
 
-    it("does not match similar domain names", () => {
-      expect(isLocalhostRequest("local.fletch.com")).toBe(false);
-      expect(isLocalhostRequest("notlocal.fletch.co")).toBe(false);
-      expect(isLocalhostRequest("local.fletch.co.evil.com")).toBe(false);
-    });
+  it("does not match lookalike domains", () => {
+    expect(isTunnelHost("evilngrok.app")).toBe(false);
+    expect(isTunnelHost("ngrok.app.evil.com")).toBe(false);
   });
 });
 
-describe("isAllowedHost", () => {
-  describe("localhost passthrough", () => {
-    it("allows localhost regardless of allowedHosts", () => {
-      expect(isAllowedHost("localhost:6274", [], false)).toBe(true);
-      expect(isAllowedHost("127.0.0.1:6274", [], false)).toBe(true);
-      expect(isAllowedHost("local.fletch.co:6274", [], false)).toBe(true);
-    });
+describe("mayServeSessionToken", () => {
+  it("allows localhost", () => {
+    expect(
+      mayServeSessionToken({
+        host: "localhost:6274",
+        allowedHosts: [],
+        hostedMode: false,
+      })
+    ).toBe(true);
   });
 
-  describe("wildcard patterns", () => {
-    it("matches subdomains with *.fletch.co", () => {
-      const hosts = ["*.fletch.co"];
-      expect(isAllowedHost("app.fletch.co", hosts, false)).toBe(true);
-      expect(isAllowedHost("inspector.fletch.co", hosts, false)).toBe(true);
-      expect(isAllowedHost("staging.fletch.co:443", hosts, false)).toBe(true);
-    });
-
-    it("matches the bare domain with *.fletch.co", () => {
-      expect(isAllowedHost("fletch.co", ["*.fletch.co"], false)).toBe(true);
-    });
-
-    it("matches deeply nested subdomains", () => {
-      expect(isAllowedHost("a.b.c.fletch.co", ["*.fletch.co"], false)).toBe(
-        true,
-      );
-    });
-
-    it("does not match different domains", () => {
-      const hosts = ["*.fletch.co"];
-      expect(isAllowedHost("evil.com", hosts, false)).toBe(false);
-      expect(isAllowedHost("notfletch.co", hosts, false)).toBe(false);
-      expect(isAllowedHost("fletch.co.evil.com", hosts, false)).toBe(false);
-    });
-
-    it("strips port before matching", () => {
-      expect(
-        isAllowedHost("app.fletch.co:8080", ["*.fletch.co"], false),
-      ).toBe(true);
-    });
-
-    it("is case insensitive", () => {
-      expect(isAllowedHost("APP.FLETCH.CO", ["*.fletch.co"], false)).toBe(
-        true,
-      );
-    });
+  it("denies tunnel hosts via the Host header", () => {
+    expect(
+      mayServeSessionToken({
+        host: "abc123.ngrok.app",
+        allowedHosts: [],
+        hostedMode: false,
+      })
+    ).toBe(false);
+    expect(
+      mayServeSessionToken({
+        host: "abc123.tunnels.mcpjam.com",
+        allowedHosts: [],
+        hostedMode: false,
+      })
+    ).toBe(false);
   });
 
-  describe("exact host patterns", () => {
-    it("matches exact host", () => {
-      expect(
-        isAllowedHost("app.fletch.co", ["app.fletch.co"], false),
-      ).toBe(true);
-    });
-
-    it("does not match subdomains for exact pattern", () => {
-      expect(
-        isAllowedHost("sub.app.fletch.co", ["app.fletch.co"], false),
-      ).toBe(false);
-    });
+  it("denies tunnel hosts via X-Forwarded-Host even when Host is localhost", () => {
+    // This is the real tunnel shape: the relay edge forwards to localhost
+    // with the public domain carried in X-Forwarded-Host.
+    expect(
+      mayServeSessionToken({
+        host: "localhost:6274",
+        forwardedHost: "abc123.ngrok.app",
+        allowedHosts: [],
+        hostedMode: false,
+      })
+    ).toBe(false);
+    expect(
+      mayServeSessionToken({
+        host: "localhost:6274",
+        forwardedHost: "abc123.tunnels.mcpjam.com",
+        allowedHosts: [],
+        hostedMode: false,
+      })
+    ).toBe(false);
   });
 
-  describe("works without hosted mode", () => {
-    it("checks allowedHosts even when hostedMode is false", () => {
-      expect(isAllowedHost("app.fletch.co", ["*.fletch.co"], false)).toBe(
-        true,
-      );
-    });
-
-    it("checks allowedHosts when hostedMode is true", () => {
-      expect(isAllowedHost("app.fletch.co", ["*.fletch.co"], true)).toBe(
-        true,
-      );
-    });
+  it("SECURITY INVARIANT: denies a tunnel host even when allowlisted", () => {
+    // A future config mistake that allowlists a tunnel domain must not
+    // start leaking the session token through the tunnel.
+    expect(
+      mayServeSessionToken({
+        host: "abc123.ngrok.app",
+        allowedHosts: ["abc123.ngrok.app", "*.ngrok.app"],
+        hostedMode: true,
+      })
+    ).toBe(false);
+    expect(
+      mayServeSessionToken({
+        host: "abc123.tunnels.mcpjam.com",
+        allowedHosts: ["abc123.tunnels.mcpjam.com", "*.tunnels.mcpjam.com"],
+        hostedMode: true,
+      })
+    ).toBe(false);
   });
 
-  describe("edge cases", () => {
-    it("returns false for undefined host", () => {
-      expect(isAllowedHost(undefined, ["*.fletch.co"], false)).toBe(false);
-    });
+  it("denies active custom tunnel domains", () => {
+    expect(
+      mayServeSessionToken({
+        host: "tunnel.example.com",
+        allowedHosts: ["tunnel.example.com"],
+        hostedMode: true,
+        activeTunnelDomains: ["tunnel.example.com"],
+      })
+    ).toBe(false);
+  });
 
-    it("returns false when allowedHosts is empty and not localhost", () => {
-      expect(isAllowedHost("app.fletch.co", [], false)).toBe(false);
-    });
-
-    it("returns false for empty string host", () => {
-      expect(isAllowedHost("", ["*.fletch.co"], false)).toBe(false);
-    });
+  it("still honors the hosted-mode allowlist for non-tunnel hosts", () => {
+    expect(
+      mayServeSessionToken({
+        host: "myapp.railway.app",
+        allowedHosts: ["*.railway.app"],
+        hostedMode: true,
+      })
+    ).toBe(true);
   });
 });

@@ -1,16 +1,19 @@
 import type { ReactNode } from "react";
-import { Loader2 } from "lucide-react";
-import { Button } from "@/components/ui/button";
+import { AlertTriangle, Loader2 } from "lucide-react";
+import { Button } from "@mcpjam/design-system/button";
 
 export type HostedShellGateState =
   | "ready"
   | "auth-loading"
-  | "workspace-loading"
-  | "logged-out";
+  | "project-loading"
+  | "logged-out"
+  | "restricted";
 
 interface HostedShellGateProps {
   state: HostedShellGateState;
+  loadingMessage?: string;
   onSignIn?: () => void;
+  onSignOut?: () => void;
   children: ReactNode;
 }
 
@@ -18,18 +21,27 @@ function getGateCopy(state: HostedShellGateState): string {
   if (state === "auth-loading") {
     return "Checking authentication...";
   }
-  if (state === "workspace-loading") {
-    return "Preparing workspace...";
+  if (state === "project-loading") {
+    return "Preparing project...";
   }
-  return "Sign in to MCPJam to continue";
+  if (state === "restricted") {
+    return "This environment is limited to authorized employees.";
+  }
+  return "Sign in to Fletch MCP Studio to continue";
 }
 
 export function HostedShellGate({
   state,
+  loadingMessage,
   onSignIn,
+  onSignOut,
   children,
 }: HostedShellGateProps) {
   const isBlocked = state !== "ready" && state !== "auth-loading";
+  const copy =
+    loadingMessage && state === "project-loading"
+      ? loadingMessage
+      : getGateCopy(state);
 
   return (
     <div className="relative h-full min-h-0">
@@ -51,14 +63,16 @@ export function HostedShellGate({
           <div className="flex max-w-md flex-col items-center rounded-lg border border-border bg-card/90 p-6 text-center shadow-sm">
             {state === "logged-out" ? (
               <img
-                src="/mcp_jam.svg"
-                alt="MCPJam"
+                src="/fletch_dark.svg"
+                alt="Fletch MCP Studio"
                 className="mb-4 h-12 w-auto"
               />
+            ) : state === "restricted" ? (
+              <AlertTriangle className="mb-4 h-5 w-5 text-amber-600" />
             ) : (
               <Loader2 className="mb-4 h-5 w-5 animate-spin text-muted-foreground" />
             )}
-            <p className="text-sm text-foreground">{getGateCopy(state)}</p>
+            <p className="text-sm text-foreground">{copy}</p>
             {state === "logged-out" && (
               <Button
                 type="button"
@@ -69,6 +83,17 @@ export function HostedShellGate({
                 Sign in
               </Button>
             )}
+            {state === "restricted" && onSignOut ? (
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                className="mt-4"
+                onClick={() => onSignOut()}
+              >
+                Use another account
+              </Button>
+            ) : null}
           </div>
         </div>
       )}

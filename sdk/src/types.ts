@@ -9,6 +9,10 @@ import type {
   AssistantModelMessage,
   ToolModelMessage,
 } from "ai";
+import type {
+  EvalWidgetSnapshotInput,
+  EvalTraceSpanInput,
+} from "./eval-reporting-types.js";
 
 export type {
   ModelMessage,
@@ -30,6 +34,7 @@ export type LLMProvider =
   | "anthropic"
   | "openai"
   | "azure"
+  | "bedrock"
   | "deepseek"
   | "google"
   | "ollama"
@@ -117,4 +122,12 @@ export interface PromptResultData {
   usage: TokenUsage;
   latency: LatencyBreakdown;
   error?: string;
+  /** LLM provider name (e.g., "openai", "anthropic") */
+  provider?: string;
+  /** LLM model name (e.g., "gpt-4o", "claude-3-5-sonnet-20241022") */
+  model?: string;
+  /** Persisted widget snapshots captured during MCP App tool execution */
+  widgetSnapshots?: EvalWidgetSnapshotInput[];
+  /** Timeline spans for eval trace visualization (relative to prompt start) */
+  spans?: EvalTraceSpanInput[];
 }

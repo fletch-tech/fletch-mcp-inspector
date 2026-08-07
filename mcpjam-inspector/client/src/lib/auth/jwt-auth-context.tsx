@@ -4,6 +4,7 @@ import {
   useContext,
   useEffect,
   useMemo,
+  useRef,
   useState,
   type ReactNode,
 } from "react";
@@ -313,11 +314,60 @@ export function useAuth(): JwtAuthContextValue {
 }
 
 /**
+ * Log Cognito/JWT claims that Convex uses for provider matching (iss + aud).
+ * Safe: never logs the raw token. Helps diagnose
+ * "No auth provider found matching the given token".
+ */
+function logConvexJwtDiagnostics(token: string): void {
+  if (!import.meta.env.DEV) return;
+  const claims = decodeJwtPayload(token);
+  if (!claims) {
+    console.warn(
+      "[Convex auth] jwt_auth_token is not a decodable JWT — Convex will reject it.",
+    );
+    return;
+  }
+  const expectedIssuer =
+    (import.meta.env.VITE_JWT_ISSUER as string | undefined) ||
+    "https://cognito-idp.us-east-2.amazonaws.com/us-east-2_4hrDZdHfp";
+  const expectedAud = import.meta.env.VITE_JWT_AUDIENCE as string | undefined;
+  const iss = typeof claims.iss === "string" ? claims.iss : undefined;
+  const aud = claims.aud;
+  const tokenUse = claims.token_use;
+  const issOk =
+    !!iss &&
+    iss.replace(/\/+$/, "") === expectedIssuer.replace(/\/+$/, "");
+  console.info("[Convex auth] JWT claims for provider match", {
+    iss,
+    aud,
+    token_use: tokenUse,
+    expectedIssuer,
+    expectedAud: expectedAud || "(none — leave applicationID unset for access tokens)",
+    issuerMatches: issOk,
+  });
+  if (!issOk) {
+    console.error(
+      "[Convex auth] Token `iss` does not match JWT_ISSUER. Upstream 2.33 requires a Convex-authenticated project before add-server works — fix the token or JWT_ISSUER, then redeploy convex/auth.config.ts.",
+    );
+  }
+  if (
+    expectedAud &&
+    tokenUse === "access" &&
+    (aud === undefined || aud === null)
+  ) {
+    console.warn(
+      "[Convex auth] Cognito access tokens often omit `aud` (they use client_id). Prefer an ID token, or unset JWT_AUDIENCE / applicationID in auth.config.ts.",
+    );
+  }
+}
+
+/**
  * Hook for Convex's ConvexProviderWithAuth.
  * Returns the shape Convex expects: { isLoading, isAuthenticated, fetchAccessToken }.
  */
 export function useConvexJwtAuth() {
   const { isLoading, user, getAccessToken } = useAuth();
+  const diagnosticsLoggedRef = useRef(false);
   const fetchAccessToken = useCallback(
     async ({
       forceRefreshToken: _,
@@ -325,6 +375,10 @@ export function useConvexJwtAuth() {
       forceRefreshToken: boolean;
     }) => {
       const token = await getAccessToken();
+      if (token && !diagnosticsLoggedRef.current) {
+        diagnosticsLoggedRef.current = true;
+        logConvexJwtDiagnostics(token);
+      }
       return token ?? null;
     },
     [getAccessToken],

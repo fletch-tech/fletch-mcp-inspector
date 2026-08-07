@@ -8,11 +8,31 @@ import {
 } from "./helpers/index.js";
 import type { Hono } from "hono";
 import { APICallError } from "@ai-sdk/provider";
+import type { ModelMessage } from "ai";
 
 // Track stream events for testing
 let capturedStreamEvents: any[] = [];
 let mockWriter: { write: ReturnType<typeof vi.fn> };
 let lastStreamExecution: Promise<void> | null = null;
+let capturedCreateUiStreamOnError: ((error: unknown) => string) | undefined;
+type ErrorResponse = { error: string };
+
+const imagePolicy = (image: boolean) => ({
+  directContent: { image },
+  embeddedResources: { blob: { image } },
+  linkedResources: { blob: { image } },
+});
+
+const resolvedImagePolicyMatcher = (image: boolean) =>
+  expect.objectContaining({
+    directContent: expect.objectContaining({ image }),
+    embeddedResources: expect.objectContaining({
+      blob: expect.objectContaining({ image }),
+    }),
+    linkedResources: expect.objectContaining({
+      blob: expect.objectContaining({ image }),
+    }),
+  });
 
 const buildSsePayload = (events: any[]) =>
   `${events
@@ -34,21 +54,96 @@ const createSseResponse = (events: any[]) => {
   });
 };
 
+const createAsyncIterable = (events: any[]) => ({
+  async *[Symbol.asyncIterator]() {
+    for (const event of events) {
+      yield event;
+    }
+  },
+});
+
+const createThrowingAsyncIterable = (error: unknown) => ({
+  async *[Symbol.asyncIterator]() {
+    throw error;
+  },
+});
+
 // Mock the AI SDK
 vi.mock("ai", async () => {
   const actual = await vi.importActual<typeof import("ai")>("ai");
   return {
     ...actual,
     convertToModelMessages: vi.fn((messages) => messages),
-    streamText: vi.fn().mockReturnValue({
-      toUIMessageStreamResponse: vi.fn().mockReturnValue(
-        new Response(JSON.stringify({ type: "text", content: "Hello" }), {
-          headers: { "Content-Type": "text/event-stream" },
-        }),
-      ),
+    streamText: vi.fn().mockImplementation((options: any) => {
+      const usage = {
+        inputTokens: 10,
+        outputTokens: 5,
+        totalTokens: 15,
+      };
+      const step = {
+        usage,
+        toolCalls: [],
+        toolResults: [],
+        response: {
+          messages: [{ role: "assistant", content: "Hello" }],
+        },
+      };
+
+      const toUIMessageStream = vi.fn(() => {
+        options.prepareStep?.({
+          stepNumber: 0,
+          steps: [],
+          model: options.model,
+        });
+        options.onChunk?.({
+          chunk: {
+            type: "text-delta",
+            id: "text-1",
+            text: "Hello",
+          },
+        });
+        options.onStepFinish?.(step);
+        options.onFinish?.({
+          text: "Hello",
+          finishReason: "stop",
+          totalUsage: usage,
+          steps: [step],
+        });
+
+        return createAsyncIterable([
+          { type: "start" },
+          { type: "text-start", id: "text-1" },
+          { type: "text-delta", id: "text-1", text: "Hello" },
+          { type: "text-end", id: "text-1" },
+          {
+            type: "finish-step",
+            usage,
+            finishReason: "stop",
+            rawFinishReason: "stop",
+            response: {},
+            providerMetadata: undefined,
+          },
+          {
+            type: "finish",
+            finishReason: "stop",
+            rawFinishReason: "stop",
+            totalUsage: usage,
+          },
+        ]);
+      });
+
+      return {
+        toUIMessageStream,
+        toUIMessageStreamResponse: vi.fn().mockReturnValue(
+          new Response(JSON.stringify({ type: "text", content: "Hello" }), {
+            headers: { "Content-Type": "text/event-stream" },
+          })
+        ),
+      };
     }),
     stepCountIs: vi.fn().mockReturnValue(() => false),
-    createUIMessageStream: vi.fn(({ execute }) => {
+    createUIMessageStream: vi.fn(({ execute, onFinish, onError }) => {
+      capturedCreateUiStreamOnError = onError;
       // Create a mock writer that captures events
       mockWriter = {
         write: vi.fn((event) => {
@@ -56,15 +151,14 @@ vi.mock("ai", async () => {
         }),
       };
       // Execute the stream function to capture events
-      const execResult = execute({ writer: mockWriter });
-      lastStreamExecution =
-        execResult instanceof Promise ? execResult : Promise.resolve();
+      const execResult = Promise.resolve(execute({ writer: mockWriter }));
+      lastStreamExecution = execResult.finally(() => onFinish?.());
       return { getReader: vi.fn() };
     }),
     createUIMessageStreamResponse: vi.fn().mockReturnValue(
       new Response(JSON.stringify({ type: "stream" }), {
         headers: { "Content-Type": "text/event-stream" },
-      }),
+      })
     ),
   };
 });
@@ -75,18 +169,54 @@ vi.mock("../../../utils/chat-helpers", async () => {
     typeof import("../../../utils/chat-helpers")
   >("../../../utils/chat-helpers");
   return {
+    ...actual,
     createLlmModel: vi.fn().mockReturnValue({}),
     scrubMcpAppsToolResultsForBackend: vi.fn((messages) => messages),
     scrubChatGPTAppsToolResultsForBackend: vi.fn((messages) => messages),
-    isAnthropicCompatibleModel: actual.isAnthropicCompatibleModel,
-    getInvalidAnthropicToolNames: actual.getInvalidAnthropicToolNames,
   };
 });
 
 // Mock shared types
-vi.mock("@/shared/types", () => ({
-  isGPT5Model: vi.fn().mockReturnValue(false),
-  isMCPJamProvidedModel: vi.fn().mockReturnValue(false),
+vi.mock("@/shared/types", async () => {
+  const actual = await vi.importActual<typeof import("@/shared/types")>(
+    "@/shared/types"
+  );
+  return {
+    ...actual,
+    isGPT5Model: vi.fn().mockReturnValue(false),
+  };
+});
+
+// Hosted-model classification moved behind the catalog service; the route keys
+// billing dispatch on isHostedCatalogModel. Default false — tests that exercise
+// the MCPJam path override it explicitly.
+vi.mock("../../../services/hosted-model-catalog.js", () => ({
+  isHostedCatalogModel: vi.fn().mockReturnValue(false),
+  startHostedModelCatalogRefresh: vi.fn(),
+  refreshHostedModelCatalog: vi.fn(),
+}));
+
+vi.mock("../../../utils/guest-auth.js", () => ({
+  getProductionGuestAuthHeader: vi
+    .fn()
+    .mockResolvedValue("Bearer guest-test-token"),
+}));
+
+// Chatbox turns must NEVER skip host-owned config resolution — the route
+// resolves a guest bearer for the fetch when the request carries none.
+const fetchChatboxRuntimeConfigMock = vi.hoisted(() => vi.fn());
+vi.mock("../../../utils/chatbox-runtime-config.js", () => ({
+  fetchChatboxRuntimeConfig: (...args: unknown[]) =>
+    fetchChatboxRuntimeConfigMock(...args),
+}));
+
+// Host-bound direct sessions (Playground `hostId`) resolve their host config
+// through this fetch; the task-created delivery tests use it to turn the
+// tasks policy on. Inert for every request without a `hostId`.
+const fetchHostRuntimeConfigMock = vi.hoisted(() => vi.fn());
+vi.mock("../../../utils/host-runtime-config.js", () => ({
+  fetchHostRuntimeConfig: (...args: unknown[]) =>
+    fetchHostRuntimeConfigMock(...args),
 }));
 
 // Mock http-tool-calls for testing unresolved tool calls scenario
@@ -107,14 +237,101 @@ describe("POST /api/mcp/chat-v2", () => {
   let manager: MockMCPClientManager;
   let app: Hono;
 
+  const postAuthenticatedJson = (body: Record<string, unknown>) =>
+    app.request("/api/mcp/chat-v2", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: "Bearer signed-in-test-token",
+      },
+      body: JSON.stringify(body),
+    });
+
   beforeEach(() => {
     vi.clearAllMocks();
     capturedStreamEvents = [];
     lastStreamExecution = null;
+    capturedCreateUiStreamOnError = undefined;
     manager = createMockMcpClientManager({
       getToolsForAiSdk: vi.fn().mockResolvedValue({}),
     });
     app = createTestApp(manager, "chat-v2");
+  });
+
+  describe("MCPJam model classification", () => {
+    it("classifies the model PROVIDER-AWARE (bare hosted ids must canonicalize)", async () => {
+      const { isHostedCatalogModel } = await import(
+        "../../../services/hosted-model-catalog.js"
+      );
+
+      await postAuthenticatedJson({
+        messages: [{ role: "user", content: "hi" }],
+        model: { id: "gpt-5-nano", provider: "openai" },
+      });
+
+      // The harness preflight is provider-aware; a provider-blind dispatch
+      // here would treat a bare hosted id as non-MCPJam and route it into
+      // org/BYOK after it passed preflight (same class of bug as the
+      // streamWebChatTurn dispatch).
+      expect(vi.mocked(isHostedCatalogModel)).toHaveBeenCalledWith(
+        "gpt-5-nano",
+        "openai"
+      );
+    });
+  });
+
+  describe("chatbox runtime-config gate", () => {
+    it("resolves the process guest bearer for a BEARER-LESS chatbox turn (config never skipped)", async () => {
+      fetchChatboxRuntimeConfigMock.mockResolvedValue({ ok: true, config: {} });
+
+      await postJson(app, "/api/mcp/chat-v2", {
+        chatboxId: "cbx_1",
+        messages: [{ role: "user", content: "hi" }],
+        model: { id: "gpt-4", provider: "openai" },
+      });
+
+      // The route mints a guest bearer later for MCPJam models, so "no
+      // incoming bearer" is not a hard stop — the config fetch must use the
+      // same process-cached guest bearer rather than being skipped.
+      expect(fetchChatboxRuntimeConfigMock).toHaveBeenCalledWith(
+        expect.objectContaining({
+          chatboxId: "cbx_1",
+          bearer: "Bearer guest-test-token",
+        })
+      );
+    });
+
+    it("FAILS CLOSED (401) when a bearer-less chatbox turn can't resolve any bearer", async () => {
+      const { getProductionGuestAuthHeader } = await import(
+        "../../../utils/guest-auth.js"
+      );
+      vi.mocked(getProductionGuestAuthHeader).mockResolvedValueOnce(null);
+
+      const res = await postJson(app, "/api/mcp/chat-v2", {
+        chatboxId: "cbx_1",
+        messages: [{ role: "user", content: "hi" }],
+        model: { id: "gpt-4", provider: "openai" },
+      });
+
+      expect(res.status).toBe(401);
+      expect(fetchChatboxRuntimeConfigMock).not.toHaveBeenCalled();
+    });
+
+    it("fails closed when the chatbox config fetch itself fails", async () => {
+      fetchChatboxRuntimeConfigMock.mockResolvedValue({
+        ok: false,
+        status: 502,
+        error: "backend unreachable",
+      });
+
+      const res = await postAuthenticatedJson({
+        chatboxId: "cbx_1",
+        messages: [{ role: "user", content: "hi" }],
+        model: { id: "gpt-4", provider: "openai" },
+      });
+
+      expect(res.status).toBe(502);
+    });
   });
 
   describe("validation", () => {
@@ -122,7 +339,7 @@ describe("POST /api/mcp/chat-v2", () => {
       const res = await postJson(app, "/api/mcp/chat-v2", {
         model: { id: "gpt-4", provider: "openai" },
       });
-      const { status, data } = await expectJson(res);
+      const { status, data } = await expectJson<ErrorResponse>(res);
 
       expect(status).toBe(400);
       expect(data.error).toBe("messages are required");
@@ -133,7 +350,7 @@ describe("POST /api/mcp/chat-v2", () => {
         messages: [],
         model: { id: "gpt-4", provider: "openai" },
       });
-      const { status, data } = await expectJson(res);
+      const { status, data } = await expectJson<ErrorResponse>(res);
 
       expect(status).toBe(400);
       expect(data.error).toBe("messages are required");
@@ -144,7 +361,7 @@ describe("POST /api/mcp/chat-v2", () => {
         messages: "not an array",
         model: { id: "gpt-4", provider: "openai" },
       });
-      const { status, data } = await expectJson(res);
+      const { status, data } = await expectJson<ErrorResponse>(res);
 
       expect(status).toBe(400);
       expect(data.error).toBe("messages are required");
@@ -154,7 +371,7 @@ describe("POST /api/mcp/chat-v2", () => {
       const res = await postJson(app, "/api/mcp/chat-v2", {
         messages: [{ role: "user", content: "Hello" }],
       });
-      const { status, data } = await expectJson(res);
+      const { status, data } = await expectJson<ErrorResponse>(res);
 
       expect(status).toBe(400);
       expect(data.error).toBe("model is not supported");
@@ -176,14 +393,14 @@ describe("POST /api/mcp/chat-v2", () => {
         },
         apiKey: "test-key",
       });
-      const { status, data } = await expectJson(res);
+      const { status, data } = await expectJson<ErrorResponse>(res);
 
       expect(status).toBe(400);
       expect(data.error).toContain("Invalid tool name(s) for Anthropic");
       expect(data.error).toContain("'server.read_file'");
       expect(data.error).toContain("'namespace/list'");
       expect(data.error).toContain(
-        "Tool names must only contain letters, numbers, underscores, and hyphens (max 64 characters).",
+        "Tool names must only contain letters, numbers, underscores, and hyphens (max 64 characters)."
       );
     });
 
@@ -210,7 +427,7 @@ describe("POST /api/mcp/chat-v2", () => {
           },
         ],
       });
-      const { status, data } = await expectJson(res);
+      const { status, data } = await expectJson<ErrorResponse>(res);
 
       expect(status).toBe(400);
       expect(data.error).toContain("Invalid tool name(s) for Anthropic");
@@ -263,7 +480,27 @@ describe("POST /api/mcp/chat-v2", () => {
       expect(res.status).toBe(200);
       expect(manager.getToolsForAiSdk).toHaveBeenCalledWith(
         ["server-1", "server-2"],
-        undefined,
+        expect.objectContaining({
+          modelVisibleMcpToolResults: resolvedImagePolicyMatcher(true),
+        })
+      );
+    });
+
+    it("passes direct request image visibility opt-out to MCP tool conversion", async () => {
+      const res = await postJson(app, "/api/mcp/chat-v2", {
+        messages: [{ role: "user", content: "Hello" }],
+        model: { id: "gpt-4", provider: "openai" },
+        apiKey: "test-key",
+        selectedServers: ["server-1"],
+        modelVisibleMcpToolResults: imagePolicy(false),
+      });
+
+      expect(res.status).toBe(200);
+      expect(manager.getToolsForAiSdk).toHaveBeenCalledWith(
+        ["server-1"],
+        expect.objectContaining({
+          modelVisibleMcpToolResults: resolvedImagePolicyMatcher(false),
+        })
       );
     });
 
@@ -279,6 +516,75 @@ describe("POST /api/mcp/chat-v2", () => {
       expect(res.headers.get("Content-Type")).toContain("text/event-stream");
     });
 
+    it("emits ordered live trace events for configured local models", async () => {
+      const res = await postJson(app, "/api/mcp/chat-v2", {
+        messages: [{ role: "user", content: "Hello" }],
+        model: { id: "gpt-4", provider: "openai" },
+        apiKey: "test-key",
+      });
+
+      expect(res.status).toBe(200);
+      await lastStreamExecution;
+
+      const traceEvents = capturedStreamEvents
+        .filter((event) => event?.type === "data-trace-event")
+        .map((event) => event.data?.type);
+      const requestPayloadEvents = capturedStreamEvents.filter(
+        (event) =>
+          event?.type === "data-trace-event" &&
+          event.data?.type === "request_payload"
+      );
+
+      expect(traceEvents).toEqual(
+        expect.arrayContaining([
+          "turn_start",
+          "request_payload",
+          "text_delta",
+          "trace_snapshot",
+          "turn_finish",
+        ])
+      );
+      expect(traceEvents.indexOf("turn_start")).toBeLessThan(
+        traceEvents.indexOf("request_payload")
+      );
+      expect(traceEvents.indexOf("request_payload")).toBeLessThan(
+        traceEvents.indexOf("trace_snapshot")
+      );
+      expect(traceEvents.indexOf("trace_snapshot")).toBeLessThan(
+        traceEvents.indexOf("turn_finish")
+      );
+      expect(requestPayloadEvents).toHaveLength(1);
+      expect(requestPayloadEvents[0]?.data).toMatchObject({
+        promptIndex: 0,
+        stepIndex: 0,
+        payload: {
+          system: expect.any(String),
+          tools: expect.any(Object),
+          messages: [{ role: "user", content: "Hello" }],
+        },
+      });
+    });
+
+    // PR 4 (chat SSE wire-parity net): the test above checks presence + relative
+    // order via arrayContaining; this snapshots the EXACT ordered trace-event
+    // sequence so the upcoming facade migration (PR 5) can't change the wire
+    // shape unnoticed. Direct (user-key) path — whose facade `direct + ui` path
+    // is brand-new, so the highest-risk half to protect.
+    it("direct path: exact trace-event sequence is stable (wire parity)", async () => {
+      const res = await postJson(app, "/api/mcp/chat-v2", {
+        messages: [{ role: "user", content: "Hello" }],
+        model: { id: "gpt-4", provider: "openai" },
+        apiKey: "test-key",
+      });
+      expect(res.status).toBe(200);
+      await lastStreamExecution;
+
+      const traceEventSequence = capturedStreamEvents
+        .filter((event) => event?.type === "data-trace-event")
+        .map((event) => event.data?.type);
+      expect(traceEventSequence).toMatchSnapshot();
+    });
+
     it("uses provided temperature", async () => {
       const { streamText } = await import("ai");
 
@@ -292,7 +598,7 @@ describe("POST /api/mcp/chat-v2", () => {
       expect(streamText).toHaveBeenCalledWith(
         expect.objectContaining({
           temperature: 0.5,
-        }),
+        })
       );
     });
 
@@ -308,7 +614,236 @@ describe("POST /api/mcp/chat-v2", () => {
       expect(streamText).toHaveBeenCalledWith(
         expect.objectContaining({
           temperature: 0.7,
-        }),
+        })
+      );
+    });
+
+    it("passes the inbound abort signal to user-provided streamText calls", async () => {
+      const { streamText } = await import("ai");
+
+      await postJson(app, "/api/mcp/chat-v2", {
+        messages: [{ role: "user", content: "Hello" }],
+        model: { id: "gpt-4", provider: "openai" },
+        apiKey: "test-key",
+      });
+
+      expect(streamText).toHaveBeenCalledWith(
+        expect.objectContaining({
+          abortSignal: expect.any(AbortSignal),
+        })
+      );
+    });
+
+    it("maps direct MCP image tool history to media content before streaming", async () => {
+      const { streamText } = await import("ai");
+      manager.getToolsForAiSdk.mockResolvedValue({
+        qa_return_image_tool_result: {
+          description: "Returns a PNG image for example.",
+          inputSchema: {
+            type: "object",
+            properties: {},
+            additionalProperties: false,
+          },
+          execute: vi.fn(),
+        },
+      });
+
+      await postJson(app, "/api/mcp/chat-v2", {
+        messages: [
+          { role: "user", content: "Execute `qa_return_image_tool_result`" },
+          {
+            role: "assistant",
+            content: [
+              {
+                type: "tool-call",
+                toolCallId: "call-1",
+                toolName: "qa_return_image_tool_result",
+                input: {},
+              },
+            ],
+          },
+          {
+            role: "tool",
+            content: [
+              {
+                type: "tool-result",
+                toolCallId: "call-1",
+                toolName: "qa_return_image_tool_result",
+                output: {
+                  type: "json",
+                  value: {
+                    content: [
+                      {
+                        type: "image",
+                        data: "aGVsbG8=",
+                        mimeType: "image/png",
+                      },
+                    ],
+                  },
+                },
+              },
+            ],
+          },
+          { role: "user", content: "describe that image" },
+        ],
+        model: { id: "gpt-4", provider: "openai" },
+        apiKey: "test-key",
+        hostStyle: "claude",
+      });
+
+      expect(streamText).toHaveBeenCalledWith(
+        expect.objectContaining({
+          messages: expect.arrayContaining([
+            expect.objectContaining({
+              role: "tool",
+              content: [
+                expect.objectContaining({
+                  type: "tool-result",
+                  output: {
+                    type: "content",
+                    value: [
+                      {
+                        type: "media",
+                        data: "aGVsbG8=",
+                        mediaType: "image/png",
+                      },
+                    ],
+                  },
+                }),
+              ],
+            }),
+          ]),
+        })
+      );
+    });
+
+    it("does not resolve linked MCP image resources from browser-replayed history", async () => {
+      const { streamText } = await import("ai");
+      manager.listTools.mockResolvedValue({
+        tools: [{ name: "qa_return_linked_image_resource" }],
+      });
+      manager.getToolsForAiSdk.mockResolvedValue({
+        qa_return_linked_image_resource: {
+          description: "Returns a linked PNG image resource for example.",
+          inputSchema: {
+            type: "object",
+            properties: {},
+            additionalProperties: false,
+          },
+          execute: vi.fn(),
+        },
+      });
+      manager.readResource.mockResolvedValue({
+        contents: [
+          {
+            uri: "example://linked-image.png",
+            blob: "aGVsbG8=",
+            mimeType: "image/png",
+          },
+        ],
+      });
+
+      await postJson(app, "/api/mcp/chat-v2", {
+        messages: [
+          {
+            role: "user",
+            content: [
+              {
+                type: "text",
+                text: "Execute `qa_return_linked_image_resource`",
+              },
+            ],
+          },
+          {
+            role: "assistant",
+            content: [
+              {
+                type: "text",
+                text: "Invoked `qa_return_linked_image_resource`",
+              },
+              {
+                type: "tool-call",
+                toolCallId: "playground-L6XNQZ9X4Swm2LUv",
+                toolName: "qa_return_linked_image_resource",
+                input: {},
+                providerOptions: { mcpjam: { serverId: "qa-server" } },
+              },
+            ],
+          },
+          {
+            role: "tool",
+            content: [
+              {
+                type: "tool-result",
+                toolCallId: "playground-L6XNQZ9X4Swm2LUv",
+                toolName: "qa_return_linked_image_resource",
+                providerOptions: { mcpjam: { serverId: "qa-server" } },
+                output: {
+                  type: "json",
+                  value: {
+                    type: "json",
+                    value: {
+                      content: [
+                        {
+                          mimeType: "image/png",
+                          name: "Linked PNG resource",
+                          type: "resource_link",
+                          uri: "example://linked-image.png",
+                        },
+                      ],
+                    },
+                  },
+                },
+              },
+            ],
+          },
+          {
+            role: "user",
+            content: [
+              {
+                type: "text",
+                text: "what can you tell me about the image",
+              },
+            ],
+          },
+        ],
+        selectedServers: ["qa-server"],
+        model: { id: "gpt-4", provider: "openai" },
+        apiKey: "test-key",
+        hostStyle: "claude",
+      });
+
+      expect(manager.listTools).not.toHaveBeenCalled();
+      expect(manager.readResource).not.toHaveBeenCalled();
+      expect(streamText).toHaveBeenCalledWith(
+        expect.objectContaining({
+          messages: expect.arrayContaining([
+            expect.objectContaining({
+              role: "tool",
+              content: [
+                expect.objectContaining({
+                  type: "tool-result",
+                  output: {
+                    type: "json",
+                    value: {
+                      type: "json",
+                      value: {
+                        content: [
+                          {
+                            mimeType: "image/png",
+                            name: "Linked PNG resource",
+                            type: "resource_link",
+                            uri: "example://linked-image.png",
+                          },
+                        ],
+                      },
+                    },
+                  },
+                }),
+              ],
+            }),
+          ]),
+        })
       );
     });
 
@@ -324,16 +859,92 @@ describe("POST /api/mcp/chat-v2", () => {
 
       expect(streamText).toHaveBeenCalledWith(
         expect.objectContaining({
-          system: "You are a helpful assistant",
-        }),
+          system: expect.stringContaining("You are a helpful assistant"),
+        })
       );
+      expect(streamText).not.toHaveBeenCalledWith(
+        expect.objectContaining({
+          system: expect.stringContaining("## Connected MCP Tools"),
+        })
+      );
+    });
+  });
+
+  describe("uiTools boundary (agent-route-only)", () => {
+    it("ignores a client uiTools snapshot: 200, no ui_* entry advertised, no UI prompt section", async () => {
+      const { streamText } = await import("ai");
+      manager.getToolsForAiSdk.mockResolvedValue({
+        legit_tool: { description: "Server tool", execute: vi.fn() },
+      });
+
+      const res = await postJson(app, "/api/mcp/chat-v2", {
+        messages: [{ role: "user", content: "Hello" }],
+        model: { id: "gpt-4", provider: "openai" },
+        apiKey: "test-key",
+        // Stale snapshot a cached pre-cutover client may still send. The
+        // route must ignore it (never 400) for mixed-version safety.
+        uiTools: [
+          { name: "ui_navigate", description: "Navigate", readOnly: false },
+        ],
+      });
+
+      expect(res.status).toBe(200);
+      const options = vi.mocked(streamText).mock.calls.at(-1)![0] as {
+        tools: Record<string, unknown>;
+        system?: string;
+      };
+      expect(
+        Object.keys(options.tools).filter((name) => /^ui_/.test(name))
+      ).toEqual([]);
+      expect(options.system ?? "").not.toContain("MCPJam UI tools");
+    });
+
+    it("a server tool named ui_navigate stays executable with ordinary approval — never claimed by a stale UI snapshot", async () => {
+      const { streamText } = await import("ai");
+      const serverExecute = vi.fn();
+      manager.getToolsForAiSdk.mockResolvedValue({
+        ui_navigate: {
+          description: "Server-executed tool that uses the ui_ prefix",
+          execute: serverExecute,
+        },
+      });
+
+      const res = await postJson(app, "/api/mcp/chat-v2", {
+        messages: [{ role: "user", content: "Hello" }],
+        model: { id: "gpt-4", provider: "openai" },
+        apiKey: "test-key",
+        requireToolApproval: true,
+        uiTools: [
+          { name: "ui_navigate", description: "Stale twin", readOnly: false },
+        ],
+      });
+
+      expect(res.status).toBe(200);
+      const options = vi.mocked(streamText).mock.calls.at(-1)![0] as {
+        tools: Record<string, { execute?: unknown; needsApproval?: unknown }>;
+        system?: string;
+      };
+      // Provenance decides: the manager-origin tool stays executable — it
+      // was never replaced by a no-execute client-fulfilled entry. (The
+      // engine wraps execute for error surfacing, so assert executability
+      // rather than reference identity.)
+      expect(typeof options.tools["ui_navigate"]?.execute).toBe("function");
+      // No MCPJam UI system-prompt section and no UI approval
+      // classification: the tool follows the normal requireToolApproval
+      // flag, which the route threads into the manager's SDK conversion.
+      expect(options.system ?? "").not.toContain("MCPJam UI tools");
+      expect(manager.getToolsForAiSdk).toHaveBeenCalledWith(
+        undefined,
+        expect.objectContaining({ needsApproval: true })
+      );
+      expect(options.tools["ui_navigate"]?.needsApproval).toBeUndefined();
     });
   });
 
   describe("error handling", () => {
     it("returns 500 when getToolsForAiSdk fails", async () => {
       manager.getToolsForAiSdk.mockRejectedValue(
-        new Error("Tools fetch failed"),
+        new Error("Tools fetch failed")
       );
 
       const res = await postJson(app, "/api/mcp/chat-v2", {
@@ -341,10 +952,46 @@ describe("POST /api/mcp/chat-v2", () => {
         model: { id: "gpt-4", provider: "openai" },
         apiKey: "test-key",
       });
-      const { status, data } = await expectJson(res);
+      const { status, data } = await expectJson<ErrorResponse>(res);
 
       expect(status).toBe(500);
       expect(data.error).toBe("Unexpected error");
+    });
+
+    it("swallows abort errors without emitting a user-visible stream error", async () => {
+      const { streamText } = await import("ai");
+      const abortError = new Error("The operation was aborted");
+      abortError.name = "AbortError";
+      let capturedToUiMessageStreamOnError:
+        | ((error: unknown) => string)
+        | undefined;
+
+      vi.mocked(streamText).mockImplementationOnce((() => ({
+        toUIMessageStream: vi.fn((options?: { onError?: unknown }) => {
+          capturedToUiMessageStreamOnError = options?.onError as
+            | ((error: unknown) => string)
+            | undefined;
+          return createThrowingAsyncIterable(abortError);
+        }),
+        toUIMessageStreamResponse: vi.fn(),
+      })) as any);
+
+      const res = await postJson(app, "/api/mcp/chat-v2", {
+        messages: [{ role: "user", content: "Hello" }],
+        model: { id: "gpt-4", provider: "openai" },
+        apiKey: "test-key",
+      });
+
+      expect(res.status).toBe(200);
+      await expect(lastStreamExecution).resolves.toBeUndefined();
+      expect(capturedCreateUiStreamOnError?.(abortError)).toBe("");
+      expect(capturedToUiMessageStreamOnError?.(abortError)).toBe("");
+      expect(
+        capturedStreamEvents.some(
+          (event) =>
+            event?.type === "data-trace-event" && event.data?.type === "error"
+        )
+      ).toBe(false);
     });
   });
 
@@ -395,27 +1042,19 @@ describe("POST /api/mcp/chat-v2", () => {
   describe("auth error normalization", () => {
     let capturedOnError: ((error: unknown) => string) | undefined;
 
-    beforeEach(async () => {
-      // Override streamText mock to capture the onError callback
-      const { streamText } = await import("ai");
-      vi.mocked(streamText).mockImplementation((() => ({
-        toUIMessageStreamResponse: (opts: any) => {
-          capturedOnError = opts?.onError;
-          return new Response("{}", {
-            headers: { "Content-Type": "text/event-stream" },
-          });
-        },
-      })) as any);
+    beforeEach(() => {
+      capturedOnError = undefined;
     });
 
     async function getOnError(
-      provider: string,
+      provider: string
     ): Promise<(error: unknown) => string> {
       await postJson(app, "/api/mcp/chat-v2", {
         messages: [{ role: "user", content: "Hello" }],
         model: { id: "test-model", name: "Test", provider },
         apiKey: "bad-key",
       });
+      capturedOnError = capturedCreateUiStreamOnError;
       expect(capturedOnError).toBeDefined();
       return capturedOnError!;
     }
@@ -434,7 +1073,7 @@ describe("POST /api/mcp/chat-v2", () => {
       const result = JSON.parse(onError(error));
       expect(result.code).toBe("auth_error");
       expect(result.message).toBe(
-        "Invalid API key for openai. Please check your key under LLM Providers in Settings.",
+        "Invalid API key for openai. Check your organization's model providers configuration."
       );
       expect(result.statusCode).toBe(401);
     });
@@ -451,7 +1090,7 @@ describe("POST /api/mcp/chat-v2", () => {
       const result = JSON.parse(onError(error));
       expect(result.code).toBe("auth_error");
       expect(result.message).toBe(
-        "Invalid API key for anthropic. Please check your key under LLM Providers in Settings.",
+        "Invalid API key for anthropic. Check your organization's model providers configuration."
       );
     });
 
@@ -469,7 +1108,7 @@ describe("POST /api/mcp/chat-v2", () => {
       const result = JSON.parse(onError(error));
       expect(result.code).toBe("auth_error");
       expect(result.message).toBe(
-        "Invalid API key for deepseek. Please check your key under LLM Providers in Settings.",
+        "Invalid API key for deepseek. Check your organization's model providers configuration."
       );
       expect(result.statusCode).toBe(401);
     });
@@ -488,7 +1127,7 @@ describe("POST /api/mcp/chat-v2", () => {
       const result = JSON.parse(onError(error));
       expect(result.code).toBe("auth_error");
       expect(result.message).toBe(
-        "Invalid API key for xai. Please check your key under LLM Providers in Settings.",
+        "Invalid API key for xai. Check your organization's model providers configuration."
       );
     });
 
@@ -506,7 +1145,7 @@ describe("POST /api/mcp/chat-v2", () => {
       const result = JSON.parse(onError(error));
       expect(result.code).toBe("auth_error");
       expect(result.message).toBe(
-        "Invalid API key for google. Please check your key under LLM Providers in Settings.",
+        "Invalid API key for google. Check your organization's model providers configuration."
       );
     });
 
@@ -555,16 +1194,62 @@ describe("POST /api/mcp/chat-v2", () => {
       expect(result.code).toBeUndefined();
       expect(result.message).toBe("Rate limit exceeded");
       expect(result.details).toBe(
-        '{"error":{"message":"Rate limit exceeded"}}',
+        '{"error":{"message":"Rate limit exceeded"}}'
       );
     });
 
-    it("passes through regular Error messages", async () => {
+    it("passes through regular Error messages with a normalized block", async () => {
       const onError = await getOnError("openai");
       const error = new Error("Network connection failed");
 
-      const result = onError(error);
-      expect(result).toBe("Network connection failed");
+      // formatStreamError now always returns a JSON envelope so the client
+      // can render an ErrorCard for unclassified provider failures. The
+      // human message is preserved on `message`; `normalized` carries the
+      // catalog data.
+      const result = JSON.parse(onError(error));
+      expect(result.message).toBe("Network connection failed");
+      expect(result.normalized).toBeDefined();
+      expect(typeof result.normalized.slug).toBe("string");
+      expect(typeof result.normalized.title).toBe("string");
+    });
+
+    it("normalizes retry-exhausted provider overload errors", async () => {
+      const onError = await getOnError("anthropic");
+      const error = new Error(
+        "Failed after 3 attempts. Last error: Overloaded"
+      );
+
+      const result = JSON.parse(onError(error));
+      expect(result).toEqual({
+        code: "provider_overloaded",
+        message:
+          "That model is temporarily overloaded. Try again in a moment or switch models.",
+        isRetryable: true,
+      });
+    });
+
+    it("normalizes Anthropic overload APICallErrors", async () => {
+      const onError = await getOnError("anthropic");
+      const error = new APICallError({
+        message: "Overloaded",
+        url: "https://api.anthropic.com/v1/messages",
+        requestBodyValues: {},
+        statusCode: 529,
+        responseBody:
+          '{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}',
+        isRetryable: true,
+      });
+
+      const result = JSON.parse(onError(error));
+      expect(result).toEqual({
+        code: "provider_overloaded",
+        message:
+          "That model is temporarily overloaded. Try again in a moment or switch models.",
+        statusCode: 529,
+        isRetryable: true,
+        details:
+          '{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}',
+      });
     });
 
     it("converts non-Error values to string", async () => {
@@ -582,16 +1267,1141 @@ describe("POST /api/mcp/chat-v2", () => {
       const result = JSON.parse(onError(error));
       expect(result.code).toBe("auth_error");
       expect(result.message).toBe(
-        "Invalid API key for openai. Please check your key under LLM Providers in Settings.",
+        "Invalid API key for openai. Check your organization's model providers configuration."
       );
+    });
+  });
+
+  describe("Cloud BYOK is org-based (Convex-attached)", () => {
+    // BYOK keys come from the org's Convex config. On a Convex-attached
+    // deployment a client-supplied apiKey for a cloud provider is a personal
+    // BYOK attempt, which isn't supported — rejected regardless of caller.
+    beforeEach(() => {
+      process.env.CONVEX_HTTP_URL = "https://test-convex.example.com";
+    });
+    afterEach(() => {
+      delete process.env.CONVEX_HTTP_URL;
+    });
+
+    const postWithAuth = (body: Record<string, unknown>, authHeader?: string) =>
+      app.request("/api/mcp/chat-v2", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(authHeader ? { Authorization: authHeader } : {}),
+        },
+        body: JSON.stringify(body),
+      });
+
+    const cloudByokBody = {
+      messages: [{ role: "user", content: "Hello" }],
+      model: { id: "gpt-4", provider: "openai" },
+      apiKey: "sk-user-supplied-key",
+    };
+
+    it("401s a cloud apiKey with no bearer", async () => {
+      const res = await postWithAuth(cloudByokBody);
+      const { status, data } = await expectJson<{
+        error: string;
+        code: string;
+      }>(res);
+
+      expect(status).toBe(401);
+      expect(data.code).toBe("personal_byok_unsupported");
+    });
+
+    it("401s a cloud apiKey even with a bearer (no personal BYOK)", async () => {
+      // Org-based: identity is irrelevant — a client apiKey for a cloud
+      // provider is never honored on a Convex-attached deployment.
+      const res = await postWithAuth(cloudByokBody, "Bearer any-token");
+      const { status, data } = await expectJson<{ code: string }>(res);
+
+      expect(status).toBe(401);
+      expect(data.code).toBe("personal_byok_unsupported");
+    });
+
+    it("never gates Ollama (local daemon, not a cloud account)", async () => {
+      const res = await postWithAuth(
+        {
+          messages: [{ role: "user", content: "Hello" }],
+          model: { id: "llama3", provider: "ollama" },
+          apiKey: "local",
+          ollamaBaseUrl: "http://localhost:11434",
+        },
+        "Bearer any-token"
+      );
+
+      expect(res.status).toBe(200);
+    });
+
+    it("does not gate when not Convex-attached (local OSS)", async () => {
+      delete process.env.CONVEX_HTTP_URL;
+
+      const res = await postWithAuth(cloudByokBody, "Bearer any-token");
+
+      expect(res.status).toBe(200);
+    });
+  });
+
+  describe("MCPJam model persistence", () => {
+    beforeEach(async () => {
+      const { isHostedCatalogModel } = await import(
+        "../../../services/hosted-model-catalog.js"
+      );
+      vi.mocked(isHostedCatalogModel).mockReturnValue(true);
+      process.env.CONVEX_HTTP_URL = "https://test-convex.example.com";
+    });
+
+    afterEach(() => {
+      delete process.env.CONVEX_HTTP_URL;
+    });
+
+    // PR 4 part 2 (cloud SSE wire-parity net): lock the exact trace-event
+    // sequence for the MCPJam-provided cloud path. PR 5 collapses this handler
+    // — and cloud BYOK, which wraps it (handleHostedOrgChatModel calls
+    // handleMCPJamFreeChatModel with /stream/org) — onto one facade hosted
+    // call; this snapshot proves the wire shape is unchanged.
+    it("cloud (MCPJam-provided) path: exact trace-event sequence is stable (wire parity)", async () => {
+      const originalFetch = global.fetch;
+      global.fetch = vi
+        .fn()
+        .mockImplementation(async (input: Parameters<typeof fetch>[0]) => {
+          const url = String(input);
+          if (url === "https://test-convex.example.com/stream") {
+            return createSseResponse([
+              { type: "text-start", id: "text-1" },
+              { type: "text-delta", id: "text-1", delta: "Hello" },
+              { type: "text-end", id: "text-1" },
+              {
+                type: "finish",
+                finishReason: "stop",
+                messageMetadata: {
+                  inputTokens: 1,
+                  outputTokens: 1,
+                  totalTokens: 2,
+                },
+              },
+            ]);
+          }
+          if (url === "https://test-convex.example.com/ingest-chat") {
+            return new Response(null, { status: 200 });
+          }
+          throw new Error(`Unexpected fetch URL: ${url}`);
+        });
+
+      try {
+        const res = await postAuthenticatedJson({
+          messages: [{ role: "user", content: "Hello" }],
+          model: { id: "google/gemini-2.5-flash", provider: "google" },
+          projectId: "project_123",
+        });
+        expect(res.status).toBe(200);
+        await lastStreamExecution;
+
+        const traceEventSequence = capturedStreamEvents
+          .filter((event) => event?.type === "data-trace-event")
+          .map((event) => event.data?.type);
+        expect(traceEventSequence).toMatchSnapshot();
+      } finally {
+        global.fetch = originalFetch;
+      }
+    });
+
+    it("persists completed MCPJam conversations when chatSessionId is present", async () => {
+      const originalFetch = global.fetch;
+      global.fetch = vi
+        .fn()
+        .mockImplementation(async (input: Parameters<typeof fetch>[0]) => {
+          const url = String(input);
+          if (url === "https://test-convex.example.com/stream") {
+            return createSseResponse([
+              {
+                type: "finish",
+                finishReason: "stop",
+                messageMetadata: {
+                  inputTokens: 1,
+                  outputTokens: 1,
+                  totalTokens: 2,
+                },
+              },
+            ]);
+          }
+
+          if (url === "https://test-convex.example.com/ingest-chat") {
+            return new Response(null, { status: 200 });
+          }
+
+          throw new Error(`Unexpected fetch URL: ${url}`);
+        });
+
+      try {
+        const res = await postAuthenticatedJson({
+          messages: [{ role: "user", content: "Hello" }],
+          model: { id: "google/gemini-2.5-flash", provider: "google" },
+          chatSessionId: "chat-session-1",
+          projectId: "project_123",
+          directVisibility: "project",
+          selectedServers: ["Asana", "GitHub"],
+          // Real Convex server Ids parallel to `selectedServers`. Without
+          // these the route must NOT emit hostConfig — the backend's
+          // v.id('servers') validator would reject names like "Asana".
+          selectedServerIds: ["abc123serverid", "def456serverid"],
+          systemPrompt: "you are a helpful assistant",
+          temperature: 0.4,
+          requireToolApproval: true,
+          modelVisibleMcpToolResults: imagePolicy(false),
+        });
+
+        expect(res.status).toBe(200);
+        await lastStreamExecution;
+
+        const streamCall = vi
+          .mocked(global.fetch)
+          .mock.calls.find(([url]) => String(url).endsWith("/stream"));
+        expect(streamCall).toBeDefined();
+        expect(
+          JSON.parse(String((streamCall![1] as RequestInit).body ?? "{}"))
+        ).toMatchObject({
+          projectId: "project_123",
+        });
+
+        const ingestCall = vi
+          .mocked(global.fetch)
+          .mock.calls.find(([url]) => String(url).endsWith("/ingest-chat"));
+
+        expect(ingestCall).toBeDefined();
+        const [, init] = ingestCall!;
+        const body = JSON.parse(String((init as RequestInit).body ?? "{}"));
+
+        expect(init).toMatchObject({
+          headers: expect.objectContaining({
+            authorization: "Bearer signed-in-test-token",
+          }),
+        });
+        expect(body).toMatchObject({
+          chatSessionId: "chat-session-1",
+          modelId: "google/gemini-2.5-flash",
+          modelSource: "mcpjam",
+          sourceType: "direct",
+          directVisibility: "project",
+        });
+        expect(body.sessionMessages).toEqual([
+          { role: "user", content: "Hello" },
+        ]);
+        // Phase 3: hostStyle defaults to 'claude' when the client
+        // doesn't supply one (no more legacy 'direct' on the wire).
+        expect(body.hostConfig).toEqual(
+          expect.objectContaining({
+            hostStyle: "claude",
+            systemPrompt: "you are a helpful assistant",
+            modelId: "google/gemini-2.5-flash",
+            temperature: 0.4,
+            requireToolApproval: true,
+            modelVisibleMcpToolResults: resolvedImagePolicyMatcher(false),
+            selectedServerIds: ["abc123serverid", "def456serverid"],
+          })
+        );
+        expect(body.resumeConfig).toEqual(
+          expect.objectContaining({
+            modelVisibleMcpToolResults: resolvedImagePolicyMatcher(false),
+          })
+        );
+      } finally {
+        global.fetch = originalFetch;
+      }
+    });
+
+    it("omits hostConfig when client did not send selectedServerIds (legacy local-mode body)", async () => {
+      const originalFetch = global.fetch;
+      global.fetch = vi
+        .fn()
+        .mockImplementation(async (input: Parameters<typeof fetch>[0]) => {
+          const url = String(input);
+          if (url === "https://test-convex.example.com/stream") {
+            return createSseResponse([
+              {
+                type: "finish",
+                finishReason: "stop",
+                messageMetadata: {
+                  inputTokens: 1,
+                  outputTokens: 1,
+                  totalTokens: 2,
+                },
+              },
+            ]);
+          }
+          if (url === "https://test-convex.example.com/ingest-chat") {
+            return new Response(null, { status: 200 });
+          }
+          throw new Error(`Unexpected fetch URL: ${url}`);
+        });
+
+      try {
+        const res = await postAuthenticatedJson({
+          messages: [{ role: "user", content: "Hello" }],
+          model: { id: "google/gemini-2.5-flash", provider: "google" },
+          chatSessionId: "chat-session-no-ids",
+          // Local-mode names with no parallel ID array — older inspector
+          // builds, or signed-out users whose servers aren't in Convex.
+          selectedServers: ["Asana"],
+        });
+
+        expect(res.status).toBe(200);
+        await lastStreamExecution;
+
+        const ingestCall = vi
+          .mocked(global.fetch)
+          .mock.calls.find(([url]) => String(url).endsWith("/ingest-chat"));
+        const [, init] = ingestCall!;
+        const body = JSON.parse(String((init as RequestInit).body ?? "{}"));
+
+        // Transcript still persists; backend logs `missing_field` and leaves
+        // hostConfigId null. This is preferable to sending names which would
+        // fail the v.id('servers') validator and 400 the entire ingest call.
+        expect(body.chatSessionId).toBe("chat-session-no-ids");
+        expect("hostConfig" in body).toBe(false);
+      } finally {
+        global.fetch = originalFetch;
+      }
+    });
+
+    it("omits hostConfig when selectedServerIds length doesn't match selectedServers", async () => {
+      const originalFetch = global.fetch;
+      global.fetch = vi
+        .fn()
+        .mockImplementation(async (input: Parameters<typeof fetch>[0]) => {
+          const url = String(input);
+          if (url === "https://test-convex.example.com/stream") {
+            return createSseResponse([
+              {
+                type: "finish",
+                finishReason: "stop",
+                messageMetadata: {
+                  inputTokens: 1,
+                  outputTokens: 1,
+                  totalTokens: 2,
+                },
+              },
+            ]);
+          }
+          if (url === "https://test-convex.example.com/ingest-chat") {
+            return new Response(null, { status: 200 });
+          }
+          throw new Error(`Unexpected fetch URL: ${url}`);
+        });
+
+      try {
+        const res = await postAuthenticatedJson({
+          messages: [{ role: "user", content: "Hello" }],
+          model: { id: "google/gemini-2.5-flash", provider: "google" },
+          chatSessionId: "chat-session-partial-ids",
+          // Two selected names but only one resolved Id — partial mappings
+          // would dedupe to a different hostConfig than intended, so the
+          // route must drop the field entirely.
+          selectedServers: ["Asana", "GitHub"],
+          selectedServerIds: ["abc123serverid"],
+        });
+
+        expect(res.status).toBe(200);
+        await lastStreamExecution;
+
+        const ingestCall = vi
+          .mocked(global.fetch)
+          .mock.calls.find(([url]) => String(url).endsWith("/ingest-chat"));
+        const [, init] = ingestCall!;
+        const body = JSON.parse(String((init as RequestInit).body ?? "{}"));
+
+        expect("hostConfig" in body).toBe(false);
+      } finally {
+        global.fetch = originalFetch;
+      }
+    });
+
+    it("attaches a numeric hostConfig.temperature for GPT-5 (resolvedTemperature: undefined)", async () => {
+      const { isGPT5Model } = await import("@/shared/types");
+      vi.mocked(isGPT5Model).mockReturnValueOnce(true);
+
+      const originalFetch = global.fetch;
+      global.fetch = vi
+        .fn()
+        .mockImplementation(async (input: Parameters<typeof fetch>[0]) => {
+          const url = String(input);
+          if (url === "https://test-convex.example.com/stream") {
+            return createSseResponse([
+              {
+                type: "finish",
+                finishReason: "stop",
+                messageMetadata: {
+                  inputTokens: 1,
+                  outputTokens: 1,
+                  totalTokens: 2,
+                },
+              },
+            ]);
+          }
+          if (url === "https://test-convex.example.com/ingest-chat") {
+            return new Response(null, { status: 200 });
+          }
+          throw new Error(`Unexpected fetch URL: ${url}`);
+        });
+
+      try {
+        const res = await postAuthenticatedJson({
+          messages: [{ role: "user", content: "Hello" }],
+          model: { id: "openai/gpt-5-mini", provider: "openai" },
+          chatSessionId: "chat-session-gpt5",
+          temperature: 0.3,
+          // Empty server selection still requires the matching Ids array
+          // (length === 0) for hostConfig to be emitted at all.
+          selectedServerIds: [],
+        });
+
+        expect(res.status).toBe(200);
+        await lastStreamExecution;
+
+        const ingestCall = vi
+          .mocked(global.fetch)
+          .mock.calls.find(([url]) => String(url).endsWith("/ingest-chat"));
+
+        expect(ingestCall).toBeDefined();
+        const [, init] = ingestCall!;
+        const body = JSON.parse(String((init as RequestInit).body ?? "{}"));
+
+        // resolvedTemperature is undefined on GPT-5; helper must coerce to a
+        // numeric value (here, the requested temperature) so the backend's
+        // HostConfigPayload guard accepts the field.
+        expect(typeof body.hostConfig.temperature).toBe("number");
+        expect(body.hostConfig.temperature).toBe(0.3);
+        expect("modelVisibleMcpToolResults" in body.hostConfig).toBe(false);
+      } finally {
+        global.fetch = originalFetch;
+      }
+    });
+
+    it("uses a guest token for claude-haiku-4.5 guest requests", async () => {
+      const originalFetch = global.fetch;
+      global.fetch = vi
+        .fn()
+        .mockImplementation(async (input: Parameters<typeof fetch>[0]) => {
+          const url = String(input);
+          if (url === "https://test-convex.example.com/stream") {
+            return createSseResponse([
+              {
+                type: "finish",
+                finishReason: "stop",
+                messageMetadata: {
+                  inputTokens: 1,
+                  outputTokens: 1,
+                  totalTokens: 2,
+                },
+              },
+            ]);
+          }
+
+          if (url === "https://test-convex.example.com/ingest-chat") {
+            return new Response(null, { status: 200 });
+          }
+
+          throw new Error(`Unexpected fetch URL: ${url}`);
+        });
+
+      try {
+        const res = await postJson(app, "/api/mcp/chat-v2", {
+          messages: [{ role: "user", content: "Hello" }],
+          model: { id: "anthropic/claude-haiku-4.5", provider: "anthropic" },
+        });
+
+        expect(res.status).toBe(200);
+        await lastStreamExecution;
+
+        const streamCall = vi
+          .mocked(global.fetch)
+          .mock.calls.find(([url]) => String(url).endsWith("/stream"));
+
+        expect(streamCall).toBeDefined();
+        const [, init] = streamCall!;
+        expect(init).toMatchObject({
+          headers: expect.objectContaining({
+            authorization: "Bearer guest-test-token",
+          }),
+        });
+      } finally {
+        global.fetch = originalFetch;
+      }
+    });
+
+    it("advertises built-in tools for MCPJam guest requests after resolving guest auth", async () => {
+      const originalFetch = global.fetch;
+      global.fetch = vi
+        .fn()
+        .mockImplementation(async (input: Parameters<typeof fetch>[0]) => {
+          const url = String(input);
+          if (url === "https://test-convex.example.com/stream") {
+            return createSseResponse([
+              {
+                type: "finish",
+                finishReason: "stop",
+                messageMetadata: {
+                  inputTokens: 1,
+                  outputTokens: 1,
+                  totalTokens: 2,
+                },
+              },
+            ]);
+          }
+
+          if (url === "https://test-convex.example.com/ingest-chat") {
+            return new Response(null, { status: 200 });
+          }
+
+          throw new Error(`Unexpected fetch URL: ${url}`);
+        });
+
+      try {
+        const res = await postJson(app, "/api/mcp/chat-v2", {
+          messages: [{ role: "user", content: "Search for current docs" }],
+          model: { id: "anthropic/claude-haiku-4.5", provider: "anthropic" },
+          projectId: "project-1",
+          builtInToolIds: ["web_search"],
+        });
+
+        expect(res.status).toBe(200);
+        await lastStreamExecution;
+
+        const streamCall = vi
+          .mocked(global.fetch)
+          .mock.calls.find(([url]) => String(url).endsWith("/stream"));
+
+        expect(streamCall).toBeDefined();
+        const [, init] = streamCall!;
+        expect(init).toMatchObject({
+          headers: expect.objectContaining({
+            authorization: "Bearer guest-test-token",
+          }),
+        });
+
+        const streamBody = JSON.parse(
+          String((init as RequestInit).body ?? "{}")
+        );
+        expect(streamBody.tools).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({ name: "web_search" }),
+          ])
+        );
+      } finally {
+        global.fetch = originalFetch;
+      }
+    });
+
+    it("uses a guest token for non-gated MCPJam guest requests", async () => {
+      const { getProductionGuestAuthHeader } = await import(
+        "../../../utils/guest-auth.js"
+      );
+
+      const originalFetch = global.fetch;
+      global.fetch = vi
+        .fn()
+        .mockImplementation(async (input: Parameters<typeof fetch>[0]) => {
+          const url = String(input);
+          if (url === "https://test-convex.example.com/stream") {
+            return createSseResponse([
+              {
+                type: "finish",
+                finishReason: "stop",
+                messageMetadata: {
+                  inputTokens: 1,
+                  outputTokens: 1,
+                  totalTokens: 2,
+                },
+              },
+            ]);
+          }
+
+          if (url === "https://test-convex.example.com/ingest-chat") {
+            return new Response(null, { status: 200 });
+          }
+
+          throw new Error(`Unexpected fetch URL: ${url}`);
+        });
+
+      try {
+        const res = await postJson(app, "/api/mcp/chat-v2", {
+          messages: [{ role: "user", content: "Hello" }],
+          model: { id: "openai/gpt-4o-mini", provider: "openai" },
+        });
+        expect(res.status).toBe(200);
+        await lastStreamExecution;
+
+        const streamCall = vi
+          .mocked(global.fetch)
+          .mock.calls.find(([url]) => String(url).endsWith("/stream"));
+
+        expect(streamCall).toBeDefined();
+        const [, init] = streamCall!;
+        expect(init).toMatchObject({
+          headers: expect.objectContaining({
+            authorization: "Bearer guest-test-token",
+          }),
+        });
+        expect(vi.mocked(getProductionGuestAuthHeader)).toHaveBeenCalled();
+      } finally {
+        global.fetch = originalFetch;
+      }
+    });
+
+    it("routes signed-in MCPJam DeepSeek hosted models through Convex instead of BYOK", async () => {
+      const { createLlmModel } = await import("../../../utils/chat-helpers");
+
+      const originalFetch = global.fetch;
+      global.fetch = vi
+        .fn()
+        .mockImplementation(async (input: Parameters<typeof fetch>[0]) => {
+          const url = String(input);
+          if (url === "https://test-convex.example.com/stream") {
+            return createSseResponse([
+              {
+                type: "finish",
+                finishReason: "stop",
+                messageMetadata: {
+                  inputTokens: 1,
+                  outputTokens: 1,
+                  totalTokens: 2,
+                },
+              },
+            ]);
+          }
+
+          if (url === "https://test-convex.example.com/ingest-chat") {
+            return new Response(null, { status: 200 });
+          }
+
+          throw new Error(`Unexpected fetch URL: ${url}`);
+        });
+
+      try {
+        const res = await postAuthenticatedJson({
+          messages: [{ role: "user", content: "Hello" }],
+          model: {
+            id: "deepseek/deepseek-v4-pro",
+            name: "DeepSeek V4 Pro (Free)",
+            provider: "deepseek",
+          },
+        });
+
+        expect(res.status).toBe(200);
+        await lastStreamExecution;
+
+        const streamCall = vi
+          .mocked(global.fetch)
+          .mock.calls.find(([url]) => String(url).endsWith("/stream"));
+
+        expect(streamCall).toBeDefined();
+        const [, init] = streamCall!;
+        expect(init).toMatchObject({
+          headers: expect.objectContaining({
+            authorization: "Bearer signed-in-test-token",
+          }),
+        });
+        expect(vi.mocked(createLlmModel)).not.toHaveBeenCalled();
+      } finally {
+        global.fetch = originalFetch;
+      }
+    });
+
+    // Guests are no longer model-curated (the backend enforces spend caps, not
+    // an allowlist), so these formerly-gated premium models now pass through
+    // and get a guest bearer minted server-side — no 403.
+    it.each([
+      { id: "openai/gpt-5.4-pro", provider: "openai" },
+      { id: "anthropic/claude-opus-4.6", provider: "anthropic" },
+      { id: "google/gemini-3.1-pro-preview", provider: "google" },
+    ])(
+      "mints a guest token for formerly-gated MCPJam model $id (no rejection)",
+      async ({ id, provider }) => {
+        const { getProductionGuestAuthHeader } = await import(
+          "../../../utils/guest-auth.js"
+        );
+
+        const originalFetch = global.fetch;
+        global.fetch = vi
+          .fn()
+          .mockImplementation(async (input: Parameters<typeof fetch>[0]) => {
+            const url = String(input);
+            if (url === "https://test-convex.example.com/stream") {
+              return createSseResponse([
+                {
+                  type: "finish",
+                  finishReason: "stop",
+                  messageMetadata: {
+                    inputTokens: 1,
+                    outputTokens: 1,
+                    totalTokens: 2,
+                  },
+                },
+              ]);
+            }
+            if (url === "https://test-convex.example.com/ingest-chat") {
+              return new Response(null, { status: 200 });
+            }
+            throw new Error(`Unexpected fetch URL: ${url}`);
+          });
+
+        try {
+          const res = await postJson(app, "/api/mcp/chat-v2", {
+            messages: [{ role: "user", content: "Hello" }],
+            model: { id, provider },
+          });
+          expect(res.status).toBe(200);
+          await lastStreamExecution;
+
+          // The guest bearer is minted (the path a 403 used to short-circuit).
+          expect(vi.mocked(getProductionGuestAuthHeader)).toHaveBeenCalled();
+          const streamCall = vi
+            .mocked(global.fetch)
+            .mock.calls.find(([url]) => String(url).endsWith("/stream"));
+          expect(streamCall).toBeDefined();
+          // …and that minted bearer must actually be SENT on the upstream
+          // /stream call, not merely resolved — otherwise the guest request
+          // would reach Convex unauthenticated.
+          const streamHeaders = new Headers(
+            (streamCall?.[1] as RequestInit | undefined)?.headers,
+          );
+          expect(streamHeaders.get("authorization")).toBe(
+            "Bearer guest-test-token",
+          );
+        } finally {
+          global.fetch = originalFetch;
+        }
+      }
+    );
+  });
+
+  describe("Org BYOK Convex routing", () => {
+    beforeEach(async () => {
+      const { isHostedCatalogModel } = await import(
+        "../../../services/hosted-model-catalog.js"
+      );
+      vi.mocked(isHostedCatalogModel).mockReturnValue(false);
+      process.env.CONVEX_HTTP_URL = "https://test-convex.example.com";
+    });
+
+    afterEach(() => {
+      delete process.env.CONVEX_HTTP_URL;
+    });
+
+    it("routes cloud org BYOK chat through /stream/org without a service token", async () => {
+      const originalFetch = global.fetch;
+      const fetchMock = vi.fn().mockImplementation(async (input, init) => {
+        const url = String(input);
+        if (url === "https://test-convex.example.com/stream/org") {
+          const headers = new Headers(
+            (init as RequestInit | undefined)?.headers
+          );
+          expect(headers.get("X-Inspector-Service-Token")).toBeNull();
+          expect(headers.get("Authorization")).toBe(
+            "Bearer signed-in-test-token"
+          );
+          const body = JSON.parse(String((init as RequestInit).body ?? "{}"));
+          expect(body).toMatchObject({
+            projectId: "project-1",
+            providerKey: "openai",
+            model: "gpt-4-turbo",
+          });
+          return createSseResponse([
+            {
+              type: "finish",
+              finishReason: "stop",
+              messageMetadata: {
+                inputTokens: 1,
+                outputTokens: 1,
+                totalTokens: 2,
+              },
+            },
+          ]);
+        }
+        throw new Error(`Unexpected fetch URL: ${url}`);
+      });
+      global.fetch = fetchMock;
+
+      try {
+        const res = await postAuthenticatedJson({
+          messages: [{ role: "user", content: "Hello" }],
+          model: { id: "gpt-4-turbo", provider: "openai" },
+          projectId: "project-1",
+        });
+
+        expect(res.status).toBe(200);
+        await lastStreamExecution;
+        expect(fetchMock).toHaveBeenCalledTimes(1);
+      } finally {
+        global.fetch = originalFetch;
+      }
+    });
+
+    it("resolves local-runtime org BYOK chat before running locally", async () => {
+      const originalFetch = global.fetch;
+      const fetchMock = vi.fn().mockImplementation(async (input, init) => {
+        const url = String(input);
+        if (url === "https://test-convex.example.com/stream/org/resolve") {
+          const headers = new Headers(
+            (init as RequestInit | undefined)?.headers
+          );
+          expect(headers.get("X-Inspector-Service-Token")).toBeNull();
+          expect(headers.get("Authorization")).toBe(
+            "Bearer signed-in-test-token"
+          );
+          const body = JSON.parse(String((init as RequestInit).body ?? "{}"));
+          expect(body).toMatchObject({
+            projectId: "project-1",
+            providerKey: "custom:local-one",
+            model: "custom:local-one:m-1",
+          });
+          return Response.json({
+            ok: true,
+            runtimeLocation: "local",
+            provider: {
+              providerKey: "custom:local-one",
+              apiKey: "sk-local",
+              baseUrl: "https://llm.example.com",
+              protocol: "openai-compatible",
+              modelIds: ["m-1"],
+            },
+          });
+        }
+        if (url === "https://test-convex.example.com/stream/org/local-usage") {
+          const headers = new Headers(
+            (init as RequestInit | undefined)?.headers
+          );
+          expect(headers.get("X-Inspector-Service-Token")).toBeNull();
+          expect(headers.get("Authorization")).toBe(
+            "Bearer signed-in-test-token"
+          );
+          return Response.json({ ok: true });
+        }
+        throw new Error(`Unexpected fetch URL: ${url}`);
+      });
+      global.fetch = fetchMock;
+
+      try {
+        const res = await postAuthenticatedJson({
+          messages: [{ role: "user", content: "Hello" }],
+          model: {
+            id: "custom:local-one:m-1",
+            provider: "custom",
+            customProviderName: "local-one",
+          },
+          projectId: "project-1",
+        });
+
+        expect(res.status).toBe(200);
+        await lastStreamExecution;
+        expect(fetchMock).toHaveBeenCalledWith(
+          "https://test-convex.example.com/stream/org/resolve",
+          expect.anything()
+        );
+        expect(fetchMock).toHaveBeenCalledWith(
+          "https://test-convex.example.com/stream/org/local-usage",
+          expect.anything()
+        );
+        expect(
+          fetchMock.mock.calls.some(
+            ([input]) =>
+              String(input) === "https://test-convex.example.com/stream/org"
+          )
+        ).toBe(false);
+      } finally {
+        global.fetch = originalFetch;
+      }
+    });
+
+    it("forces the cloud /stream/org proxy for local-only MCP even with a local-eligible provider", async () => {
+      // A `custom:` provider is local-runtime-eligible, so without the flag this
+      // chat resolves + runs the model locally (see the test above). When a
+      // selected MCP server is local-only, `localMcpRuntimeRequired` must force
+      // the CLOUD runtime so the org key stays in Convex and the model call is
+      // proxied through /stream/org — the tool loop still runs locally against
+      // the local MCP connection.
+      const originalFetch = global.fetch;
+      const fetchMock = vi.fn().mockImplementation(async (input, init) => {
+        const url = String(input);
+        if (url === "https://test-convex.example.com/stream/org") {
+          const headers = new Headers(
+            (init as RequestInit | undefined)?.headers
+          );
+          expect(headers.get("X-Inspector-Service-Token")).toBeNull();
+          expect(headers.get("Authorization")).toBe(
+            "Bearer signed-in-test-token"
+          );
+          const body = JSON.parse(String((init as RequestInit).body ?? "{}"));
+          expect(body).toMatchObject({
+            projectId: "project-1",
+            providerKey: "custom:local-one",
+          });
+          return createSseResponse([
+            {
+              type: "finish",
+              finishReason: "stop",
+              messageMetadata: {
+                inputTokens: 1,
+                outputTokens: 1,
+                totalTokens: 2,
+              },
+            },
+          ]);
+        }
+        throw new Error(`Unexpected fetch URL: ${url}`);
+      });
+      global.fetch = fetchMock;
+
+      try {
+        const res = await postAuthenticatedJson({
+          messages: [{ role: "user", content: "Hello" }],
+          model: {
+            id: "custom:local-one:m-1",
+            provider: "custom",
+            customProviderName: "local-one",
+          },
+          projectId: "project-1",
+          selectedServers: ["server-1"],
+          selectedServerIds: ["server-1"],
+          localMcpRuntimeRequired: true,
+        });
+
+        expect(res.status).toBe(200);
+        await lastStreamExecution;
+        // Cloud proxy hit; the local-runtime resolve path is never taken, so
+        // the org key never leaves Convex.
+        expect(
+          fetchMock.mock.calls.some(
+            ([input]) =>
+              String(input) === "https://test-convex.example.com/stream/org"
+          )
+        ).toBe(true);
+        expect(
+          fetchMock.mock.calls.some(([input]) =>
+            String(input).includes("/stream/org/resolve")
+          )
+        ).toBe(false);
+      } finally {
+        global.fetch = originalFetch;
+      }
+    });
+  });
+
+  describe("task-created delivery (BYOK paths)", () => {
+    // A host config whose tasks policy is ON — the only thing that makes the
+    // route build the task seam + created-task bridge for the chat surface.
+    const tasksOnHostConfig = {
+      hostId: "host-tasks",
+      mcpProfile: {
+        extensions: { "com.mcpjam/tasks": { enabled: true } },
+      },
+    };
+
+    const taskCreatedEvent = {
+      identity: {
+        serverId: "server-1",
+        wire: "extension" as const,
+        taskId: "task-123",
+      },
+      wire: "extension" as const,
+      surface: "chat" as const,
+      status: "working",
+    };
+
+    /**
+     * The seam options the route handed to `getToolsForAiSdk`. Dispatching
+     * `onTaskCreated` through them exercises the real sink → bridge → stream
+     * writer chain, exactly as a tool call creating a task would.
+     */
+    const capturedTaskSeam = () => {
+      const call = manager.getToolsForAiSdk.mock.calls.find(
+        (args: unknown[]) =>
+          (args[1] as { tasks?: unknown } | undefined)?.tasks !== undefined
+      );
+      expect(call).toBeDefined();
+      return (call![1] as { tasks: { onTaskCreated: (e: unknown) => Promise<void> } })
+        .tasks;
+    };
+
+    const expectTaskCreatedPartDelivered = () => {
+      const part = capturedStreamEvents.find(
+        (event) => event?.type === "data-task-created"
+      );
+      expect(part).toBeDefined();
+      expect(part.transient).toBe(true);
+      expect(part.data).toMatchObject({
+        taskId: "task-123",
+        serverId: "server-1",
+        wire: "extension",
+        status: "working",
+      });
+    };
+
+    beforeEach(() => {
+      fetchHostRuntimeConfigMock.mockResolvedValue({
+        ok: true,
+        config: tasksOnHostConfig,
+      });
+    });
+
+    afterEach(() => {
+      delete process.env.CONVEX_HTTP_URL;
+    });
+
+    it("delivers the task-created part on the direct user-key path", async () => {
+      const res = await postAuthenticatedJson({
+        messages: [{ role: "user", content: "Hello" }],
+        model: { id: "gpt-4", provider: "openai" },
+        apiKey: "test-key",
+        hostId: "host-tasks",
+        selectedServers: ["server-1"],
+      });
+
+      expect(res.status).toBe(200);
+      await lastStreamExecution;
+      await capturedTaskSeam().onTaskCreated(taskCreatedEvent);
+      expectTaskCreatedPartDelivered();
+    });
+
+    it("attaches the writer before the first tool call could fire (direct path, no bridge warn-drop)", async () => {
+      // The task-created sink dispatches SYNCHRONOUSLY from inside the tool
+      // loop, so the bridge must hold the writer by the time `streamText`
+      // (where the first tool call can fire) is invoked. Dispatch from inside
+      // the streamText implementation: if the writer were attached any later,
+      // the bridge would warn-drop the part instead of delivering it.
+      const { streamText } = await import("ai");
+      const { logger } = await import("../../../utils/logger");
+      const warnSpy = vi.spyOn(logger, "warn");
+      let dispatched: Promise<void> | undefined;
+      const baseImpl = vi.mocked(streamText).getMockImplementation()!;
+      vi.mocked(streamText).mockImplementationOnce((options: any) => {
+        dispatched = capturedTaskSeam().onTaskCreated(taskCreatedEvent);
+        return baseImpl(options);
+      });
+
+      const res = await postAuthenticatedJson({
+        messages: [{ role: "user", content: "Hello" }],
+        model: { id: "gpt-4", provider: "openai" },
+        apiKey: "test-key",
+        hostId: "host-tasks",
+        selectedServers: ["server-1"],
+      });
+
+      expect(res.status).toBe(200);
+      await lastStreamExecution;
+      expect(dispatched).toBeDefined();
+      await dispatched;
+      expectTaskCreatedPartDelivered();
+      expect(
+        warnSpy.mock.calls.some(([message]) =>
+          String(message).includes("no live stream writer")
+        )
+      ).toBe(false);
+      warnSpy.mockRestore();
+    });
+
+    it("delivers the task-created part on the hosted-org path (/stream/org)", async () => {
+      process.env.CONVEX_HTTP_URL = "https://test-convex.example.com";
+      const originalFetch = global.fetch;
+      // Dispatched MID-STREAM, from inside the /stream/org fetch — the moment
+      // a real tool call would create a task. The hosted engine closes its
+      // safe-writer at teardown, so a post-stream dispatch would be silently
+      // dropped; delivery here proves the writer was attached before the tool
+      // loop started.
+      let dispatched: Promise<void> | undefined;
+      global.fetch = vi.fn().mockImplementation(async (input) => {
+        const url = String(input);
+        if (url === "https://test-convex.example.com/stream/org") {
+          dispatched = capturedTaskSeam().onTaskCreated(taskCreatedEvent);
+          return createSseResponse([
+            {
+              type: "finish",
+              finishReason: "stop",
+              messageMetadata: {
+                inputTokens: 1,
+                outputTokens: 1,
+                totalTokens: 2,
+              },
+            },
+          ]);
+        }
+        throw new Error(`Unexpected fetch URL: ${url}`);
+      });
+
+      try {
+        const res = await postAuthenticatedJson({
+          messages: [{ role: "user", content: "Hello" }],
+          model: { id: "gpt-4-turbo", provider: "openai" },
+          projectId: "project-1",
+          hostId: "host-tasks",
+          selectedServers: ["server-1"],
+        });
+
+        expect(res.status).toBe(200);
+        await lastStreamExecution;
+        expect(dispatched).toBeDefined();
+        await dispatched;
+        expectTaskCreatedPartDelivered();
+      } finally {
+        global.fetch = originalFetch;
+      }
+    });
+
+    it("delivers the task-created part on the local-org path", async () => {
+      process.env.CONVEX_HTTP_URL = "https://test-convex.example.com";
+      const originalFetch = global.fetch;
+      global.fetch = vi.fn().mockImplementation(async (input) => {
+        const url = String(input);
+        if (url === "https://test-convex.example.com/stream/org/resolve") {
+          return Response.json({
+            ok: true,
+            runtimeLocation: "local",
+            provider: {
+              providerKey: "custom:local-one",
+              apiKey: "sk-local",
+              baseUrl: "https://llm.example.com",
+              protocol: "openai-compatible",
+              modelIds: ["m-1"],
+            },
+          });
+        }
+        if (url === "https://test-convex.example.com/stream/org/local-usage") {
+          return Response.json({ ok: true });
+        }
+        throw new Error(`Unexpected fetch URL: ${url}`);
+      });
+
+      try {
+        const res = await postAuthenticatedJson({
+          messages: [{ role: "user", content: "Hello" }],
+          model: {
+            id: "custom:local-one:m-1",
+            provider: "custom",
+            customProviderName: "local-one",
+          },
+          projectId: "project-1",
+          hostId: "host-tasks",
+          selectedServers: ["server-1"],
+        });
+
+        expect(res.status).toBe(200);
+        await lastStreamExecution;
+        await capturedTaskSeam().onTaskCreated(taskCreatedEvent);
+        expectTaskCreatedPartDelivered();
+      } finally {
+        global.fetch = originalFetch;
+      }
     });
   });
 
   describe("unresolved tool calls from aborted requests (MCPJam models)", () => {
     beforeEach(async () => {
       // Enable MCPJam model path
-      const { isMCPJamProvidedModel } = await import("@/shared/types");
-      vi.mocked(isMCPJamProvidedModel).mockReturnValue(true);
+      const { isHostedCatalogModel } = await import(
+        "../../../services/hosted-model-catalog.js"
+      );
+      vi.mocked(isHostedCatalogModel).mockReturnValue(true);
 
       // Set required env var
       process.env.CONVEX_HTTP_URL = "https://test-convex.example.com";
@@ -612,23 +2422,23 @@ describe("POST /api/mcp/chat-v2", () => {
         hasUnresolvedCallCount++;
         return hasUnresolvedCallCount === 1;
       });
-      vi.mocked(executeToolCallsFromMessages).mockImplementation(
-        async (messages: any[]) => {
-          // Simulate adding tool result to messages
-          const toolResultMsg = {
-            role: "tool",
-            content: [
-              {
-                type: "tool-result",
-                toolCallId: "orphaned-call-123",
-                output: { type: "json", value: { result: "executed" } },
-              },
-            ],
-          };
-          messages.push(toolResultMsg);
-          return [toolResultMsg];
-        },
-      );
+      vi.mocked(executeToolCallsFromMessages).mockImplementation((async (
+        messages: any[]
+      ) => {
+        // Simulate adding tool result to messages
+        const toolResultMsg = {
+          role: "tool",
+          content: [
+            {
+              type: "tool-result",
+              toolCallId: "orphaned-call-123",
+              output: { type: "json", value: { result: "executed" } },
+            },
+          ],
+        } as unknown as ModelMessage;
+        messages.push(toolResultMsg);
+        return [toolResultMsg];
+      }) as any);
 
       // Mock fetch for CONVEX_HTTP_URL - return fresh response each time
       const originalFetch = global.fetch;
@@ -648,7 +2458,7 @@ describe("POST /api/mcp/chat-v2", () => {
         .mockImplementation(async () => createSseResponse(finishEvents));
 
       try {
-        await postJson(app, "/api/mcp/chat-v2", {
+        await postAuthenticatedJson({
           messages: [
             { role: "user", content: "Continue" },
             {
@@ -657,7 +2467,7 @@ describe("POST /api/mcp/chat-v2", () => {
                 {
                   type: "tool-call",
                   toolCallId: "orphaned-call-123",
-                  toolName: "asana_list_workspaces",
+                  toolName: "asana_list_projects",
                   input: {},
                 },
               ],
@@ -669,34 +2479,34 @@ describe("POST /api/mcp/chat-v2", () => {
 
         // Find tool-input-available and tool-output-available events
         const toolInputEvents = capturedStreamEvents.filter(
-          (e) => e.type === "tool-input-available",
+          (e) => e.type === "tool-input-available"
         );
         const toolOutputEvents = capturedStreamEvents.filter(
-          (e) => e.type === "tool-output-available",
+          (e) => e.type === "tool-output-available"
         );
 
         // Verify tool-input-available was emitted for the orphaned tool call
         expect(toolInputEvents.length).toBeGreaterThanOrEqual(1);
         expect(
-          toolInputEvents.some((e) => e.toolCallId === "orphaned-call-123"),
+          toolInputEvents.some((e) => e.toolCallId === "orphaned-call-123")
         ).toBe(true);
 
         // Verify tool-output-available was also emitted
         expect(toolOutputEvents.length).toBeGreaterThanOrEqual(1);
         expect(
-          toolOutputEvents.some((e) => e.toolCallId === "orphaned-call-123"),
+          toolOutputEvents.some((e) => e.toolCallId === "orphaned-call-123")
         ).toBe(true);
 
         // Verify order: tool-input-available must come before tool-output-available
         const inputIndex = capturedStreamEvents.findIndex(
           (e) =>
             e.type === "tool-input-available" &&
-            e.toolCallId === "orphaned-call-123",
+            e.toolCallId === "orphaned-call-123"
         );
         const outputIndex = capturedStreamEvents.findIndex(
           (e) =>
             e.type === "tool-output-available" &&
-            e.toolCallId === "orphaned-call-123",
+            e.toolCallId === "orphaned-call-123"
         );
 
         expect(inputIndex).toBeLessThan(outputIndex);
@@ -712,7 +2522,7 @@ describe("POST /api/mcp/chat-v2", () => {
       // No unresolved tool calls - all are resolved
       vi.mocked(hasUnresolvedToolCalls).mockReturnValue(false);
       vi.mocked(executeToolCallsFromMessages).mockImplementation(
-        async () => {},
+        (async () => []) as any
       );
 
       // Mock fetch for CONVEX_HTTP_URL
@@ -728,11 +2538,11 @@ describe("POST /api/mcp/chat-v2", () => {
               totalTokens: 2,
             },
           },
-        ]),
+        ])
       );
 
       try {
-        await postJson(app, "/api/mcp/chat-v2", {
+        await postAuthenticatedJson({
           messages: [
             { role: "user", content: "Continue" },
             {
@@ -765,7 +2575,7 @@ describe("POST /api/mcp/chat-v2", () => {
         const toolInputEvents = capturedStreamEvents.filter(
           (e) =>
             e.type === "tool-input-available" &&
-            e.toolCallId === "resolved-call-456",
+            e.toolCallId === "resolved-call-456"
         );
 
         expect(toolInputEvents.length).toBe(0);
@@ -784,31 +2594,33 @@ describe("POST /api/mcp/chat-v2", () => {
         hasUnresolvedCallCount++;
         return hasUnresolvedCallCount === 1;
       });
-      vi.mocked(executeToolCallsFromMessages).mockImplementation(
-        async (messages: any[]) => {
-          // Simulate adding tool results for both calls
-          messages.push({
-            role: "tool",
-            content: [
-              {
-                type: "tool-result",
-                toolCallId: "call-1",
-                output: { type: "json", value: { result: "result1" } },
-              },
-            ],
-          });
-          messages.push({
-            role: "tool",
-            content: [
-              {
-                type: "tool-result",
-                toolCallId: "call-2",
-                output: { type: "json", value: { result: "result2" } },
-              },
-            ],
-          });
-        },
-      );
+      vi.mocked(executeToolCallsFromMessages).mockImplementation((async (
+        messages: any[]
+      ) => {
+        // Simulate adding tool results for both calls
+        const firstToolResult = {
+          role: "tool",
+          content: [
+            {
+              type: "tool-result",
+              toolCallId: "call-1",
+              output: { type: "json", value: { result: "result1" } },
+            },
+          ],
+        } as unknown as ModelMessage;
+        const secondToolResult = {
+          role: "tool",
+          content: [
+            {
+              type: "tool-result",
+              toolCallId: "call-2",
+              output: { type: "json", value: { result: "result2" } },
+            },
+          ],
+        } as unknown as ModelMessage;
+        messages.push(firstToolResult, secondToolResult);
+        return [firstToolResult, secondToolResult];
+      }) as any);
 
       // Mock fetch for CONVEX_HTTP_URL - return fresh response each time
       const originalFetch = global.fetch;
@@ -828,7 +2640,7 @@ describe("POST /api/mcp/chat-v2", () => {
         .mockImplementation(async () => createSseResponse(finishEvents));
 
       try {
-        await postJson(app, "/api/mcp/chat-v2", {
+        await postAuthenticatedJson({
           messages: [
             { role: "user", content: "Do two things" },
             {
@@ -855,22 +2667,22 @@ describe("POST /api/mcp/chat-v2", () => {
 
         // Verify both tool calls get tool-input-available emitted
         const toolInputEvents = capturedStreamEvents.filter(
-          (e) => e.type === "tool-input-available",
+          (e) => e.type === "tool-input-available"
         );
 
         expect(toolInputEvents.some((e) => e.toolCallId === "call-1")).toBe(
-          true,
+          true
         );
         expect(toolInputEvents.some((e) => e.toolCallId === "call-2")).toBe(
-          true,
+          true
         );
 
         // Verify tool names and inputs are preserved
         const call1Event = toolInputEvents.find(
-          (e) => e.toolCallId === "call-1",
+          (e) => e.toolCallId === "call-1"
         );
         const call2Event = toolInputEvents.find(
-          (e) => e.toolCallId === "call-2",
+          (e) => e.toolCallId === "call-2"
         );
 
         expect(call1Event?.toolName).toBe("tool_a");
@@ -892,32 +2704,32 @@ describe("POST /api/mcp/chat-v2", () => {
         hasUnresolvedCallCount++;
         return hasUnresolvedCallCount === 1;
       });
-      vi.mocked(executeToolCallsFromMessages).mockImplementation(
-        async (messages: any[]) => {
-          const msg1 = {
-            role: "tool",
-            content: [
-              {
-                type: "tool-result",
-                toolCallId: "batch-call-1",
-                output: { type: "json", value: { stops: ["Berryessa"] } },
-              },
-            ],
-          };
-          const msg2 = {
-            role: "tool",
-            content: [
-              {
-                type: "tool-result",
-                toolCallId: "batch-call-2",
-                output: { type: "json", value: { stops: ["Montgomery"] } },
-              },
-            ],
-          };
-          messages.push(msg1, msg2);
-          return [msg1, msg2];
-        },
-      );
+      vi.mocked(executeToolCallsFromMessages).mockImplementation((async (
+        messages: any[]
+      ) => {
+        const msg1 = {
+          role: "tool",
+          content: [
+            {
+              type: "tool-result",
+              toolCallId: "batch-call-1",
+              output: { type: "json", value: { stops: ["Berryessa"] } },
+            },
+          ],
+        } as unknown as ModelMessage;
+        const msg2 = {
+          role: "tool",
+          content: [
+            {
+              type: "tool-result",
+              toolCallId: "batch-call-2",
+              output: { type: "json", value: { stops: ["Montgomery"] } },
+            },
+          ],
+        } as unknown as ModelMessage;
+        messages.push(msg1, msg2);
+        return [msg1, msg2];
+      }) as any);
 
       const originalFetch = global.fetch;
       let fetchCallCount = 0;
@@ -971,7 +2783,7 @@ describe("POST /api/mcp/chat-v2", () => {
       });
 
       try {
-        await postJson(app, "/api/mcp/chat-v2", {
+        await postAuthenticatedJson({
           messages: [
             { role: "user", content: "Search stops Berryessa and Montgomery" },
           ],
@@ -981,24 +2793,24 @@ describe("POST /api/mcp/chat-v2", () => {
 
         // Both tool calls should be collected from a single fetch
         const toolInputEvents = capturedStreamEvents.filter(
-          (e) => e.type === "tool-input-available",
+          (e) => e.type === "tool-input-available"
         );
         expect(
-          toolInputEvents.some((e) => e.toolCallId === "batch-call-1"),
+          toolInputEvents.some((e) => e.toolCallId === "batch-call-1")
         ).toBe(true);
         expect(
-          toolInputEvents.some((e) => e.toolCallId === "batch-call-2"),
+          toolInputEvents.some((e) => e.toolCallId === "batch-call-2")
         ).toBe(true);
 
         // Both tool results should be emitted
         const toolOutputEvents = capturedStreamEvents.filter(
-          (e) => e.type === "tool-output-available",
+          (e) => e.type === "tool-output-available"
         );
         expect(
-          toolOutputEvents.some((e) => e.toolCallId === "batch-call-1"),
+          toolOutputEvents.some((e) => e.toolCallId === "batch-call-1")
         ).toBe(true);
         expect(
-          toolOutputEvents.some((e) => e.toolCallId === "batch-call-2"),
+          toolOutputEvents.some((e) => e.toolCallId === "batch-call-2")
         ).toBe(true);
 
         // Only 2 fetch calls total (one for tool calls batch, one for final response)
@@ -1020,23 +2832,23 @@ describe("POST /api/mcp/chat-v2", () => {
         // Second call: false (tool result added, no more unresolved)
         return hasUnresolvedCallCount === 1;
       });
-      vi.mocked(executeToolCallsFromMessages).mockImplementation(
-        async (messages: any[]) => {
-          // Simulate adding tool result for the new tool call
-          const toolResultMsg = {
-            role: "tool",
-            content: [
-              {
-                type: "tool-result",
-                toolCallId: "new-call-from-step",
-                output: { type: "json", value: { result: "done" } },
-              },
-            ],
-          };
-          messages.push(toolResultMsg);
-          return [toolResultMsg];
-        },
-      );
+      vi.mocked(executeToolCallsFromMessages).mockImplementation((async (
+        messages: any[]
+      ) => {
+        // Simulate adding tool result for the new tool call
+        const toolResultMsg = {
+          role: "tool",
+          content: [
+            {
+              type: "tool-result",
+              toolCallId: "new-call-from-step",
+              output: { type: "json", value: { result: "done" } },
+            },
+          ],
+        } as unknown as ModelMessage;
+        messages.push(toolResultMsg);
+        return [toolResultMsg];
+      }) as any);
 
       const originalFetch = global.fetch;
       let fetchCallCount = 0;
@@ -1071,7 +2883,7 @@ describe("POST /api/mcp/chat-v2", () => {
       });
 
       try {
-        await postJson(app, "/api/mcp/chat-v2", {
+        await postAuthenticatedJson({
           // No inherited tool calls - clean message history
           messages: [{ role: "user", content: "Do something" }],
           model: { id: "google/gemini-2.5-flash", provider: "google" },
@@ -1082,7 +2894,7 @@ describe("POST /api/mcp/chat-v2", () => {
         const toolInputEventsForNewCall = capturedStreamEvents.filter(
           (e) =>
             e.type === "tool-input-available" &&
-            e.toolCallId === "new-call-from-step",
+            e.toolCallId === "new-call-from-step"
         );
 
         // Should be emitted exactly ONCE (when processing json.messages),
@@ -1104,37 +2916,37 @@ describe("POST /api/mcp/chat-v2", () => {
         return unresolvedChecks <= 2;
       });
 
-      vi.mocked(executeToolCallsFromMessages).mockImplementation(
-        async (messages: any[]) => {
-          const latestAssistantWithToolCall = [...messages]
-            .reverse()
-            .find(
-              (msg) =>
-                msg?.role === "assistant" &&
-                Array.isArray(msg.content) &&
-                msg.content.some((part: any) => part?.type === "tool-call"),
-            );
-
-          const latestToolCall = latestAssistantWithToolCall?.content?.find(
-            (part: any) => part?.type === "tool-call",
+      vi.mocked(executeToolCallsFromMessages).mockImplementation((async (
+        messages: any[]
+      ) => {
+        const latestAssistantWithToolCall = [...messages]
+          .reverse()
+          .find(
+            (msg) =>
+              msg?.role === "assistant" &&
+              Array.isArray(msg.content) &&
+              msg.content.some((part: any) => part?.type === "tool-call")
           );
 
-          if (!latestToolCall?.toolCallId) return [];
+        const latestToolCall = latestAssistantWithToolCall?.content?.find(
+          (part: any) => part?.type === "tool-call"
+        );
 
-          const toolResultMsg = {
-            role: "tool",
-            content: [
-              {
-                type: "tool-result",
-                toolCallId: latestToolCall.toolCallId,
-                output: { type: "json", value: { ok: true } },
-              },
-            ],
-          };
-          messages.push(toolResultMsg);
-          return [toolResultMsg];
-        },
-      );
+        if (!latestToolCall?.toolCallId) return [];
+
+        const toolResultMsg = {
+          role: "tool",
+          content: [
+            {
+              type: "tool-result",
+              toolCallId: latestToolCall.toolCallId,
+              output: { type: "json", value: { ok: true } },
+            },
+          ],
+        } as unknown as ModelMessage;
+        messages.push(toolResultMsg);
+        return [toolResultMsg];
+      }) as any);
 
       const originalFetch = global.fetch;
       let fetchCallCount = 0;
@@ -1178,17 +2990,17 @@ describe("POST /api/mcp/chat-v2", () => {
       });
 
       try {
-        await postJson(app, "/api/mcp/chat-v2", {
+        await postAuthenticatedJson({
           messages: [{ role: "user", content: "Do two create_view calls" }],
           model: { id: "google/gemini-2.5-flash-preview", provider: "google" },
         });
         await lastStreamExecution;
 
         const toolInputEvents = capturedStreamEvents.filter(
-          (e) => e.type === "tool-input-available",
+          (e) => e.type === "tool-input-available"
         );
         const toolOutputEvents = capturedStreamEvents.filter(
-          (e) => e.type === "tool-output-available",
+          (e) => e.type === "tool-output-available"
         );
 
         expect(fetchCallCount).toBe(3);
@@ -1203,10 +3015,10 @@ describe("POST /api/mcp/chat-v2", () => {
         expect(secondToolCallId).toMatch(/dup-call__s2_/);
 
         expect(
-          toolOutputEvents.some((e) => e.toolCallId === firstToolCallId),
+          toolOutputEvents.some((e) => e.toolCallId === firstToolCallId)
         ).toBe(true);
         expect(
-          toolOutputEvents.some((e) => e.toolCallId === secondToolCallId),
+          toolOutputEvents.some((e) => e.toolCallId === secondToolCallId)
         ).toBe(true);
       } finally {
         global.fetch = originalFetch;

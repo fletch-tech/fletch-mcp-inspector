@@ -18,3 +18,14 @@ export type {
   PendingExecution,
 } from "./useToolExecution";
 export { useToolExecution } from "./useToolExecution";
+export type {
+  PlaygroundLoadingState,
+  UsePlaygroundStateOptions,
+  UsePlaygroundStateReturn,
+} from "./use-playground-state";
+export {
+  PLAYGROUND_FIRST_RUN_PROMPT,
+  PlaygroundStateProvider,
+  usePlaygroundState,
+  usePlaygroundStateContext,
+} from "./use-playground-state";

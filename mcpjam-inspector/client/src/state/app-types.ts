@@ -1,6 +1,18 @@
-import { MCPServerConfig } from "@mcpjam/sdk";
+import type { MCPServerConfig, NormalizedError } from "@mcpjam/sdk/browser";
 import { OauthTokens } from "@/shared/types.js";
+import type {
+  AuthMethod,
+  IdentityAssertionFormat,
+  RegistrationMode,
+  XaaClientAuthMethod,
+} from "@/shared/xaa.js";
+import type { ServerFormOAuthProtocolMode } from "@/shared/types.js";
 import type { OAuthTestProfile } from "@/lib/oauth/profile";
+import type {
+  ProjectClientConfig,
+  ProjectConnectionDefaults,
+} from "@/lib/client-config";
+import type { OAuthTrace } from "@/lib/oauth/oauth-trace";
 
 export type ConnectionStatus =
   | "connected"
@@ -8,6 +20,8 @@ export type ConnectionStatus =
   | "failed"
   | "disconnected"
   | "oauth-flow";
+
+export type ProjectVisibility = "public" | "private";
 
 export interface InitializationInfo {
   protocolVersion?: string;
@@ -38,35 +52,165 @@ export interface ServerWithName {
   connectionStatus: ConnectionStatus;
   retryCount: number;
   lastError?: string;
+  /**
+   * Rich describe-error block for the last connection failure. Populated
+   * alongside `lastError` whenever the source carried a `normalized`
+   * payload. `lastError` is kept as a back-compat string field — readers
+   * should prefer `lastNormalizedError` and fall back to `lastError`.
+   */
+  lastNormalizedError?: NormalizedError;
+  lastOAuthTrace?: OAuthTrace;
   enabled?: boolean;
   /** Whether OAuth is explicitly enabled for this server. When false, reconnect skips OAuth flow. */
   useOAuth?: boolean;
+  /**
+   * Canonical OAuth protocol intent. "auto" remains auto across reconnects;
+   * oauthFlowProfile.protocolVersion is the concrete version resolved for the
+   * most recent flow.
+   */
+  oauthProtocolMode?: ServerFormOAuthProtocolMode;
+  hasClientSecret?: boolean;
+  hasEnv?: boolean;
+  hasHeaders?: boolean;
+  /**
+   * Whether a redacted HTTP config carried an `Authorization: Bearer …`
+   * header. The header value itself is stripped before reaching the browser
+   * (like env/headers), so the edit form relies on this flag to know the
+   * server uses bearer auth and to keep the saved token hidden-but-preserved.
+   */
+  hasBearerToken?: boolean;
+  /**
+   * Optional issuer override for the cross-app authorization test target.
+   * XAA metadata only — intentionally NOT part of MCPServerConfig / toMCPConfig.
+   */
+  xaaAuthzIssuer?: string;
+  /** Opt-in: accept a path-scoped authorization server (same-origin root
+   * advertised as issuer). XAA metadata only, like xaaAuthzIssuer. */
+  xaaAllowPathScopedIssuer?: boolean;
+  /** The OAuth Debugger's equivalent of `xaaAllowPathScopedIssuer`. Separate
+   * per-server field so one debugger's opt-in never widens the other's trust.
+   * Top-level (not in `oauthFlowProfile`) because only flat fields round-trip
+   * through the servers table — a nested profile key is dropped on save. */
+  oauthAllowPathScopedIssuer?: boolean;
+  /**
+   * Cross-App Access (XAA) connect flag. When true the server authenticates via
+   * the XAA token-exchange flow (server mints the token) rather than standard
+   * OAuth. Mutually exclusive with `useOAuth`.
+   */
+  useXaa?: boolean;
+  /** Which IdP mints the XAA assertion. v1 only "mcpjam". */
+  authServerMode?: "mcpjam" | "own";
+  /** Optional simulated-identity overrides for the MCPJam test IdP. Blank = signed-in user. */
+  xaaSubject?: string;
+  xaaEmail?: string;
+  /**
+   * XAA-debugger-only preset for the identity assertion the MCPJam test IdP
+   * mints ("oidc" default | "saml"). Persisted per-server; merges preserve.
+   */
+  xaaIdentityAssertionFormat?: IdentityAssertionFormat;
+  /**
+   * Unified client-registration mode (Client↔AS leg) shared by the OAuth
+   * flows and the XAA debugger. Persisted per-server; may be "auto".
+   */
+  registrationMode?: RegistrationMode;
+  /**
+   * XAA-debugger-only CIMD client-authentication method ("none" public default
+   * | "private_key_jwt" confidential). Persisted per-server; only meaningful
+   * when registrationMode resolves to "cimd".
+   */
+  xaaClientAuth?: XaaClientAuthMethod;
+  /** Sanitized shared DCR registration status. Operational fields are never
+   * written into project exports or browser persistence. */
+  xaaDcrClientId?: string;
+  xaaDcrTokenEndpointAuthMethod?:
+    | "client_secret_post"
+    | "client_secret_basic"
+    | "none";
+  xaaDcrIssuer?: string;
+  xaaDcrClientSecretExpiresAt?: number;
+  xaaDcrRegisteredAt?: number;
+  xaaDcrStatus?: "registered" | "registering" | "uncertain";
+  hasXaaDcrRegistration?: boolean;
+  /**
+   * Canonical auth method (useOAuth/useXaa are its derived compat mirrors).
+   * "auto" selects XAA when the server is XAA-configured, OAuth otherwise.
+   */
+  authMethod?: AuthMethod;
 }
 
-export interface Workspace {
+export interface Project {
   id: string;
   name: string;
   description?: string;
+  icon?: string;
+  /**
+   * @deprecated Backend-maintained shadow-mirror of the project default host
+   * (`hostConfigsV2.getProjectDefault`). UI reads should go through
+   * `useAppState().activeHost` (which resolves the top-bar selection → project
+   * default). Kept on the type only as a transient bootstrap fallback for the
+   * window before the host query hydrates; will be dropped once that gap can
+   * be guaranteed-closed by `isClientConfigSyncPending`.
+   */
+  clientConfig?: ProjectClientConfig;
   servers: Record<string, ServerWithName>;
   createdAt: Date;
   updatedAt: Date;
+  canDeleteProject?: boolean;
   isDefault?: boolean;
-  sharedWorkspaceId?: string;
+  sharedProjectId?: string;
+  organizationId?: string;
+  visibility?: ProjectVisibility;
+  /**
+   * Project-level default synthetic identity for the MCPJam test IdP,
+   * applied when an authenticated member connects an XAA server without a
+   * complete per-server override. Admin-controlled, atomic (both members or
+   * neither) and Convex-backed only — local-only projects never persist it.
+   * In update payloads `null` means "explicitly clear"; stored rows carry
+   * the object or nothing. This is NOT enterprise SSO / BYO-IdP
+   * configuration.
+   */
+  xaaTestDefaults?: {
+    defaultIdentity: { subject: string; email: string };
+  } | null;
+}
+
+/**
+ * Resolve a project from either id space. `AppState.projects` is keyed by
+ * local project ids, but several surfaces carry the Convex/shared project
+ * id instead (App.tsx's `convexProjectId` props, eval run rows'
+ * `projectId`). Key lookup wins; otherwise fall back to a
+ * `sharedProjectId` match.
+ */
+export function findProjectByAnyId(
+  projects: Record<string, Project> | undefined,
+  id: string | null | undefined,
+): Project | undefined {
+  if (!id) return undefined;
+  const byKey = projects?.[id];
+  if (byKey) return byKey;
+  return Object.values(projects ?? {}).find(
+    (project) => project.sharedProjectId === id,
+  );
 }
 
 export interface AppState {
-  workspaces: Record<string, Workspace>;
-  activeWorkspaceId: string;
+  projects: Record<string, Project>;
+  activeProjectId: string;
   servers: Record<string, ServerWithName>;
   selectedServer: string;
   selectedMultipleServers: string[];
   isMultiSelectMode: boolean;
 }
 
-export type AgentServerInfo = { id: string; status: ConnectionStatus };
+export type AgentServerInfo = {
+  id: string;
+  status: ConnectionStatus;
+  config?: MCPServerConfig;
+};
 
 export type AppAction =
   | { type: "HYDRATE_STATE"; payload: AppState }
+  | { type: "CLEAR_RUNTIME_STATE" }
   | { type: "UPSERT_SERVER"; name: string; server: ServerWithName }
   | {
       type: "CONNECT_REQUEST";
@@ -79,10 +223,37 @@ export type AppAction =
       name: string;
       config: MCPServerConfig;
       tokens?: OauthTokens;
+      useOAuth?: boolean;
+      oauthTrace?: OAuthTrace;
+      // The just-saved OAuth debugger profile. When present it replaces the
+      // stored one so a form that downgrades 2026→2025 doesn't leave a stale
+      // 2026 `oauthFlowProfile` behind for the resolver to revive.
+      oauthFlowProfile?: OAuthTestProfile;
     }
-  | { type: "CONNECT_FAILURE"; name: string; error: string }
-  | { type: "RECONNECT_REQUEST"; name: string; config: MCPServerConfig }
-  | { type: "DISCONNECT"; name: string; error?: string }
+  | {
+      type: "CONNECT_FAILURE";
+      name: string;
+      error: string;
+      /**
+       * Optional rich describe-error block. Forwarded onto
+       * `ServerWithName.lastNormalizedError` so the ErrorCard renders
+       * without re-classifying from `error`.
+       */
+      normalized?: NormalizedError;
+      oauthTrace?: OAuthTrace;
+    }
+  | {
+      type: "RECONNECT_REQUEST";
+      name: string;
+      config: MCPServerConfig;
+      select?: boolean;
+    }
+  | {
+      type: "DISCONNECT";
+      name: string;
+      error?: string;
+      normalized?: NormalizedError;
+    }
   | { type: "REMOVE_SERVER"; name: string }
   | { type: "SYNC_AGENT_STATUS"; servers: AgentServerInfo[] }
   | { type: "SELECT_SERVER"; name: string }
@@ -93,33 +264,84 @@ export type AppAction =
       name: string;
       initInfo: InitializationInfo;
     }
-  | { type: "CREATE_WORKSPACE"; workspace: Workspace }
   | {
-      type: "UPDATE_WORKSPACE";
-      workspaceId: string;
-      updates: Partial<Workspace>;
+      type: "SET_SERVER_OAUTH_TRACE";
+      name: string;
+      oauthTrace?: OAuthTrace;
     }
-  | { type: "DELETE_WORKSPACE"; workspaceId: string }
-  | { type: "SWITCH_WORKSPACE"; workspaceId: string }
-  | { type: "SET_DEFAULT_WORKSPACE"; workspaceId: string }
-  | { type: "IMPORT_WORKSPACE"; workspace: Workspace }
-  | { type: "DUPLICATE_WORKSPACE"; workspaceId: string; newName: string };
+  | { type: "CREATE_PROJECT"; project: Project }
+  | {
+      type: "UPDATE_PROJECT";
+      projectId: string;
+      updates: Partial<Project>;
+    }
+  | {
+      // Merge one section of `clientConfig` into the project's current
+      // value, reading the current value from reducer state at the time
+      // the action is processed. Necessary so concurrent connection +
+      // host-context saves don't clobber each other locally — a full
+      // `UPDATE_PROJECT` with a composed clientConfig captures the
+      // sibling section at save-start, so a slow save can overwrite a
+      // newer sibling. This action only touches the named slice.
+      type: "UPDATE_PROJECT_CLIENT_CONFIG_SLICE";
+      projectId: string;
+      slice:
+        | {
+            kind: "connection";
+            connectionDefaults: ProjectConnectionDefaults | undefined;
+            clientCapabilities: Record<string, unknown>;
+          }
+        | {
+            kind: "hostContext";
+            hostContext: Record<string, unknown>;
+          };
+    }
+  | { type: "DELETE_PROJECT"; projectId: string }
+  | { type: "SWITCH_PROJECT"; projectId: string }
+  | { type: "SET_DEFAULT_PROJECT"; projectId: string }
+  | { type: "IMPORT_PROJECT"; project: Project }
+  | { type: "DUPLICATE_PROJECT"; projectId: string; newName: string };
 
-export const initialAppState: AppState = {
-  workspaces: {
-    default: {
-      id: "default",
-      name: "Default",
-      description: "Default workspace",
-      servers: {},
-      createdAt: new Date(),
-      updatedAt: new Date(),
-      isDefault: true,
+export function createLocalProjectId(): string {
+  if (
+    typeof crypto !== "undefined" &&
+    typeof crypto.randomUUID === "function"
+  ) {
+    return crypto.randomUUID();
+  }
+
+  return `local_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+}
+
+export function createLocalDefaultProject(
+  overrides: Partial<Project> = {}
+): Project {
+  const now = new Date();
+  const id = overrides.id ?? createLocalProjectId();
+  return {
+    id,
+    name: "Default",
+    description: "Default project",
+    servers: {},
+    createdAt: now,
+    updatedAt: now,
+    isDefault: true,
+    ...overrides,
+  };
+}
+
+export function createInitialAppState(): AppState {
+  const project = createLocalDefaultProject();
+  return {
+    projects: {
+      [project.id]: project,
     },
-  },
-  activeWorkspaceId: "default",
-  servers: {},
-  selectedServer: "none",
-  selectedMultipleServers: [],
-  isMultiSelectMode: false,
-};
+    activeProjectId: project.id,
+    servers: {},
+    selectedServer: "none",
+    selectedMultipleServers: [],
+    isMultiSelectMode: false,
+  };
+}
+
+export const initialAppState: AppState = createInitialAppState();

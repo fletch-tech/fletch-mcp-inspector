@@ -11,8 +11,10 @@ const MODEL_ID_MAPPINGS: Record<string, string> = {
   "claude-opus-4-1": "anthropic/claude-opus-4.1",
   "claude-opus-4-0": "anthropic/claude-opus-4",
   "claude-sonnet-4-5": "anthropic/claude-sonnet-4.5",
+  "claude-sonnet-4.5": "anthropic/claude-sonnet-4.5",
   "claude-sonnet-4-0": "anthropic/claude-sonnet-4",
   "claude-haiku-4-5": "anthropic/claude-haiku-4.5",
+  "claude-haiku-4.5": "anthropic/claude-haiku-4.5",
   "claude-3-7-sonnet-latest": "anthropic/claude-3.7-sonnet",
   "claude-3-5-sonnet-latest": "anthropic/claude-3.5-sonnet",
   "claude-3-5-haiku-latest": "anthropic/claude-3.5-haiku",
@@ -24,7 +26,9 @@ const MODEL_ID_MAPPINGS: Record<string, string> = {
   // Anthropic - constructed IDs (provider/model with dashes → provider/model with dots)
   "anthropic/claude-opus-4-1": "anthropic/claude-opus-4.1",
   "anthropic/claude-sonnet-4-5": "anthropic/claude-sonnet-4.5",
+  "anthropic/claude-sonnet-4.5": "anthropic/claude-sonnet-4.5",
   "anthropic/claude-haiku-4-5": "anthropic/claude-haiku-4.5",
+  "anthropic/claude-haiku-4.5": "anthropic/claude-haiku-4.5",
 
   // OpenAI models
   "gpt-4": "openai/gpt-4-turbo",
@@ -42,6 +46,8 @@ const MODEL_ID_MAPPINGS: Record<string, string> = {
   "gpt-5.1": "openai/gpt-5.1-instant", // Map to closest available
   "gpt-5.1-codex": "openai/gpt-5.1-codex",
   "gpt-5.1-codex-mini": "openai/gpt-5.1-codex-mini",
+  "gpt-5.5": "openai/gpt-5",
+  "openai/gpt-5.5": "openai/gpt-5",
 
   // DeepSeek models
   "deepseek-chat": "deepseek/deepseek-v3.1",
@@ -49,7 +55,6 @@ const MODEL_ID_MAPPINGS: Record<string, string> = {
   "deepseek/deepseek-v3.2": "deepseek/deepseek-v3.2-exp",
 
   // Google Gemini models
-  "gemini-3-pro-preview": "google/gemini-3-pro-preview",
   "gemini-2.5-pro": "google/gemini-2.5-pro",
   "gemini-2.5-flash": "google/gemini-2.5-flash",
   "gemini-2.5-flash-lite": "google/gemini-2.5-flash-lite",
@@ -116,8 +121,16 @@ export function mapModelIdToTokenizerBackend(modelId: string): string | null {
       return MODEL_ID_MAPPINGS[normalized];
     }
 
-    // Return normalized version as-is (already has provider prefix)
-    return normalized;
+    const [provider, unprefixedModelId] = normalized.split("/", 2);
+    const mapped = MODEL_ID_MAPPINGS[unprefixedModelId];
+    if (mapped?.startsWith(`${provider}/`)) {
+      return mapped;
+    }
+
+    // Provider-prefixed custom, local, and cloud model IDs are not proof that
+    // ai-tokenizer supports the model. Avoid sending them to the Convex
+    // tokenizer endpoint; callers can report token counting as unavailable.
+    return null;
   }
 
   // 3. For models without prefix, construct provider/model format
@@ -143,30 +156,48 @@ export function estimateTokensFromChars(text: string): number {
 }
 
 /**
+ * Detect Node/undici connection-level fetch failures
+ * (`TypeError: fetch failed` with a populated `cause`).
+ *
+ * These happen on the *client's* network — DNS miss, connection refused, TLS
+ * failure, etc. — so logging them as warnings to Sentry conflates user-side
+ * connectivity with backend issues. Callers should route these to a debug
+ * log instead while still surfacing backend HTTP/logical errors as warnings.
+ */
+export function isFetchConnectionFailure(error: unknown): boolean {
+  return error instanceof TypeError && /fetch failed/i.test(error.message);
+}
+
+/**
+ * Pull the underlying network error code (e.g. `ECONNREFUSED`, `ENOTFOUND`)
+ * out of a `fetch failed` TypeError. `error.cause` is where undici stashes
+ * the real reason; `error.message` is the useless generic wrapper.
+ */
+export function getFetchErrorCause(error: unknown): string | undefined {
+  const cause = (error as { cause?: { code?: unknown } })?.cause?.code;
+  return typeof cause === "string" ? cause : undefined;
+}
+
+/**
  * Count tokens for tools, using backend tokenizer or char fallback.
  * Shared by mcp/tools and web routes.
  */
 export async function countToolsTokens(
   tools: unknown[],
   modelId: string,
-  logPrefix = "[tools]",
+  logPrefix = "[tools]"
 ): Promise<number> {
-  const { CONVEX_HTTP_URL, getConvexServerAuthHeaders } = await import(
-    "../config.js"
-  );
+  const convexHttpUrl = process.env.CONVEX_HTTP_URL;
   const mappedModelId = mapModelIdToTokenizerBackend(modelId);
-  const useBackendTokenizer = mappedModelId !== null && !!CONVEX_HTTP_URL;
+  const useBackendTokenizer = mappedModelId !== null && !!convexHttpUrl;
 
   try {
     const toolsText = JSON.stringify(tools);
 
     if (useBackendTokenizer && mappedModelId) {
-      const response = await fetch(`${CONVEX_HTTP_URL}/tokenizer/count`, {
+      const response = await fetch(`${convexHttpUrl}/tokenizer/count`, {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          ...getConvexServerAuthHeaders(),
-        },
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ text: toolsText, model: mappedModelId }),
       });
 
@@ -183,9 +214,28 @@ export async function countToolsTokens(
 
     return estimateTokensFromChars(toolsText);
   } catch (error) {
-    logger.warn(`${logPrefix} Error counting tokens`, {
-      error: error instanceof Error ? error.message : String(error),
-    });
-    return 0;
+    // Connection-level failures (DNS, ECONNREFUSED, TLS) come from the
+    // caller's network, not our backend. Log locally but don't page Sentry.
+    if (isFetchConnectionFailure(error)) {
+      logger.debug(
+        `${logPrefix} Backend unreachable, falling back to estimate`,
+        {
+          cause: getFetchErrorCause(error),
+        }
+      );
+    } else {
+      logger.warn(`${logPrefix} Error counting tokens`, {
+        error: error instanceof Error ? error.message : String(error),
+        cause: getFetchErrorCause(error),
+      });
+    }
+    // Honor the "falling back to estimate" log above: compute a char-based
+    // estimate from the input. Only return 0 if even stringifying fails
+    // (e.g. circular references in `tools`).
+    try {
+      return estimateTokensFromChars(JSON.stringify(tools));
+    } catch {
+      return 0;
+    }
   }
 }

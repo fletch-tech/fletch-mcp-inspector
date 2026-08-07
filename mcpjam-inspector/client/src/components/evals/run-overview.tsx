@@ -1,8 +1,14 @@
-import { useState, useCallback } from "react";
-import { Button } from "@/components/ui/button";
-import { Checkbox } from "@/components/ui/checkbox";
-import { cn } from "@/lib/utils";
-import { Trash2 } from "lucide-react";
+import { useState, useCallback, useMemo, useRef, useEffect } from "react";
+import { motion, useReducedMotion, type Variants } from "framer-motion";
+import { Button } from "@mcpjam/design-system/button";
+import { Checkbox } from "@mcpjam/design-system/checkbox";
+import { cn, getInitials } from "@/lib/utils";
+import {
+  Avatar,
+  AvatarFallback,
+  AvatarImage,
+} from "@mcpjam/design-system/avatar";
+import { ArrowLeftRight, Trash2 } from "lucide-react";
 import {
   Dialog,
   DialogContent,
@@ -10,26 +16,74 @@ import {
   DialogFooter,
   DialogHeader,
   DialogTitle,
-} from "@/components/ui/dialog";
+} from "@mcpjam/design-system/dialog";
 import {
   Tooltip,
   TooltipContent,
   TooltipTrigger,
-} from "@/components/ui/tooltip";
+} from "@mcpjam/design-system/tooltip";
 import {
-  ChartContainer,
-  ChartTooltip,
-  ChartTooltipContent,
-} from "@/components/ui/chart";
-import { Bar, BarChart, CartesianGrid, XAxis, YAxis } from "recharts";
-import { AccuracyChart } from "./accuracy-chart";
-import { formatRunId, getIterationBorderColor } from "./helpers";
+  compareRunsBySequence,
+  evalStatusLeftBorderClasses,
+  formatRunId,
+  getLatestRunMetricSource,
+} from "./helpers";
+import type { SuiteOverviewView } from "@/lib/eval-route-types";
 import { computeIterationResult } from "./pass-criteria";
 import { EvalIteration, EvalSuiteRun } from "./types";
-import { toast } from "sonner";
+import { CiMetadataDisplay } from "./ci-metadata-display";
+import { SuiteRunsChartGrid } from "./suite-runs-chart-grid";
+import { SuiteInsightsCollapsible } from "./suite-insights-collapsible";
+import {
+  EVAL_DESTRUCTIVE_BUTTON_CLASS,
+  EVAL_LOW_PASS_RATE_TEXT_CLASS,
+} from "./constants";
+import { toast } from "@/lib/toast";
+
+const RUN_ROW_STAGGER_CAP = 20;
+
+const runListVariants: Variants = {
+  hidden: {},
+  visible: { transition: { staggerChildren: 0.03, delayChildren: 0.05 } },
+};
+
+const runItemVariants: Variants = {
+  hidden: (i: number) =>
+    i < RUN_ROW_STAGGER_CAP ? { opacity: 0, y: 6 } : { opacity: 1, y: 0 },
+  visible: {
+    opacity: 1,
+    y: 0,
+    transition: { duration: 0.15, ease: [0.16, 1, 0.3, 1] },
+  },
+};
+
+type RunResultBadgeKind =
+  | "passed"
+  | "failed"
+  | "running"
+  | "cancelled"
+  | "timed_out"
+  | "pending";
+
+function runResultBadge(result: RunResultBadgeKind) {
+  switch (result) {
+    case "passed":
+      return { label: "Passed", className: "bg-success/50 text-foreground" };
+    case "failed":
+      return { label: "Failed", className: "bg-destructive/50 text-foreground" };
+    case "cancelled":
+      return { label: "Cancelled", className: "bg-muted text-muted-foreground" };
+    case "timed_out":
+      return { label: "Timed out", className: "bg-warning/50 text-foreground" };
+    case "running":
+      return { label: "Running", className: "bg-warning/50 text-foreground" };
+    default:
+      return null;
+  }
+}
 
 interface RunOverviewProps {
-  suite: { _id: string; name: string };
+  suite: { _id: string; name: string; source?: "ui" | "sdk" };
   runs: EvalSuiteRun[];
   runsLoading: boolean;
   allIterations: EvalIteration[];
@@ -47,9 +101,137 @@ interface RunOverviewProps {
     total: number;
   }>;
   onRunClick: (runId: string) => void;
+  onCompareRuns?: (baseRunId: string, compareRunId: string) => void;
   onDirectDeleteRun: (runId: string) => Promise<void>;
-  runsViewMode: "runs" | "test-cases";
-  onViewModeChange: (value: "runs" | "test-cases") => void;
+  runsViewMode: SuiteOverviewView;
+  onViewModeChange: (value: SuiteOverviewView) => void;
+  userMap?: Map<string, { name: string; imageUrl?: string }>;
+  /** When false, hides run selection and batch delete (project members without admin). */
+  canDeleteRuns?: boolean;
+  /** Show suite delete using the same toolbar pattern as run batch delete. */
+  canDeleteSuite?: boolean;
+  onDeleteSuite?: () => void;
+  deletingSuiteId?: string | null;
+  /** Hide Runs/Cases toggle (e.g. playground). */
+  hideViewModeSelect?: boolean;
+}
+
+type CiMetadataCompactMode = "full" | "chip";
+
+type RunsTableLayout = {
+  showTokens: boolean;
+  showRunBy: boolean;
+  metadataMode: CiMetadataCompactMode;
+  enableHorizontalScroll: boolean;
+  requiredTableWidthPx: number;
+};
+
+type RunsTableWidthInput = {
+  hasTokenData: boolean;
+  hasCiMetadata: boolean;
+  showTokens: boolean;
+  showRunBy: boolean;
+  metadataMode: CiMetadataCompactMode;
+  /** When false, width excludes the leading checkbox column. Default true. */
+  includeSelectionColumn?: boolean;
+};
+
+const TABLE_SELECTION_COL_PX = 28;
+const TABLE_GAP_X_PX = 12;
+const TABLE_HORIZONTAL_PADDING_PX = 32;
+const DEFAULT_TABLE_VIEWPORT_WIDTH_PX = 1200;
+
+const BASE_COL_WIDTHS_PX = {
+  runId: 110,
+  startTime: 180,
+  duration: 72,
+  passed: 56,
+  failed: 56,
+  total: 56,
+  passRate: 72,
+  tokens: 88,
+  runBy: 56,
+  metadataFull: 140,
+  metadataChip: 72,
+} as const;
+
+function getTableColumnCount(input: RunsTableWidthInput): number {
+  let count = input.includeSelectionColumn === false ? 0 : 1; // selection checkbox column
+  count += 7; // required run columns
+  if (input.hasTokenData && input.showTokens) {
+    count += 1;
+  }
+  if (input.showRunBy) {
+    count += 1;
+  }
+  if (input.hasCiMetadata) {
+    count += 1;
+  }
+  return count;
+}
+
+export function estimateRunsTableRequiredWidth(
+  input: RunsTableWidthInput
+): number {
+  let width =
+    (input.includeSelectionColumn === false ? 0 : TABLE_SELECTION_COL_PX) +
+    BASE_COL_WIDTHS_PX.runId +
+    BASE_COL_WIDTHS_PX.startTime +
+    BASE_COL_WIDTHS_PX.duration +
+    BASE_COL_WIDTHS_PX.passed +
+    BASE_COL_WIDTHS_PX.failed +
+    BASE_COL_WIDTHS_PX.total +
+    BASE_COL_WIDTHS_PX.passRate;
+
+  if (input.hasTokenData && input.showTokens) {
+    width += BASE_COL_WIDTHS_PX.tokens;
+  }
+  if (input.showRunBy) {
+    width += BASE_COL_WIDTHS_PX.runBy;
+  }
+  if (input.hasCiMetadata) {
+    width +=
+      input.metadataMode === "chip"
+        ? BASE_COL_WIDTHS_PX.metadataChip
+        : BASE_COL_WIDTHS_PX.metadataFull;
+  }
+
+  const columnCount = getTableColumnCount(input);
+  const totalGaps = Math.max(0, columnCount - 1) * TABLE_GAP_X_PX;
+  return width + totalGaps + TABLE_HORIZONTAL_PADDING_PX;
+}
+
+export function resolveRunsTableLayout(input: {
+  containerWidth: number;
+  hasTokenData: boolean;
+  hasCiMetadata: boolean;
+  includeSelectionColumn?: boolean;
+}): RunsTableLayout {
+  const normalizedContainerWidth = Math.max(
+    0,
+    Math.floor(input.containerWidth)
+  );
+  const showTokens = input.hasTokenData;
+  const showRunBy = true;
+  const metadataMode: CiMetadataCompactMode = "full";
+  const requiredTableWidthPx = estimateRunsTableRequiredWidth({
+    hasTokenData: input.hasTokenData,
+    hasCiMetadata: input.hasCiMetadata,
+    showTokens,
+    showRunBy,
+    metadataMode,
+    includeSelectionColumn: input.includeSelectionColumn,
+  });
+  const enableHorizontalScroll =
+    requiredTableWidthPx > normalizedContainerWidth;
+
+  return {
+    showTokens,
+    showRunBy,
+    metadataMode,
+    enableHorizontalScroll,
+    requiredTableWidthPx,
+  };
 }
 
 export function RunOverview({
@@ -60,13 +242,146 @@ export function RunOverview({
   runTrendData,
   modelStats,
   onRunClick,
+  onCompareRuns,
   onDirectDeleteRun,
   runsViewMode,
   onViewModeChange,
+  userMap,
+  canDeleteRuns = true,
+  canDeleteSuite = false,
+  onDeleteSuite,
+  deletingSuiteId = null,
+  hideViewModeSelect = false,
 }: RunOverviewProps) {
+  const shouldReduceMotion = useReducedMotion();
+  const runRowWhileTap = shouldReduceMotion
+    ? undefined
+    : { scale: 0.995, transition: { duration: 0.08 } };
+  const tableViewportRef = useRef<HTMLDivElement | null>(null);
+  const [tableViewportWidth, setTableViewportWidth] = useState(0);
+
+  const hasTokenData = useMemo(
+    () => allIterations.some((i) => (i.tokensUsed || 0) > 0),
+    [allIterations]
+  );
+
+  const hasCiMetadata = useMemo(
+    () =>
+      runs.some(
+        (r) =>
+          !!r.ciMetadata?.branch ||
+          !!r.ciMetadata?.commitSha ||
+          !!r.ciMetadata?.runUrl
+      ),
+    [runs]
+  );
+
+  useEffect(() => {
+    const element = tableViewportRef.current;
+    if (!element) {
+      return;
+    }
+
+    const updateWidth = () => {
+      setTableViewportWidth(Math.max(0, Math.floor(element.clientWidth)));
+    };
+
+    updateWidth();
+
+    if (typeof ResizeObserver === "undefined") {
+      window.addEventListener("resize", updateWidth);
+      return () => {
+        window.removeEventListener("resize", updateWidth);
+      };
+    }
+
+    const observer = new ResizeObserver(() => {
+      updateWidth();
+    });
+    observer.observe(element);
+
+    return () => {
+      observer.disconnect();
+      window.removeEventListener("resize", updateWidth);
+    };
+  }, []);
+
   const [selectedRunIds, setSelectedRunIds] = useState<Set<string>>(new Set());
   const [showBatchDeleteModal, setShowBatchDeleteModal] = useState(false);
   const [deletingRunId, setDeletingRunId] = useState<string | null>(null);
+  const [suiteDeleteArmed, setSuiteDeleteArmed] = useState(false);
+  const selectionEnabled = canDeleteRuns || Boolean(onCompareRuns);
+
+  useEffect(() => {
+    if (!selectionEnabled) {
+      setSelectedRunIds(new Set());
+      setShowBatchDeleteModal(false);
+    }
+  }, [selectionEnabled]);
+
+  useEffect(() => {
+    if (!canDeleteSuite) {
+      setSuiteDeleteArmed(false);
+    }
+  }, [canDeleteSuite]);
+
+  useEffect(() => {
+    if (selectedRunIds.size > 0) {
+      setSuiteDeleteArmed(false);
+    }
+  }, [selectedRunIds.size]);
+
+  const responsiveLayout = useMemo(
+    () =>
+      resolveRunsTableLayout({
+        containerWidth:
+          tableViewportWidth > 0
+            ? tableViewportWidth
+            : DEFAULT_TABLE_VIEWPORT_WIDTH_PX,
+        hasTokenData,
+        hasCiMetadata,
+        includeSelectionColumn: selectionEnabled,
+      }),
+    [tableViewportWidth, hasTokenData, hasCiMetadata, selectionEnabled]
+  );
+
+  const rowGridTemplateColumns = useMemo(() => {
+    const columns = [
+      "minmax(110px, 1.1fr)",
+      "minmax(180px, 1.7fr)",
+      "minmax(72px, 0.7fr)",
+      "minmax(56px, 0.55fr)",
+      "minmax(56px, 0.55fr)",
+      "minmax(56px, 0.55fr)",
+      "minmax(72px, 0.65fr)",
+    ];
+
+    if (hasTokenData && responsiveLayout.showTokens) {
+      columns.push("minmax(88px, 0.8fr)");
+    }
+
+    if (responsiveLayout.showRunBy) {
+      columns.push("minmax(56px, 0.5fr)");
+    }
+
+    if (hasCiMetadata) {
+      columns.push(
+        responsiveLayout.metadataMode === "chip"
+          ? "minmax(72px, 0.7fr)"
+          : "minmax(140px, 1.3fr)"
+      );
+    }
+
+    return columns.join(" ");
+  }, [hasTokenData, hasCiMetadata, responsiveLayout]);
+
+  const fullGridTemplateColumns = useMemo(
+    () =>
+      selectionEnabled
+        ? `28px ${rowGridTemplateColumns}`
+        : rowGridTemplateColumns,
+    [selectionEnabled, rowGridTemplateColumns]
+  );
 
   const toggleRunSelection = useCallback((runId: string) => {
     setSelectedRunIds((prev) => {
@@ -90,6 +405,23 @@ export function RunOverview({
     });
   }, [runs]);
 
+  const selectedRunsForCompare = useMemo(
+    () =>
+      runs
+        .filter((run) => selectedRunIds.has(run._id))
+        .sort(compareRunsBySequence),
+    [runs, selectedRunIds]
+  );
+
+  const canCompareSelected =
+    selectedRunsForCompare.length === 2 &&
+    selectedRunsForCompare.every((run) => run.status === "completed");
+
+  const handleCompareSelected = useCallback(() => {
+    if (!onCompareRuns || !canCompareSelected) return;
+    onCompareRuns(selectedRunsForCompare[0]._id, selectedRunsForCompare[1]._id);
+  }, [canCompareSelected, onCompareRuns, selectedRunsForCompare]);
+
   const confirmBatchDeleteRuns = useCallback(() => {
     const runIds = Array.from(selectedRunIds);
     if (runIds.length === 0) return;
@@ -111,134 +443,24 @@ export function RunOverview({
       });
   }, [selectedRunIds, onDirectDeleteRun]);
 
-  const modelChartConfig = {
-    passRate: {
-      label: "Pass Rate",
-      color: "var(--chart-1)",
-    },
-  };
+  // Mixed suites label by the newest run's origin, not suite provenance.
+  const metricSource = getLatestRunMetricSource(runs, suite.source);
 
   return (
-    <>
-      {/* Charts Side by Side */}
-      <div className="grid gap-4 lg:grid-cols-2">
-        {/* Accuracy */}
-        <div className="rounded-xl border bg-card text-card-foreground">
-          <div className="px-4 pt-3 pb-2">
-            <div className="text-xs font-medium text-muted-foreground">
-              Accuracy
-            </div>
-          </div>
-          <div className="px-4 pb-4">
-            <AccuracyChart
-              data={runTrendData}
-              isLoading={runsLoading}
-              height="h-32"
-              onClick={onRunClick}
-            />
-          </div>
-        </div>
-
-        {/* Per-Model Performance */}
-        <div className="rounded-xl border bg-card text-card-foreground">
-          <div className="px-4 pt-3 pb-2">
-            <div className="text-xs font-medium text-muted-foreground">
-              Performance by model
-            </div>
-          </div>
-          <div className="px-4 pb-4">
-            {modelStats.length > 0 ? (
-              <ChartContainer
-                config={modelChartConfig}
-                className="aspect-auto h-32 w-full"
-              >
-                <BarChart
-                  data={modelStats}
-                  width={undefined}
-                  height={undefined}
-                >
-                  <CartesianGrid
-                    strokeDasharray="3 3"
-                    vertical={false}
-                    stroke="hsl(var(--muted-foreground) / 0.2)"
-                  />
-                  <XAxis
-                    dataKey="model"
-                    tickLine={false}
-                    axisLine={false}
-                    tickMargin={8}
-                    tick={{ fontSize: 11 }}
-                    interval={0}
-                    height={40}
-                    tickFormatter={(value) => {
-                      if (value.length > 15) {
-                        return value.substring(0, 12) + "...";
-                      }
-                      return value;
-                    }}
-                  />
-                  <YAxis
-                    domain={[0, 100]}
-                    tickLine={false}
-                    axisLine={false}
-                    tickMargin={8}
-                    tick={{ fontSize: 12 }}
-                    tickFormatter={(value) => `${value}%`}
-                  />
-                  <ChartTooltip
-                    cursor={false}
-                    content={({ active, payload }) => {
-                      if (!active || !payload || payload.length === 0)
-                        return null;
-                      const data = payload[0].payload;
-                      return (
-                        <div className="rounded-lg border bg-background p-2 shadow-sm">
-                          <div className="grid gap-2">
-                            <div className="flex flex-col">
-                              <span className="text-xs font-semibold">
-                                {data.model}
-                              </span>
-                              <span className="text-xs text-muted-foreground mt-0.5">
-                                {data.passed} passed · {data.failed} failed
-                              </span>
-                            </div>
-                            <div className="flex items-center gap-2">
-                              <div
-                                className="h-2 w-2 rounded-full"
-                                style={{
-                                  backgroundColor: "var(--color-passRate)",
-                                }}
-                              />
-                              <span className="text-sm font-semibold">
-                                {data.passRate}%
-                              </span>
-                            </div>
-                          </div>
-                        </div>
-                      );
-                    }}
-                  />
-                  <Bar
-                    dataKey="passRate"
-                    fill="var(--color-passRate)"
-                    radius={[4, 4, 0, 0]}
-                    isAnimationActive={false}
-                    minPointSize={8}
-                  />
-                </BarChart>
-              </ChartContainer>
-            ) : (
-              <p className="text-xs text-muted-foreground">
-                No model data available.
-              </p>
-            )}
-          </div>
-        </div>
-      </div>
-
+    <div className="flex min-h-0 min-w-0 flex-1 flex-col gap-4">
+      {runs.length > 0 && (
+        <SuiteRunsChartGrid
+          suiteSource={metricSource}
+          runTrendData={runTrendData}
+          modelStats={modelStats}
+          runsLoading={runsLoading}
+          onRunClick={onRunClick}
+        />
+      )}
+      <SuiteInsightsCollapsible runs={runs} />
       {/* Runs List */}
-      <div className="rounded-xl border bg-card text-card-foreground flex flex-col max-h-[600px]">
-        {selectedRunIds.size > 0 ? (
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col rounded-xl border bg-card text-card-foreground">
+        {selectionEnabled && selectedRunIds.size > 0 ? (
           <div className="border-b px-4 py-2 shrink-0 bg-muted/50 flex items-center justify-between">
             <div className="flex items-center gap-3">
               <Checkbox
@@ -259,191 +481,404 @@ export function RunOverview({
               >
                 Cancel
               </Button>
+              {onCompareRuns ? (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={handleCompareSelected}
+                  disabled={!canCompareSelected}
+                  title={
+                    selectedRunsForCompare.length === 2
+                      ? "Compare selected completed runs"
+                      : "Select exactly two completed runs to compare"
+                  }
+                >
+                  <ArrowLeftRight className="mr-2 h-3.5 w-3.5" aria-hidden />
+                  Compare
+                </Button>
+              ) : null}
+              {canDeleteRuns ? (
+                <Button
+                  size="sm"
+                  className={EVAL_DESTRUCTIVE_BUTTON_CLASS}
+                  onClick={() => setShowBatchDeleteModal(true)}
+                  disabled={deletingRunId !== null}
+                >
+                  Delete
+                </Button>
+              ) : null}
+            </div>
+          </div>
+        ) : canDeleteSuite && suiteDeleteArmed && onDeleteSuite ? (
+          <div className="border-b px-4 py-2 shrink-0 bg-muted/50 flex items-center justify-between gap-4">
+            <div className="flex min-w-0 items-center gap-3">
+              <Trash2
+                className={cn(
+                  "h-4 w-4 shrink-0",
+                  EVAL_LOW_PASS_RATE_TEXT_CLASS,
+                )}
+                aria-hidden
+              />
+              <span className="text-xs font-medium truncate">
+                Delete suite &quot;{suite.name}&quot;
+              </span>
+            </div>
+            <div className="flex shrink-0 items-center gap-2">
               <Button
-                variant="destructive"
+                variant="outline"
                 size="sm"
-                onClick={() => setShowBatchDeleteModal(true)}
-                disabled={deletingRunId !== null}
+                onClick={() => setSuiteDeleteArmed(false)}
+                disabled={deletingSuiteId === suite._id}
               >
-                Delete
+                Cancel
+              </Button>
+              <Button
+                size="sm"
+                className={EVAL_DESTRUCTIVE_BUTTON_CLASS}
+                onClick={() => {
+                  onDeleteSuite();
+                  setSuiteDeleteArmed(false);
+                }}
+                disabled={deletingSuiteId === suite._id}
+              >
+                {deletingSuiteId === suite._id ? "Deleting..." : "Delete"}
               </Button>
             </div>
           </div>
         ) : (
-          <div className="border-b px-4 py-2 shrink-0 flex items-center justify-between">
+          <div className="border-b px-4 py-2 shrink-0 flex items-center justify-between gap-4">
             <div>
               <p className="text-xs text-muted-foreground">
-                Click on a run to view its test breakdown and results.
+                {onCompareRuns
+                  ? "Click a run to view it, or select two completed runs to compare."
+                  : "Click on a run to view its case breakdown and results."}
               </p>
             </div>
-            <select
-              value={runsViewMode}
-              onChange={(e) =>
-                onViewModeChange(e.target.value as "runs" | "test-cases")
-              }
-              className="text-xs border rounded px-2 py-1 bg-background"
-            >
-              <option value="runs">Runs</option>
-              <option value="test-cases">Test Cases</option>
-            </select>
-          </div>
-        )}
-
-        {/* Column Headers */}
-        {runs.length > 0 && (
-          <div className="flex items-center gap-6 w-full px-4 py-1.5 bg-muted/30 border-b text-xs font-medium text-muted-foreground">
-            <div className="w-4"></div>
-            <div className="min-w-[120px]">Run ID</div>
-            <div className="min-w-[140px]">Start time</div>
-            <div className="min-w-[60px]">Duration</div>
-            <div className="min-w-[60px] text-right">Passed</div>
-            <div className="min-w-[60px] text-right">Failed</div>
-            <div className="min-w-[70px] text-right">Accuracy</div>
-            <div className="min-w-[70px] text-right">Tokens</div>
-          </div>
-        )}
-
-        <div className="divide-y overflow-y-auto">
-          {runs.length === 0 ? (
-            <div className="px-4 py-12 text-center text-sm text-muted-foreground">
-              No runs found.
-            </div>
-          ) : (
-            runs.map((run) => {
-              const runIterations = allIterations.filter(
-                (iter) => iter.suiteRunId === run._id,
-              );
-              // Only count completed iterations - exclude pending/cancelled
-              const iterationResults = runIterations.map((i) =>
-                computeIterationResult(i),
-              );
-              const realTimePassed = iterationResults.filter(
-                (r) => r === "passed",
-              ).length;
-              const realTimeFailed = iterationResults.filter(
-                (r) => r === "failed",
-              ).length;
-              const realTimeTotal = realTimePassed + realTimeFailed;
-              const totalTokens = runIterations.reduce(
-                (sum, iter) => sum + (iter.tokensUsed || 0),
-                0,
-              );
-
-              const passed =
-                realTimePassed > 0
-                  ? realTimePassed
-                  : (run.summary?.passed ?? 0);
-              const failed =
-                realTimeFailed > 0
-                  ? realTimeFailed
-                  : (run.summary?.failed ?? 0);
-              const total =
-                realTimeTotal > 0 ? realTimeTotal : (run.summary?.total ?? 0);
-              const passRate =
-                total > 0 ? Math.round((passed / total) * 100) : null;
-
-              const timestamp = formatTime(run.completedAt ?? run.createdAt);
-
-              const duration =
-                run.completedAt && run.createdAt
-                  ? formatDuration(run.completedAt - run.createdAt)
-                  : run.createdAt && run.status === "running"
-                    ? formatDuration(Date.now() - run.createdAt)
-                    : "—";
-
-              const isInactive = run.isActive === false;
-
-              const runResult =
-                run.result ||
-                (run.status === "completed" && passRate !== null
-                  ? passRate >= (run.passCriteria?.minimumPassRate ?? 100)
-                    ? "passed"
-                    : "failed"
-                  : run.status === "cancelled"
-                    ? "cancelled"
-                    : "pending");
-              const runBorderColor = getIterationBorderColor(runResult);
-
-              const isSelected = selectedRunIds.has(run._id);
-
-              const runButton = (
-                <div className="flex items-center gap-6 w-full">
-                  <div className="pl-3">
-                    <Checkbox
-                      checked={isSelected}
-                      onCheckedChange={() => toggleRunSelection(run._id)}
-                      onClick={(e) => e.stopPropagation()}
-                      aria-label={`Select run ${formatRunId(run._id)}`}
-                    />
-                  </div>
-                  <button
-                    onClick={() => onRunClick(run._id)}
-                    className="flex flex-1 items-center gap-6 py-2.5 pr-3 text-left transition-colors hover:bg-muted/50 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/60"
-                  >
-                    <span className="text-xs font-medium min-w-[120px]">
-                      Run {formatRunId(run._id)}
-                    </span>
-                    <span className="text-xs text-muted-foreground min-w-[140px]">
-                      {timestamp}
-                    </span>
-                    <span className="text-xs text-muted-foreground font-mono min-w-[60px]">
-                      {duration}
-                    </span>
-                    <span className="text-xs font-mono text-muted-foreground min-w-[60px] text-right">
-                      {passed}
-                    </span>
-                    <span className="text-xs font-mono text-muted-foreground min-w-[60px] text-right">
-                      {failed}
-                    </span>
-                    <span className="text-xs font-mono text-muted-foreground min-w-[70px] text-right">
-                      {passRate !== null ? `${passRate}%` : "—"}
-                    </span>
-                    <span className="text-xs font-mono text-muted-foreground min-w-[70px] text-right">
-                      {totalTokens > 0 ? totalTokens.toLocaleString() : "—"}
-                    </span>
-                  </button>
-                </div>
-              );
-
-              return (
-                <div
-                  key={run._id}
-                  className={cn(
-                    "relative overflow-hidden",
-                    isInactive && "opacity-50",
-                  )}
+            <div className="flex shrink-0 items-center gap-2">
+              {canDeleteSuite && onDeleteSuite ? (
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  className="h-8 text-xs text-muted-foreground hover:text-destructive"
+                  onClick={() => {
+                    setSelectedRunIds(new Set());
+                    setSuiteDeleteArmed(true);
+                  }}
                 >
-                  <div
-                    className={`absolute left-0 top-0 h-full w-1 ${runBorderColor}`}
-                  />
-                  {isInactive ? (
-                    <Tooltip>
-                      <TooltipTrigger asChild>{runButton}</TooltipTrigger>
-                      <TooltipContent>
-                        <p className="text-xs">
-                          Run is inactive since test cases were updated
-                        </p>
-                      </TooltipContent>
-                    </Tooltip>
-                  ) : (
-                    runButton
-                  )}
+                  Delete suite
+                </Button>
+              ) : null}
+              {!hideViewModeSelect ? (
+                <div
+                  role="group"
+                  aria-label="Suite overview view"
+                  className="flex items-center rounded-md border bg-muted/40 p-0.5 gap-0.5"
+                >
+                  {(
+                    [
+                      { value: "runs", label: "Runs" },
+                      { value: "test-cases", label: "Cases" },
+                    ] as { value: SuiteOverviewView; label: string }[]
+                  ).map(({ value, label }) => (
+                    <button
+                      key={value}
+                      type="button"
+                      aria-pressed={runsViewMode === value}
+                      onClick={() => onViewModeChange(value)}
+                      className={cn(
+                        "px-2 py-0.5 text-xs rounded transition-colors",
+                        runsViewMode === value
+                          ? "bg-background text-foreground shadow-sm font-medium"
+                          : "text-muted-foreground hover:text-foreground"
+                      )}
+                    >
+                      {label}
+                    </button>
+                  ))}
                 </div>
-              );
-            })
-          )}
+              ) : null}
+            </div>
+          </div>
+        )}
+
+        <div
+          ref={tableViewportRef}
+          className="flex min-h-0 min-w-0 flex-1 flex-col overflow-x-auto"
+        >
+          <div
+            className="flex min-h-0 min-w-0 flex-1 flex-col"
+            style={
+              responsiveLayout.enableHorizontalScroll
+                ? { minWidth: `${responsiveLayout.requiredTableWidthPx}px` }
+                : undefined
+            }
+          >
+            {/* Column Headers */}
+            {runs.length > 0 && (
+              <div className="shrink-0 border-b bg-muted/30 px-4 py-1.5 text-xs font-medium text-muted-foreground">
+                <div
+                  className="grid items-center gap-x-3"
+                  style={{ gridTemplateColumns: fullGridTemplateColumns }}
+                >
+                  {selectionEnabled && <div className="h-4 w-4" />}
+                  <div>Run ID</div>
+                  <div>Start time</div>
+                  <div>Duration</div>
+                  <div className="text-right">Passed</div>
+                  <div className="text-right">Failed</div>
+                  <div className="text-right">Total</div>
+                  <div className="text-right">
+                    {metricSource === "sdk" ? "Pass Rate" : "Accuracy"}
+                  </div>
+                  {hasTokenData && responsiveLayout.showTokens && (
+                    <div className="text-right">Tokens</div>
+                  )}
+                  {responsiveLayout.showRunBy && <div>Run by</div>}
+                  {hasCiMetadata && <div>Metadata</div>}
+                </div>
+              </div>
+            )}
+
+            <motion.div
+              key={runs.length > 0 ? "populated" : "empty"}
+              className="min-h-0 flex-1 divide-y overflow-y-auto"
+              variants={shouldReduceMotion ? undefined : runListVariants}
+              initial={shouldReduceMotion ? false : "hidden"}
+              animate="visible"
+            >
+              {runs.length === 0 ? (
+                <div className="px-4 py-12 text-center text-sm text-muted-foreground">
+                  No runs found.
+                </div>
+              ) : (
+                runs.map((run, runIndex) => {
+                  const runIterations = allIterations.filter(
+                    (iter) => iter.suiteRunId === run._id
+                  );
+                  // Only count completed iterations - exclude pending/cancelled
+                  const iterationResults = runIterations.map((i) =>
+                    computeIterationResult(i)
+                  );
+                  const realTimePassed = iterationResults.filter(
+                    (r) => r === "passed"
+                  ).length;
+                  const realTimeFailed = iterationResults.filter(
+                    (r) => r === "failed" || r === "timed_out"
+                  ).length;
+                  const realTimeTotal = realTimePassed + realTimeFailed;
+                  const totalTokens = runIterations.reduce(
+                    (sum, iter) => sum + (iter.tokensUsed || 0),
+                    0
+                  );
+
+                  const hasRealTimeTotals = realTimeTotal > 0;
+                  const passed = hasRealTimeTotals
+                    ? realTimePassed
+                    : run.summary?.passed ?? 0;
+                  const failed = hasRealTimeTotals
+                    ? realTimeFailed
+                    : run.summary?.failed ?? 0;
+                  const total = hasRealTimeTotals
+                    ? realTimeTotal
+                    : run.summary?.total ?? 0;
+                  const passRate =
+                    total > 0 ? Math.round((passed / total) * 100) : null;
+
+                  const timestamp = formatTime(
+                    run.completedAt ?? run.createdAt
+                  );
+
+                  const duration =
+                    run.completedAt && run.createdAt
+                      ? formatDuration(run.completedAt - run.createdAt)
+                      : run.createdAt && run.status === "running"
+                      ? formatDuration(Date.now() - run.createdAt)
+                      : "—";
+
+                  const runResult =
+                    run.result ||
+                    (run.status === "completed" && passRate !== null
+                      ? passRate >= (run.passCriteria?.minimumPassRate ?? 100)
+                        ? "passed"
+                        : "failed"
+                      : run.status === "cancelled"
+                        ? "cancelled"
+                        : run.status === "timed_out"
+                          ? "timed_out"
+                          : run.status === "running"
+                            ? "running"
+                            : "pending");
+                  const badge = runResultBadge(runResult);
+                  const runAccent = evalStatusLeftBorderClasses(runResult);
+
+                  const isSelected = selectedRunIds.has(run._id);
+                  const showCiMetadata =
+                    !!run.ciMetadata?.branch ||
+                    !!run.ciMetadata?.commitSha ||
+                    !!run.ciMetadata?.runUrl;
+
+                  const runRowCells = (
+                    <>
+                      <span className="flex min-w-0 items-center gap-2 py-0.5">
+                        <span className="truncate text-xs font-medium">
+                          Run {formatRunId(run._id)}
+                        </span>
+                        {badge ? (
+                          <span
+                            className={cn(
+                              "shrink-0 rounded px-1.5 py-0.5 text-[10px] font-medium",
+                              badge.className,
+                            )}
+                          >
+                            {badge.label}
+                          </span>
+                        ) : null}
+                      </span>
+                      <span className="truncate py-0.5 text-xs text-muted-foreground">
+                        {timestamp}
+                      </span>
+                      <span className="py-0.5 text-xs font-mono text-muted-foreground">
+                        {duration}
+                      </span>
+                      <span className="py-0.5 text-right text-xs font-mono text-muted-foreground">
+                        {passed}
+                      </span>
+                      <span className="py-0.5 text-right text-xs font-mono text-muted-foreground">
+                        {failed}
+                      </span>
+                      <span className="py-0.5 text-right text-xs font-mono text-muted-foreground">
+                        {total}
+                      </span>
+                      <span className="py-0.5 text-right text-xs font-mono text-muted-foreground">
+                        {passRate !== null ? `${passRate}%` : "—"}
+                      </span>
+                      {hasTokenData && responsiveLayout.showTokens && (
+                        <span className="py-0.5 text-right text-xs font-mono text-muted-foreground">
+                          {totalTokens > 0 ? totalTokens.toLocaleString() : "—"}
+                        </span>
+                      )}
+                      {responsiveLayout.showRunBy && (
+                        <span className="py-0.5">
+                          {(() => {
+                            const creator =
+                              run.createdBy && userMap?.get(run.createdBy);
+                            if (creator) {
+                              return (
+                                <Tooltip>
+                                  <TooltipTrigger asChild>
+                                    <Avatar className="size-6">
+                                      <AvatarImage
+                                        src={creator.imageUrl}
+                                        alt={creator.name}
+                                      />
+                                      <AvatarFallback className="text-[10px]">
+                                        {getInitials(creator.name)}
+                                      </AvatarFallback>
+                                    </Avatar>
+                                  </TooltipTrigger>
+                                  <TooltipContent>
+                                    <p className="text-xs">{creator.name}</p>
+                                  </TooltipContent>
+                                </Tooltip>
+                              );
+                            }
+                            return (
+                              <Avatar className="size-6">
+                                <AvatarFallback className="text-[10px]">
+                                  ?
+                                </AvatarFallback>
+                              </Avatar>
+                            );
+                          })()}
+                        </span>
+                      )}
+                      {hasCiMetadata && (
+                        <span className="min-w-0 py-0.5">
+                          {showCiMetadata ? (
+                            <CiMetadataDisplay
+                              ciMetadata={run.ciMetadata}
+                              compact={true}
+                              compactMode={responsiveLayout.metadataMode}
+                              interactive={false}
+                            />
+                          ) : (
+                            <span className="text-xs text-muted-foreground">
+                              —
+                            </span>
+                          )}
+                        </span>
+                      )}
+                    </>
+                  );
+
+                  const runButton = selectionEnabled ? (
+                    <div
+                      className="grid items-center gap-x-3 px-4 py-2.5"
+                      style={{ gridTemplateColumns: fullGridTemplateColumns }}
+                    >
+                      <div className="flex justify-center">
+                        <Checkbox
+                          checked={isSelected}
+                          onCheckedChange={() => toggleRunSelection(run._id)}
+                          onClick={(e) => e.stopPropagation()}
+                          aria-label={`Select run ${formatRunId(run._id)}`}
+                        />
+                      </div>
+                      <motion.button
+                        type="button"
+                        onClick={() => onRunClick(run._id)}
+                        whileTap={runRowWhileTap}
+                        className="col-[2/-1] grid w-full items-center gap-x-3 rounded-sm text-left transition-colors hover:bg-muted/50 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/60"
+                        style={{ gridTemplateColumns: rowGridTemplateColumns }}
+                      >
+                        {runRowCells}
+                      </motion.button>
+                    </div>
+                  ) : (
+                    <motion.button
+                      type="button"
+                      onClick={() => onRunClick(run._id)}
+                      whileTap={runRowWhileTap}
+                      className="grid w-full items-center gap-x-3 px-4 py-2.5 text-left transition-colors hover:bg-muted/50 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/60"
+                      style={{ gridTemplateColumns: rowGridTemplateColumns }}
+                    >
+                      {runRowCells}
+                    </motion.button>
+                  );
+
+                  return (
+                    <motion.div
+                      key={run._id}
+                      custom={runIndex}
+                      variants={
+                        shouldReduceMotion ? undefined : runItemVariants
+                      }
+                      className={cn("relative border-l-2", runAccent)}
+                    >
+                      {runButton}
+                    </motion.div>
+                  );
+                })
+              )}
+            </motion.div>
+          </div>
         </div>
       </div>
 
       {/* Batch Delete Confirmation Modal */}
       <Dialog
-        open={showBatchDeleteModal}
-        onOpenChange={setShowBatchDeleteModal}
+        open={canDeleteRuns && showBatchDeleteModal}
+        onOpenChange={(open) => {
+          if (canDeleteRuns) setShowBatchDeleteModal(open);
+        }}
       >
         <DialogContent>
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
-              <Trash2 className="h-5 w-5 text-destructive" />
+              <Trash2
+                className={cn("h-5 w-5", EVAL_LOW_PASS_RATE_TEXT_CLASS)}
+              />
               Delete {selectedRunIds.size} Run
               {selectedRunIds.size !== 1 ? "s" : ""}
             </DialogTitle>
@@ -466,7 +901,7 @@ export function RunOverview({
               Cancel
             </Button>
             <Button
-              variant="destructive"
+              className={EVAL_DESTRUCTIVE_BUTTON_CLASS}
               onClick={confirmBatchDeleteRuns}
               disabled={deletingRunId !== null}
             >
@@ -475,7 +910,7 @@ export function RunOverview({
           </DialogFooter>
         </DialogContent>
       </Dialog>
-    </>
+    </div>
   );
 }
 

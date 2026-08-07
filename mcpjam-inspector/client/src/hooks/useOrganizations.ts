@@ -1,7 +1,8 @@
 import { useMemo } from "react";
 import { useQuery, useMutation, useAction } from "convex/react";
+import { useDbUserReady } from "@/contexts/db-user-ready-context";
 
-export type OrganizationMembershipRole = "owner" | "admin" | "member";
+export type OrganizationMembershipRole = "owner" | "admin" | "member" | "guest";
 
 export interface Organization {
   _id: string;
@@ -12,7 +13,11 @@ export interface Organization {
   createdBy: string;
   createdAt: number;
   updatedAt: number;
+  myRole?: string;
+  isCreator?: boolean;
 }
+
+export const ORGANIZATION_CREATION_LIMIT = 1;
 
 export interface OrganizationMember {
   _id: string;
@@ -39,26 +44,61 @@ export function resolveOrganizationRole(
   return member.isOwner ? "owner" : "member";
 }
 
+/**
+ * Whether the current user may purchase shared credits for an org.
+ * Allowed for owners, admins, and the org creator. Mirrors the backend
+ * gate on `createCreditCheckoutSession` so the UI never offers a top-up
+ * the server would reject.
+ */
+export function canManageOrgCredits(
+  org: Pick<Organization, "myRole" | "isCreator"> | null | undefined,
+): boolean {
+  if (!org) return false;
+  return (
+    org.myRole === "owner" ||
+    org.myRole === "admin" ||
+    org.isCreator === true
+  );
+}
+
 export function useOrganizationQueries({
   isAuthenticated,
 }: {
   isAuthenticated: boolean;
 }) {
+  const isUserReady = useDbUserReady();
+  const canQuery = isAuthenticated && isUserReady;
   const organizations = useQuery(
     "organizations:getMyOrganizations" as any,
-    isAuthenticated ? ({} as any) : "skip",
+    canQuery ? ({} as any) : "skip",
   ) as Organization[] | undefined;
 
-  const isLoading = isAuthenticated && organizations === undefined;
+  const isLoading =
+    isAuthenticated && (!isUserReady || organizations === undefined);
 
   const sortedOrganizations = useMemo(() => {
     if (!organizations) return [];
     return [...organizations].sort((a, b) => b.updatedAt - a.updatedAt);
   }, [organizations]);
 
+  const createdCount = useMemo(
+    () =>
+      organizations
+        ? organizations.filter((org) => org.isCreator).length
+        : 0,
+    [organizations],
+  );
+
+  const canCreateOrganization =
+    !isAuthenticated ||
+    organizations === undefined ||
+    createdCount < ORGANIZATION_CREATION_LIMIT;
+
   return {
     sortedOrganizations,
     isLoading,
+    createdCount,
+    canCreateOrganization,
   };
 }
 

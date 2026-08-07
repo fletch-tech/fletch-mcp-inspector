@@ -19,32 +19,51 @@ function createTestApp(): Hono {
   // Apply origin validation middleware
   app.use("*", originValidationMiddleware);
 
-  // Test route
+  // Test routes
   app.get("/api/test", (c) => c.json({ message: "success" }));
   app.post("/api/test", (c) => c.json({ message: "success" }));
+  app.get("/assets/*", (c) => c.json({ message: "static asset" }));
 
   return app;
 }
 
 describe("originValidationMiddleware", () => {
   let app: Hono;
-  const savedEnv: Record<string, string | undefined> = {};
+  const originalAllowedOrigins = process.env.ALLOWED_ORIGINS;
+  const originalNonprodLockdown = process.env.MCPJAM_NONPROD_LOCKDOWN;
+  const originalCorsWildcard = process.env.CORS_WILDCARD_DOMAINS;
+  const originalWebAllowed = process.env.WEB_ALLOWED_ORIGINS;
 
   beforeEach(() => {
-    savedEnv.ALLOWED_ORIGINS = process.env.ALLOWED_ORIGINS;
-    savedEnv.CORS_WILDCARD_DOMAINS = process.env.CORS_WILDCARD_DOMAINS;
     app = createTestApp();
+    // Clear any custom allowed origins
     delete process.env.ALLOWED_ORIGINS;
+    delete process.env.MCPJAM_NONPROD_LOCKDOWN;
     delete process.env.CORS_WILDCARD_DOMAINS;
+    delete process.env.WEB_ALLOWED_ORIGINS;
   });
 
   afterEach(() => {
-    for (const [key, val] of Object.entries(savedEnv)) {
-      if (val !== undefined) {
-        process.env[key] = val;
-      } else {
-        delete process.env[key];
-      }
+    // Restore original env
+    if (originalAllowedOrigins) {
+      process.env.ALLOWED_ORIGINS = originalAllowedOrigins;
+    } else {
+      delete process.env.ALLOWED_ORIGINS;
+    }
+    if (originalNonprodLockdown) {
+      process.env.MCPJAM_NONPROD_LOCKDOWN = originalNonprodLockdown;
+    } else {
+      delete process.env.MCPJAM_NONPROD_LOCKDOWN;
+    }
+    if (originalCorsWildcard) {
+      process.env.CORS_WILDCARD_DOMAINS = originalCorsWildcard;
+    } else {
+      delete process.env.CORS_WILDCARD_DOMAINS;
+    }
+    if (originalWebAllowed) {
+      process.env.WEB_ALLOWED_ORIGINS = originalWebAllowed;
+    } else {
+      delete process.env.WEB_ALLOWED_ORIGINS;
     }
   });
 
@@ -232,6 +251,96 @@ describe("originValidationMiddleware", () => {
       expect(res.status).toBe(200);
     });
 
+    it("supports wildcard origins like https://*.up.railway.app", async () => {
+      process.env.ALLOWED_ORIGINS =
+        "https://*.up.railway.app,https://staging.mcpjam.com";
+      process.env.MCPJAM_NONPROD_LOCKDOWN = "true";
+
+      app = createTestApp();
+
+      const res = await app.request("/api/test", {
+        headers: { Origin: "https://mcp-inspector-pr-1804.up.railway.app" },
+      });
+      expect(res.status).toBe(200);
+    });
+
+    it("supports mid-host wildcards like https://mcp-inspector-pr-*.up.railway.app", async () => {
+      // The deploy-staging workflow programs this exact pattern into
+      // ALLOWED_ORIGINS so PR-preview frontends can hit staging APIs.
+      // The previous matcher only handled leading `*.` patterns and
+      // silently dropped this one — leaving PR previews 403'd by
+      // origin validation.
+      process.env.ALLOWED_ORIGINS =
+        "https://staging.mcpjam.com,https://mcp-inspector-pr-*.up.railway.app";
+      process.env.MCPJAM_NONPROD_LOCKDOWN = "true";
+
+      app = createTestApp();
+
+      const ok = await app.request("/api/test", {
+        headers: { Origin: "https://mcp-inspector-pr-2246.up.railway.app" },
+      });
+      expect(ok.status).toBe(200);
+
+      // Same domain but different prefix → still rejected.
+      const blocked = await app.request("/api/test", {
+        headers: { Origin: "https://other-pr-2246.up.railway.app" },
+      });
+      expect(blocked.status).toBe(403);
+
+      // Wildcard must not cross dots — `pr-2246.evil` does not match
+      // `mcp-inspector-pr-*.up.railway.app`.
+      const crossDot = await app.request("/api/test", {
+        headers: {
+          Origin: "https://mcp-inspector-pr-2246.evil.up.railway.app",
+        },
+      });
+      expect(crossDot.status).toBe(403);
+    });
+
+    it("blocks origins that don't match wildcard pattern", async () => {
+      process.env.ALLOWED_ORIGINS = "https://*.up.railway.app";
+      process.env.MCPJAM_NONPROD_LOCKDOWN = "true";
+
+      app = createTestApp();
+
+      const res = await app.request("/api/test", {
+        headers: { Origin: "https://evil.com" },
+      });
+      expect(res.status).toBe(403);
+    });
+
+    it("rejects wildcard origin when scheme mismatches (http vs https)", async () => {
+      process.env.ALLOWED_ORIGINS = "https://*.up.railway.app";
+      process.env.MCPJAM_NONPROD_LOCKDOWN = "true";
+
+      app = createTestApp();
+
+      const res = await app.request("/api/test", {
+        headers: { Origin: "http://foo.up.railway.app" },
+      });
+      expect(res.status).toBe(403);
+    });
+
+    it("strips wildcard origins outside non-prod lockdown", async () => {
+      process.env.ALLOWED_ORIGINS =
+        "https://*.up.railway.app,https://staging.mcpjam.com";
+      // MCPJAM_NONPROD_LOCKDOWN is not set — simulates production
+
+      app = createTestApp();
+
+      // Wildcard should be stripped, so Railway origins are blocked
+      const res = await app.request("/api/test", {
+        headers: { Origin: "https://foo.up.railway.app" },
+      });
+      expect(res.status).toBe(403);
+
+      // Exact match should still work
+      const res2 = await app.request("/api/test", {
+        headers: { Origin: "https://staging.mcpjam.com" },
+      });
+      expect(res2.status).toBe(200);
+    });
+
     it("blocks origins not in custom list", async () => {
       process.env.ALLOWED_ORIGINS = "http://only-this.com";
 
@@ -246,134 +355,44 @@ describe("originValidationMiddleware", () => {
     });
   });
 
-  describe("local.fletch.co origins (default allowed)", () => {
-    it("allows http://local.fletch.co:6274", async () => {
-      const res = await app.request("/api/test", {
-        headers: { Origin: "http://local.fletch.co:6274" },
+  describe("static asset exemption", () => {
+    it("allows /assets/ requests with any origin (Vite crossorigin modules)", async () => {
+      const res = await app.request("/assets/index-abc123.js", {
+        headers: { Origin: "https://preview.up.railway.app" },
       });
+
       expect(res.status).toBe(200);
     });
 
-    it("allows http://local.fletch.co:5173", async () => {
-      const res = await app.request("/api/test", {
-        headers: { Origin: "http://local.fletch.co:5173" },
+    it("allows /assets/ CSS requests with any origin", async () => {
+      const res = await app.request("/assets/index-abc123.css", {
+        headers: { Origin: "https://preview.up.railway.app" },
       });
-      expect(res.status).toBe(200);
-    });
 
-    it("allows http://local.fletch.co:8080", async () => {
-      const res = await app.request("/api/test", {
-        headers: { Origin: "http://local.fletch.co:8080" },
-      });
-      expect(res.status).toBe(200);
-    });
-
-    it("allows http://local.fletch.co without port", async () => {
-      const res = await app.request("/api/test", {
-        headers: { Origin: "http://local.fletch.co" },
-      });
       expect(res.status).toBe(200);
     });
   });
 
-  describe("wildcard domain matching via CORS_WILDCARD_DOMAINS", () => {
-    it("allows *.fletch.co subdomains when configured", async () => {
+  describe("CORS_WILDCARD_DOMAINS alignment", () => {
+    it("allows hosted *.fletch.co origins used by CORS", async () => {
       process.env.CORS_WILDCARD_DOMAINS = "*.fletch.co";
       app = createTestApp();
 
       const res = await app.request("/api/test", {
-        headers: { Origin: "https://app.fletch.co" },
+        headers: { Origin: "https://sandbox-mcp-inspector.fletch.co" },
       });
+
       expect(res.status).toBe(200);
     });
 
-    it("allows any subdomain of fletch.co", async () => {
-      process.env.CORS_WILDCARD_DOMAINS = "*.fletch.co";
-      app = createTestApp();
-
-      for (const sub of ["inspector", "staging", "api", "dashboard"]) {
-        const res = await app.request("/api/test", {
-          headers: { Origin: `https://${sub}.fletch.co` },
-        });
-        expect(res.status).toBe(200);
-      }
-    });
-
-    it("allows HTTPS origins on *.fletch.co", async () => {
+    it("still blocks unrelated origins when CORS wildcards are set", async () => {
       process.env.CORS_WILDCARD_DOMAINS = "*.fletch.co";
       app = createTestApp();
 
       const res = await app.request("/api/test", {
-        headers: { Origin: "https://secure.fletch.co" },
+        headers: { Origin: "https://evil.example" },
       });
-      expect(res.status).toBe(200);
-    });
 
-    it("allows origins with ports on *.fletch.co", async () => {
-      process.env.CORS_WILDCARD_DOMAINS = "*.fletch.co";
-      app = createTestApp();
-
-      const res = await app.request("/api/test", {
-        headers: { Origin: "https://app.fletch.co:8443" },
-      });
-      expect(res.status).toBe(200);
-    });
-
-    it("blocks non-matching domains even with wildcard configured", async () => {
-      process.env.CORS_WILDCARD_DOMAINS = "*.fletch.co";
-      app = createTestApp();
-
-      const res = await app.request("/api/test", {
-        headers: { Origin: "https://evil.com" },
-      });
-      expect(res.status).toBe(403);
-    });
-
-    it("blocks similar but different domains", async () => {
-      process.env.CORS_WILDCARD_DOMAINS = "*.fletch.co";
-      app = createTestApp();
-
-      const blocked = [
-        "https://notfletch.co",
-        "https://fletch.co.evil.com",
-        "https://evil-fletch.co",
-      ];
-
-      for (const origin of blocked) {
-        const res = await app.request("/api/test", {
-          headers: { Origin: origin },
-        });
-        expect(res.status).toBe(403);
-      }
-    });
-
-    it("supports multiple wildcard patterns", async () => {
-      process.env.CORS_WILDCARD_DOMAINS = "*.fletch.co, *.example.com";
-      app = createTestApp();
-
-      const res1 = await app.request("/api/test", {
-        headers: { Origin: "https://app.fletch.co" },
-      });
-      expect(res1.status).toBe(200);
-
-      const res2 = await app.request("/api/test", {
-        headers: { Origin: "https://app.example.com" },
-      });
-      expect(res2.status).toBe(200);
-
-      const res3 = await app.request("/api/test", {
-        headers: { Origin: "https://other.org" },
-      });
-      expect(res3.status).toBe(403);
-    });
-
-    it("does not match when CORS_WILDCARD_DOMAINS is empty", async () => {
-      process.env.CORS_WILDCARD_DOMAINS = "";
-      app = createTestApp();
-
-      const res = await app.request("/api/test", {
-        headers: { Origin: "https://app.fletch.co" },
-      });
       expect(res.status).toBe(403);
     });
   });

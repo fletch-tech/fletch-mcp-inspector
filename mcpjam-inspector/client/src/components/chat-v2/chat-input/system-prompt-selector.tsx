@@ -1,22 +1,22 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   Dialog,
   DialogContent,
   DialogHeader,
   DialogTitle,
   DialogTrigger,
-} from "@/components/ui/dialog";
-import { Button } from "@/components/ui/button";
-import { Textarea } from "@/components/ui/textarea";
-import { Slider } from "@/components/ui/slider";
+} from "@mcpjam/design-system/dialog";
+import { Button } from "@mcpjam/design-system/button";
+import { Textarea } from "@mcpjam/design-system/textarea";
+import { Slider } from "@mcpjam/design-system/slider";
 import { AlertTriangle, Settings2 } from "lucide-react";
 import { toast } from "sonner";
-import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
+import { Alert, AlertDescription, AlertTitle } from "@mcpjam/design-system/alert";
 import {
   Tooltip,
   TooltipContent,
   TooltipTrigger,
-} from "@/components/ui/tooltip";
+} from "@mcpjam/design-system/tooltip";
 import { ModelDefinition, isGPT5Model } from "@/shared/types";
 
 interface SystemPromptSelectorProps {
@@ -29,6 +29,14 @@ interface SystemPromptSelectorProps {
   hasMessages?: boolean;
   onResetChat: () => void;
   currentModel: ModelDefinition;
+  multiModelEnabled?: boolean;
+  selectedModels?: ModelDefinition[];
+  /** Custom trigger element to replace the default toolbar button. */
+  renderTrigger?: React.ReactNode;
+  /** Controlled open state (overrides internal state when provided). */
+  open?: boolean;
+  /** Callback when controlled open state changes. */
+  onOpenChange?: (open: boolean) => void;
 }
 
 export function SystemPromptSelector({
@@ -41,13 +49,47 @@ export function SystemPromptSelector({
   hasMessages,
   onResetChat,
   currentModel,
+  multiModelEnabled = false,
+  selectedModels,
+  renderTrigger,
+  open: controlledOpen,
+  onOpenChange: controlledOnOpenChange,
 }: SystemPromptSelectorProps) {
-  const [isOpen, setIsOpen] = useState(false);
+  const [internalOpen, setInternalOpen] = useState(false);
+  const isOpen = controlledOpen ?? internalOpen;
+  const setIsOpen = controlledOnOpenChange ?? setInternalOpen;
   const [draftPrompt, setDraftPrompt] = useState(systemPrompt);
   const [draftTemperature, setDraftTemperature] = useState(temperature);
   const [confirmReset, setConfirmReset] = useState(false);
 
-  const isGpt5 = isGPT5Model(currentModel.id);
+  // Re-seed the draft from the live `systemPrompt`/`temperature` whenever the
+  // dialog transitions from closed to open. Radix's `onOpenChange` does NOT
+  // fire when `open` is controlled and flipped externally, so the equivalent
+  // sync inside `handleOpenChange` only covers internally-driven opens. Surfaces
+  // that drive `open` themselves (chat-input passes a controlled `open`) would
+  // otherwise show whatever `systemPrompt` was at the selector's mount time —
+  // e.g. the default literal — even after the host-driven state moved on.
+  const previousOpenRef = useRef(isOpen);
+  useEffect(() => {
+    const wasOpen = previousOpenRef.current;
+    previousOpenRef.current = isOpen;
+    if (isOpen && !wasOpen) {
+      setDraftPrompt(systemPrompt);
+      setDraftTemperature(temperature);
+      setConfirmReset(false);
+    }
+  }, [isOpen, systemPrompt, temperature]);
+
+  const effectiveSelectedModels =
+    multiModelEnabled && selectedModels && selectedModels.length > 0
+      ? selectedModels
+      : [currentModel];
+  const someSelectedModelsAreGpt5 = effectiveSelectedModels.some((model) =>
+    isGPT5Model(model.id),
+  );
+  const allSelectedModelsAreGpt5 = effectiveSelectedModels.every((model) =>
+    isGPT5Model(model.id),
+  );
 
   const handleOpenChange = (open: boolean) => {
     setIsOpen(open);
@@ -85,24 +127,30 @@ export function SystemPromptSelector({
 
   return (
     <Dialog open={isOpen} onOpenChange={handleOpenChange}>
-      <Tooltip>
-        <TooltipTrigger asChild>
-          <DialogTrigger asChild>
-            <Button
-              variant="ghost"
-              size="sm"
-              disabled={disabled || isLoading}
-              className="h-8 px-2 rounded-full hover:bg-muted/80 transition-colors text-xs cursor-pointer max-w-[180px] @max-2xl/toolbar:w-8 @max-2xl/toolbar:px-0 @max-2xl/toolbar:max-w-none"
-            >
-              <Settings2 className="h-2 w-2 mr-1 flex-shrink-0 @max-2xl/toolbar:h-4 @max-2xl/toolbar:w-4 @max-2xl/toolbar:mr-0" />
-              <span className="text-[10px] font-medium truncate @max-2xl/toolbar:hidden">
-                System Prompt & Temperature
-              </span>
-            </Button>
-          </DialogTrigger>
-        </TooltipTrigger>
-        <TooltipContent side="top">System Prompt & Temperature</TooltipContent>
-      </Tooltip>
+      {controlledOpen !== undefined ? null : renderTrigger ? (
+        <DialogTrigger asChild>{renderTrigger}</DialogTrigger>
+      ) : (
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <DialogTrigger asChild>
+              <Button
+                variant="ghost"
+                size="sm"
+                disabled={disabled || isLoading}
+                className="h-8 px-2 rounded-full hover:bg-muted/80 transition-colors text-xs cursor-pointer max-w-[180px] @max-2xl/toolbar:w-8 @max-2xl/toolbar:px-0 @max-2xl/toolbar:max-w-none"
+              >
+                <Settings2 className="h-2 w-2 mr-1 flex-shrink-0 @max-2xl/toolbar:h-4 @max-2xl/toolbar:w-4 @max-2xl/toolbar:mr-0" />
+                <span className="text-[10px] font-medium truncate @max-2xl/toolbar:hidden">
+                  System Prompt & Temperature
+                </span>
+              </Button>
+            </DialogTrigger>
+          </TooltipTrigger>
+          <TooltipContent side="top">
+            System Prompt & Temperature
+          </TooltipContent>
+        </Tooltip>
+      )}
       <DialogContent className="sm:max-w-md">
         <DialogHeader>
           <DialogTitle>System Prompt & Temperature</DialogTitle>
@@ -138,11 +186,16 @@ export function SystemPromptSelector({
               max={2}
               step={0.1}
               className="w-full"
-              disabled={isGpt5}
+              disabled={allSelectedModelsAreGpt5}
             />
-            {isGpt5 ? (
+            {allSelectedModelsAreGpt5 ? (
               <p className="text-xs text-muted-foreground">
                 Temperature is not supported for GPT-5 models
+              </p>
+            ) : someSelectedModelsAreGpt5 ? (
+              <p className="text-xs text-muted-foreground">
+                GPT-5 models ignore temperature. The setting still applies to
+                the other selected models.
               </p>
             ) : (
               <p className="text-xs text-muted-foreground">

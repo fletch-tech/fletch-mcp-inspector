@@ -9,29 +9,29 @@ import {
   SelectItem,
   SelectTrigger,
   SelectValue,
-} from "@/components/ui/select";
+} from "@mcpjam/design-system/select";
 import {
   Card,
   CardContent,
   CardDescription,
   CardHeader,
   CardTitle,
-} from "@/components/ui/card";
-import { Label } from "@/components/ui/label";
-import { Alert, AlertDescription } from "@/components/ui/alert";
-import { Badge } from "@/components/ui/badge";
+} from "@mcpjam/design-system/card";
+import { Label } from "@mcpjam/design-system/label";
+import { Alert, AlertDescription } from "@mcpjam/design-system/alert";
+import { Badge } from "@mcpjam/design-system/badge";
 import {
   Collapsible,
   CollapsibleContent,
   CollapsibleTrigger,
-} from "@/components/ui/collapsible";
-import { Button } from "@/components/ui/button";
+} from "@mcpjam/design-system/collapsible";
+import { Button } from "@mcpjam/design-system/button";
 import { useState } from "react";
-import { OAuthProtocolVersion } from "@/lib/oauth/state-machines/types";
 import {
   PROTOCOL_VERSION_INFO,
   getSupportedRegistrationStrategies,
-} from "@/lib/oauth/state-machines/factory";
+  type OAuthProtocolVersion,
+} from "@mcpjam/sdk/browser";
 
 interface ProtocolVersionSelectorProps {
   value: OAuthProtocolVersion;
@@ -68,8 +68,13 @@ export function ProtocolVersionSelector({
               Choose between stable and draft specifications
             </CardDescription>
           </div>
-          {value === "2025-11-25" && (
+          {value === "2026-07-28" && (
             <Badge variant="default" className="ml-2">
+              Draft
+            </Badge>
+          )}
+          {value === "2025-11-25" && (
+            <Badge variant="secondary" className="ml-2">
               Latest
             </Badge>
           )}
@@ -101,6 +106,14 @@ export function ProtocolVersionSelector({
               <SelectItem value="2025-11-25">
                 <div className="flex items-center gap-2">
                   <span>2025-11-25</span>
+                  <Badge variant="secondary" className="text-xs">
+                    Latest
+                  </Badge>
+                </div>
+              </SelectItem>
+              <SelectItem value="2026-07-28">
+                <div className="flex items-center gap-2">
+                  <span>2026-07-28</span>
                   <Badge variant="default" className="text-xs">
                     Draft
                   </Badge>
@@ -189,7 +202,20 @@ export function ProtocolVersionSelector({
 
               {/* Key Differences */}
               <div className="text-xs text-muted-foreground mt-2 p-2 bg-muted/50 rounded">
-                {value === "2025-11-25" ? (
+                {value === "2026-07-28" ? (
+                  <div>
+                    <strong>New in 2026-07-28:</strong>
+                    <ul className="list-disc list-inside mt-1 space-y-0.5">
+                      <li>
+                        Inherits 2025-11-25 discovery, CIMD, and strict PKCE
+                      </li>
+                      <li>
+                        OIDC <code>application_type</code> sent on Dynamic Client
+                        Registration (SEP-837)
+                      </li>
+                    </ul>
+                  </div>
+                ) : value === "2025-11-25" ? (
                   <div>
                     <strong>New in 2025-11-25:</strong>
                     <ul className="list-disc list-inside mt-1 space-y-0.5">
@@ -245,9 +271,14 @@ export function ProtocolVersionBadge({
       title={currentInfo.description}
     >
       <span className="text-xs font-mono">{value}</span>
-      {value === "2025-11-25" && (
+      {value === "2026-07-28" && (
         <Badge variant="default" className="text-xs px-1.5 py-0">
           Draft
+        </Badge>
+      )}
+      {value === "2025-11-25" && (
+        <Badge variant="secondary" className="text-xs px-1.5 py-0">
+          Latest
         </Badge>
       )}
       {value === "2025-06-18" && (

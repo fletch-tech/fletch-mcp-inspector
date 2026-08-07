@@ -34,13 +34,23 @@ export default defineSchema({
     .index("by_user", ["userId"])
     .index("by_org_user", ["organizationId", "userId"]),
 
+  // Local/Fletch "projects" are stored as workspaces; the 2.33 client talks to
+  // projects:* which maps onto these rows (see convex/projects.ts).
   workspaces: defineTable({
     name: v.string(),
     description: v.optional(v.string()),
+    organizationId: v.optional(v.id("organizations")),
+    clientConfig: v.optional(v.any()),
+    // Project-scoped auto-connect membership + per-server overrides
+    // (projectServerConfig:* adapter).
+    serverIds: v.optional(v.array(v.string())),
+    serverConfigOverrides: v.optional(v.any()),
     createdBy: v.optional(v.id("users")),
     createdAt: v.number(),
     updatedAt: v.number(),
-  }).index("by_created", ["createdAt"]),
+  })
+    .index("by_created", ["createdAt"])
+    .index("by_organization", ["organizationId"]),
 
   workspaceMembers: defineTable({
     workspaceId: v.id("workspaces"),
@@ -73,4 +83,142 @@ export default defineSchema({
   })
     .index("by_workspace", ["workspaceId"])
     .index("by_workspace_name", ["workspaceId", "name"]),
+
+  // Connect "Client" tab — project-scoped host configs (Fletch adapter for
+  // upstream hosts:* API; full chatbox minting is out of scope).
+  hosts: defineTable({
+    projectId: v.string(),
+    name: v.string(),
+    config: v.any(),
+    ownerScope: v.optional(v.any()),
+    createdBy: v.optional(v.id("users")),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  }).index("by_project", ["projectId"]),
+
+  // hostConfigsV2 suite/project defaults (content-addressed in upstream;
+  // here we store one document per scope).
+  hostConfigScopes: defineTable({
+    scopeType: v.union(v.literal("suite"), v.literal("project")),
+    scopeId: v.string(),
+    config: v.any(),
+    updatedAt: v.number(),
+    updatedBy: v.optional(v.id("users")),
+  }).index("by_scope", ["scopeType", "scopeId"]),
+
+  // Named server groups for eval suites / swarms (serverAttachments:*).
+  serverAttachments: defineTable({
+    projectId: v.string(),
+    name: v.string(),
+    serverIds: v.array(v.string()),
+    createdBy: v.optional(v.id("users")),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  })
+    .index("by_project", ["projectId"])
+    .index("by_project_name", ["projectId", "name"]),
+
+  // Synthetic XAA debugger identities ("People" strip).
+  testIdentities: defineTable({
+    projectId: v.string(),
+    name: v.string(),
+    subject: v.string(),
+    email: v.string(),
+    color: v.optional(v.string()),
+    createdBy: v.optional(v.id("users")),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  }).index("by_project", ["projectId"]),
+
+  // Minimal eval suite / case persistence for the Excalidraw quickstart.
+  evalSuites: defineTable({
+    projectId: v.string(),
+    name: v.string(),
+    description: v.optional(v.string()),
+    environment: v.any(),
+    tags: v.optional(v.array(v.string())),
+    serverAttachmentId: v.optional(v.string()),
+    hostAttachments: v.optional(v.any()),
+    createdBy: v.optional(v.id("users")),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  }).index("by_project", ["projectId"]),
+
+  evalTestCases: defineTable({
+    suiteId: v.string(),
+    title: v.string(),
+    query: v.optional(v.string()),
+    models: v.optional(v.any()),
+    expectedToolCalls: v.optional(v.any()),
+    runs: v.optional(v.number()),
+    isNegativeTest: v.optional(v.boolean()),
+    scenario: v.optional(v.string()),
+    expectedOutput: v.optional(v.string()),
+    steps: v.optional(v.any()),
+    createdBy: v.optional(v.id("users")),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  }).index("by_suite", ["suiteId"]),
+
+  // Suite runs created by testSuites:startTestSuiteRun.
+  evalSuiteRuns: defineTable({
+    suiteId: v.string(),
+    projectId: v.string(),
+    runNumber: v.number(),
+    status: v.string(),
+    result: v.optional(v.string()),
+    notes: v.optional(v.string()),
+    passCriteria: v.optional(v.any()),
+    configSnapshot: v.optional(v.any()),
+    toolSnapshot: v.optional(v.any()),
+    toolSnapshotDebug: v.optional(v.any()),
+    namedHostId: v.optional(v.string()),
+    runGroupId: v.optional(v.string()),
+    source: v.optional(v.string()),
+    expectedIterations: v.optional(v.number()),
+    summary: v.optional(v.any()),
+    stopReason: v.optional(v.string()),
+    matchOptionsOverride: v.optional(v.any()),
+    createdBy: v.optional(v.id("users")),
+    createdAt: v.number(),
+    completedAt: v.optional(v.number()),
+    updatedAt: v.number(),
+    // Optional AI insight payloads (Fletch stubs write failed placeholders).
+    runInsightsStatus: v.optional(v.string()),
+    runInsights: v.optional(v.any()),
+    serverQualityStatus: v.optional(v.string()),
+    serverQuality: v.optional(v.any()),
+  })
+    .index("by_suite", ["suiteId"])
+    .index("by_suite_created", ["suiteId", "createdAt"]),
+
+  // Per-case iteration rows for a suite run.
+  evalTestIterations: defineTable({
+    runId: v.string(),
+    suiteId: v.string(),
+    testCaseId: v.string(),
+    iterationNumber: v.number(),
+    status: v.string(),
+    result: v.optional(v.string()),
+    testCaseSnapshot: v.optional(v.any()),
+    actualToolCalls: v.optional(v.any()),
+    tokensUsed: v.optional(v.number()),
+    error: v.optional(v.string()),
+    errorDetails: v.optional(v.any()),
+    metadata: v.optional(v.any()),
+    messages: v.optional(v.any()),
+    createdBy: v.optional(v.id("users")),
+    startedAt: v.optional(v.number()),
+    completedAt: v.optional(v.number()),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  }).index("by_run", ["runId"]),
+
+  productUpdateDismissals: defineTable({
+    userId: v.id("users"),
+    slug: v.string(),
+    dismissedAt: v.number(),
+  })
+    .index("by_user", ["userId"])
+    .index("by_user_slug", ["userId", "slug"]),
 });

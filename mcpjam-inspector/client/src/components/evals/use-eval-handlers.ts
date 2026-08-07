@@ -1,25 +1,210 @@
 import { useCallback, useState } from "react";
 import { useConvex } from "convex/react";
-import { useAuth } from "@/lib/auth/jwt-auth-context";
 import { toast } from "sonner";
-import posthog from "posthog-js";
-import { detectPlatform, detectEnvironment } from "@/lib/PosthogUtils";
-import {
-  useAiProviderKeys,
-  type ProviderTokens,
-} from "@/hooks/use-ai-provider-keys";
+import { track } from "@/lib/analytics";
 import { isMCPJamProvidedModel } from "@/shared/types";
-import { navigateToEvalsRoute } from "@/lib/evals-router";
-import type { EvalSuite, EvalSuiteOverviewEntry } from "./types";
+import {
+  buildCiEvalsPath,
+  buildEvalsPath,
+  navigateApp,
+} from "@/lib/app-navigation";
+import type { EvalRoute, SuiteOverviewView } from "@/lib/eval-route-types";
+import type {
+  EvalCase,
+  EvalSuite,
+  EvalSuiteOverviewEntry,
+  EvalSuiteRun,
+} from "./types";
+import { getSuiteReplayEligibility } from "./replay-eligibility";
+import {
+  buildSuiteRunPlans,
+  getEffectiveSuiteServers,
+  getEnvironmentConflictMessage,
+  getSelectedSuiteHostRunPlan,
+} from "./helpers";
+import { useProjectEnvironments } from "@/hooks/useProjectEnvironments";
+import { useProjectEnvironmentsEnabled } from "@/hooks/useProjectEnvironmentsEnabled";
+import { draftTestCaseId } from "./draft-test-case";
+import { isModelFree, promptTurnsToSteps } from "@/shared/steps";
 import type { useEvalMutations } from "./use-eval-mutations";
-import { API_ENDPOINTS } from "./constants";
 import { authFetch } from "@/lib/session-token";
+import { getBillingErrorMessage } from "@/lib/billing-entitlements";
+import type { ModelDefinition } from "@/shared/types";
+import {
+  buildEvalConvexAuthPayload,
+  getEvalApiEndpoints,
+  runEvals,
+  runEvalTestCase,
+  type GenerationOptions,
+} from "@/lib/apis/evals-api";
+import { isHostedMode } from "@/lib/apis/mode-client";
+import { normalizeHostedServerNames } from "@/lib/apis/web/context";
+import { generateAndPersistEvalTests } from "@/lib/evals/generate-and-persist-tests";
+import { useConvexAccessToken } from "@/hooks/use-convex-access-token";
+import {
+  getDefaultTestCaseModelValue,
+  getRunnableCaseModels,
+  prepareSingleTestCaseRun,
+} from "./single-test-case-runner";
+import type { EnsureServersReadyResult } from "@/hooks/use-app-state";
+
+function navigateEvalRoute(route: EvalRoute, context: "evals" | "ci-evals") {
+  navigateApp(
+    context === "ci-evals" ? buildCiEvalsPath(route) : buildEvalsPath(route)
+  );
+}
+import type { RemoteServer } from "@/hooks/useProjects";
+import {
+  formatMcpConnectServerPrompt,
+  formatMcpServerRefsForError,
+  isUnresolvableMcpServerRef,
+} from "@/lib/mcp-server-display-name";
+
+function getConfiguredTestCaseModelValues(
+  testCase: Pick<EvalCase, "models">
+): string[] {
+  // Derived from the shared helper so the run path and the credit estimates
+  // can never disagree about which models are runnable.
+  return getRunnableCaseModels(testCase).map(
+    (modelConfig) => `${modelConfig.provider}/${modelConfig.model}`
+  );
+}
+
+export function hasUnavailableServers(result: EnsureServersReadyResult) {
+  return (
+    result.missingServerNames.length > 0 ||
+    result.failedServerNames.length > 0 ||
+    result.reauthServerNames.length > 0
+  );
+}
+
+/** User-facing copy when ensureServersReady reports blockers. Never lists raw server ids. */
+export function formatEnsureServersReadyError(
+  result: EnsureServersReadyResult,
+  actionLabel: string,
+  projectServers: RemoteServer[] | undefined
+) {
+  if (result.missingServerNames.length > 0) {
+    // Never list server names/ids in this toast: refs may be legacy Convex
+    // ids or other opaque values that read like random strings.
+    const n = result.missingServerNames.length;
+    const isTest = actionLabel.includes("test case");
+    if (n === 1) {
+      return isTest
+        ? `Unable to ${actionLabel}. This test depends on an MCP server that is no longer in this project.`
+        : `Unable to ${actionLabel}. This suite depends on an MCP server that is no longer in this project.`;
+    }
+    return isTest
+      ? `Unable to ${actionLabel}. This test depends on ${n} MCP servers that are no longer in this project.`
+      : `Unable to ${actionLabel}. This suite depends on ${n} MCP servers that are no longer in this project.`;
+  }
+
+  if (result.reauthServerNames.length > 0) {
+    const names = result.reauthServerNames;
+    const opts = { remoteServers: projectServers };
+    if (
+      names.length > 0 &&
+      names.every((r) => isUnresolvableMcpServerRef(r, opts))
+    ) {
+      return `Re-authenticate, then try to ${actionLabel}.`;
+    }
+    return `Re-authenticate with ${formatMcpServerRefsForError(
+      names,
+      opts
+    )} to ${actionLabel}.`;
+  }
+
+  if (result.failedServerNames.length > 0) {
+    const names = result.failedServerNames;
+    const opts = { remoteServers: projectServers };
+    if (
+      names.length > 0 &&
+      names.every((r) => isUnresolvableMcpServerRef(r, opts))
+    ) {
+      return `We couldn't connect to a required server. Try again to ${actionLabel}.`;
+    }
+    return `We couldn't connect to ${formatMcpServerRefsForError(
+      names,
+      opts
+    )}. Try again to ${actionLabel}.`;
+  }
+
+  return `Unable to prepare the required servers to ${actionLabel}.`;
+}
+
+export function normalizeSuiteServerRefs(
+  serverNamesOrIds: readonly string[] | undefined
+): string[] {
+  const rawServerRefs = (serverNamesOrIds ?? []).flatMap((serverRef) =>
+    typeof serverRef === "string" && serverRef.trim().length > 0
+      ? [serverRef.trim()]
+      : []
+  );
+
+  if (rawServerRefs.length === 0) {
+    return [];
+  }
+
+  if (isHostedMode()) {
+    try {
+      return normalizeHostedServerNames(rawServerRefs);
+    } catch {
+      // Fall back to the raw refs if hosted context has not initialized yet.
+    }
+  }
+
+  return Array.from(new Set(rawServerRefs));
+}
+
+/** Options for {@link useEvalHandlers} `handleGenerateTests` (playground: connect, generate, run). */
+export type HandleGenerateEvalTestsOptions = {
+  /** Required when `runNewCasesAfterGenerate` is true (same object passed to `handleRunTestCase`). */
+  suite?: EvalSuite;
+  /**
+   * When set with `suite`, after persisting new cases, runs them via the same path as
+   * the per-row run control (including `ensureServersReady` and model prep).
+   */
+  runNewCasesAfterGenerate?: boolean;
+  /**
+   * Optional metadata about the suite's saved server attachment. When
+   * provided, threaded through to the backend so the LLM scopes generated
+   * cases to that attachment's servers (per-server tests + at least one
+   * explicit cross-server test when the attachment spans ≥2 servers).
+   */
+  serverAttachment?: {
+    id?: string;
+    name?: string;
+    resolvedServerNames: string[];
+  };
+  /**
+   * Optional generation knobs (per-bucket case mix, vary-user-styles) forwarded
+   * to the backend. Absent → today's default generation.
+   */
+  generationOptions?: GenerationOptions;
+};
 
 interface UseEvalHandlersProps {
   mutations: ReturnType<typeof useEvalMutations>;
   selectedSuiteEntry: EvalSuiteOverviewEntry | null;
   selectedSuiteId: string | null;
   selectedTestId: string | null;
+  projectId?: string | null;
+  connectedServerNames?: Set<string>;
+  ensureServersReady?: (
+    serverNames: string[]
+  ) => Promise<EnsureServersReadyResult>;
+  latestRunBySuiteId?: Map<string, EvalSuiteRun | null>;
+  /**
+   * When `ci-evals`, navigation after test-case mutations stays on CI evals
+   * routes (`#/ci-evals/...`). Defaults to main evals (`#/evals/...`).
+   */
+  evalsNavigationContext?: "evals" | "ci-evals";
+  /** For user-facing server labels (names instead of raw Convex ids). */
+  projectServers?: RemoteServer[];
+  /** When true, this uses the direct-guest eval playground flow. */
+  isDirectGuest?: boolean;
+  /** Available models; used to resolve provider when falling back to suite.defaultConfig.modelId. */
+  availableModels?: ModelDefinition[];
 }
 
 /**
@@ -30,24 +215,44 @@ export function useEvalHandlers({
   selectedSuiteEntry,
   selectedSuiteId,
   selectedTestId,
+  projectId = null,
+  connectedServerNames,
+  ensureServersReady,
+  latestRunBySuiteId,
+  evalsNavigationContext = "evals",
+  projectServers,
+  isDirectGuest = false,
+  availableModels,
 }: UseEvalHandlersProps) {
   const convex = useConvex();
-  const { getAccessToken } = useAuth();
-  const { getToken, hasToken } = useAiProviderKeys();
+  // Resolves the WorkOS token for signed-in users and the guest bearer for
+  // guests (project-owning guests included). See use-convex-access-token.
+  const getAccessToken = useConvexAccessToken();
+  // Environment names for env-suite fan-out toasts/labels only — env plans
+  // never derive servers from this list (the server resolves them at launch).
+  // Queried only when the feature flag is on; a flag-off env suite still
+  // fans out correctly with ids as display fallbacks.
+  const projectEnvironmentsEnabled = useProjectEnvironmentsEnabled();
+  const projectEnvironments = useProjectEnvironments(
+    projectEnvironmentsEnabled ? projectId : null
+  );
 
   // Action states
   const [rerunningSuiteId, setRerunningSuiteId] = useState<string | null>(null);
+  const [runningTestCaseId, setRunningTestCaseId] = useState<string | null>(
+    null
+  );
+  const [replayingRunId, setReplayingRunId] = useState<string | null>(null);
   const [cancellingRunId, setCancellingRunId] = useState<string | null>(null);
   const [deletingSuiteId, setDeletingSuiteId] = useState<string | null>(null);
   const [suiteToDelete, setSuiteToDelete] = useState<EvalSuite | null>(null);
   const [duplicatingSuiteId, setDuplicatingSuiteId] = useState<string | null>(
-    null,
+    null
   );
   const [deletingRunId, setDeletingRunId] = useState<string | null>(null);
   const [runToDelete, setRunToDelete] = useState<string | null>(null);
-  const [isCreatingTestCase, setIsCreatingTestCase] = useState(false);
   const [deletingTestCaseId, setDeletingTestCaseId] = useState<string | null>(
-    null,
+    null
   );
   const [duplicatingTestCaseId, setDuplicatingTestCaseId] = useState<
     string | null
@@ -58,13 +263,29 @@ export function useEvalHandlers({
   } | null>(null);
   const [isGeneratingTests, setIsGeneratingTests] = useState(false);
 
+  const navigateAfterTestCaseMutation = useCallback(
+    (
+      route:
+        | { type: "test-detail"; suiteId: string; testId: string }
+        | { type: "test-edit"; suiteId: string; testId: string }
+        | {
+            type: "suite-overview";
+            suiteId: string;
+            view?: SuiteOverviewView;
+          }
+    ) => {
+      navigateEvalRoute(route as EvalRoute, evalsNavigationContext);
+    },
+    [evalsNavigationContext]
+  );
+
   // Query to get test cases for a suite
   const getTestCasesForRerun = useCallback(
     async (suiteId: string) => {
       try {
         const testCases = await convex.query(
           "testSuites:listTestCases" as any,
-          { suiteId },
+          { suiteId }
         );
         return testCases;
       } catch (error) {
@@ -72,34 +293,91 @@ export function useEvalHandlers({
         return [];
       }
     },
-    [convex],
+    [convex]
   );
 
-  // Rerun handler
-  const handleRerun = useCallback(
+  const getSuiteExecutionContext = useCallback(
     async (suite: EvalSuite) => {
-      if (rerunningSuiteId) return;
-
-      const suiteServers = suite.environment?.servers || [];
-
-      // Get current test cases from database (not from stale config)
       const testCases = (await getTestCasesForRerun(suite._id)) as any[];
       if (!testCases || testCases.length === 0) {
         toast.error("No test cases found in this suite");
-        return;
+        return null;
       }
 
-      // Generate tests array by expanding each test case's models
       const tests: any[] = [];
+      const providersNeeded = new Set<string>();
 
+      // Resolve the fallback model definition for cases with no per-case models.
+      // Disambiguate by provider when stored, so OpenRouter gpt-4o doesn't
+      // resolve to the native OpenAI gpt-4o if their ids collide.
+      const suiteDefaultModelDef = suite.defaultConfig?.modelId
+        ? (availableModels ?? []).find(
+            (m) =>
+              String(m.id) === suite.defaultConfig!.modelId &&
+              (!suite.defaultConfig!.provider ||
+                m.provider === suite.defaultConfig!.provider)
+          )
+        : undefined;
+      // Distinguish "no default set" from "default set but unresolvable"
+      // (e.g. model removed, availableModels still loading) so we can show a
+      // more useful toast than "add models to your test cases".
+      const suiteDefaultUnresolved =
+        !!suite.defaultConfig?.modelId && !suiteDefaultModelDef;
+
+      // Note: suite.defaultConfig.systemPrompt / temperature are NOT merged
+      // into per-case advancedConfig here. The wire field flows through the
+      // server's testCase upsert path and would bake the suite default into
+      // every per-case advancedConfig, breaking later edits to the suite
+      // default. Runtime application of suite defaults happens server-side
+      // (Convex testSuiteRun hostConfigId snapshot).
+
+      let probesSkippedMissingConfig = 0;
       for (const testCase of testCases) {
-        // Skip test cases with no models
-        if (!testCase.models || testCase.models.length === 0) {
+        // Model-free render checks (a unified case whose steps carry no `prompt`
+        // step) carry no models — they must never fall into the LLM fan-out
+        // below (a model-free case with a suite default model would otherwise
+        // run as an empty-prompt LLM case). The sentinel model/provider strings
+        // satisfy the wire schema; the server runs them model-free (routing on
+        // the `toolCall` steps).
+        const caseSteps = Array.isArray(testCase.steps)
+          ? testCase.steps
+          : promptTurnsToSteps(
+              Array.isArray(testCase.promptTurns) ? testCase.promptTurns : []
+            );
+        if (isModelFree(caseSteps)) {
+          if (caseSteps.length === 0) {
+            probesSkippedMissingConfig++;
+            continue;
+          }
+          tests.push({
+            title: testCase.title,
+            query: "",
+            runs: testCase.runs || 1,
+            model: "widget-probe",
+            provider: "none",
+            expectedToolCalls: [],
+            steps: caseSteps,
+            testCaseId: testCase._id,
+          });
+          continue;
+        }
+        const hasModels = testCase.models && testCase.models.length > 0;
+        if (!hasModels && !suiteDefaultModelDef) {
           continue;
         }
 
-        // Create one test per model
-        for (const modelConfig of testCase.models) {
+        // Use per-case models when present; fall back to suite default model.
+        const modelConfigs: Array<{ model: string; provider: string }> =
+          hasModels
+            ? testCase.models
+            : [
+                {
+                  model: suiteDefaultModelDef!.id as string,
+                  provider: suiteDefaultModelDef!.provider,
+                },
+              ];
+
+        for (const modelConfig of modelConfigs) {
           tests.push({
             title: testCase.title,
             query: testCase.query,
@@ -109,81 +387,111 @@ export function useEvalHandlers({
             expectedToolCalls: testCase.expectedToolCalls || [],
             isNegativeTest: testCase.isNegativeTest,
             scenario: testCase.scenario,
+            expectedOutput: testCase.expectedOutput,
+            steps: caseSteps,
             advancedConfig: testCase.advancedConfig,
+            matchOptions: testCase.matchOptions,
             testCaseId: testCase._id,
           });
+
+          if (!isMCPJamProvidedModel(modelConfig.model, modelConfig.provider)) {
+            providersNeeded.add(modelConfig.provider);
+          }
         }
       }
 
       if (tests.length === 0) {
-        toast.error("No tests to run. Please add models to your test cases.");
+        if (suiteDefaultUnresolved) {
+          const label = suite.defaultConfig?.provider
+            ? `${suite.defaultConfig.modelId} (${suite.defaultConfig.provider})`
+            : suite.defaultConfig?.modelId;
+          toast.error(
+            `Suite default model ${label} is not available. Re-select it in the suite's default execution config, or add per-case models.`
+          );
+        } else if (probesSkippedMissingConfig > 0) {
+          // Probe-only suites land here when every probe was skipped above;
+          // "add models" would be the wrong prescription for them.
+          toast.error(
+            "No tests to run. The suite's render checks are missing their configuration."
+          );
+        } else {
+          toast.error("No tests to run. Please add models to your test cases.");
+        }
+        return null;
+      }
+
+      // Provider secrets are resolved server-side from the organization
+      // model-providers config in both hosted and local modes, so we no longer
+      // gate runs on client-held tokens.
+      const modelApiKeys: Record<string, string> = {};
+
+      return {
+        // Effective server list: union of legacy `environment.servers`,
+        // per-host attachment picks, AND the suite's standalone server
+        // attachment (when set). The runner fallback in
+        // `runEvals.serverIds` reads this, so an attachment-only suite
+        // would otherwise send `serverIds: []` and fail the backend's
+        // `min(1)` validation with HTTP 400.
+        suiteServers: normalizeSuiteServerRefs(getEffectiveSuiteServers(suite)),
+        testCases,
+        tests,
+        modelApiKeys,
+        providersNeeded,
+      };
+    },
+    [getTestCasesForRerun, availableModels]
+  );
+
+  const handleReplayRun = useCallback(
+    async (
+      suite: EvalSuite,
+      run: Pick<EvalSuiteRun, "_id" | "hasServerReplayConfig" | "passCriteria">,
+      options?: { minimumPassRate?: number }
+    ) => {
+      if (rerunningSuiteId || replayingRunId) return;
+
+      if (!run.hasServerReplayConfig) {
+        toast.error(
+          "This CI run can't be replayed because it doesn't have stored replay config."
+        );
         return;
       }
 
-      // Collect API keys for all providers used in the tests
-      const modelApiKeys: Record<string, string> = {};
-      const providersNeeded = new Set<string>();
-
-      for (const test of tests) {
-        if (!isMCPJamProvidedModel(test.model)) {
-          providersNeeded.add(test.provider);
-        }
+      const executionContext = await getSuiteExecutionContext(suite);
+      if (!executionContext) {
+        return;
       }
 
-      // Check that we have all required API keys
-      for (const provider of providersNeeded) {
-        const tokenKey = provider.toLowerCase() as keyof ProviderTokens;
-        if (!hasToken(tokenKey)) {
-          toast.error(
-            `Please add your ${provider} API key in Settings before running evals`,
-          );
-          return;
-        }
-        const key = getToken(tokenKey);
-        if (key) {
-          modelApiKeys[provider] = key;
-        }
-      }
+      const minimumPassRate =
+        options?.minimumPassRate ??
+        run.passCriteria?.minimumPassRate ??
+        suite.defaultPassCriteria?.minimumPassRate ??
+        selectedSuiteEntry?.latestRun?.passCriteria?.minimumPassRate ??
+        100;
+      const criteriaNote = `Replay of run ${run._id}. Pass Criteria: Min ${minimumPassRate}% Accuracy`;
 
-      setRerunningSuiteId(suite._id);
-
-      // Show toast immediately when user clicks rerun
-      toast.success("Run started successfully! Results will appear shortly.");
+      setReplayingRunId(run._id);
+      const replayToastId = toast.loading("Replaying run...");
 
       try {
-        const accessToken = await getAccessToken();
-
-        // Get pass criteria from suite's defaultPassCriteria, or fall back to latest run, or default to 100%
-        const suiteDefault = suite.defaultPassCriteria?.minimumPassRate;
-        const latestRun = selectedSuiteEntry?.latestRun;
-        const minimumPassRate =
-          suiteDefault ?? latestRun?.passCriteria?.minimumPassRate ?? 100;
-        const criteriaNote = `Pass Criteria: Min ${minimumPassRate}% Accuracy`;
-
-        const response = await authFetch("/api/mcp/evals/run", {
+        // Local guests authenticate via this body token (the guest bearer);
+        // hosted guests authenticate via authFetch's Authorization header and
+        // `buildEvalConvexAuthPayload` drops this field, so an empty string is
+        // harmless there.
+        const accessToken = (await getAccessToken()) ?? "";
+        const endpoints = getEvalApiEndpoints();
+        const response = await authFetch(endpoints.replayRun, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            suiteId: suite._id,
-            suiteName: suite.name,
-            suiteDescription: suite.description,
-            tests: tests.map((test) => ({
-              title: test.title,
-              query: test.query,
-              runs: test.runs ?? 1,
-              model: test.model,
-              provider: test.provider,
-              expectedToolCalls: test.expectedToolCalls,
-              isNegativeTest: test.isNegativeTest,
-              scenario: test.scenario,
-              advancedConfig: test.advancedConfig,
-            })),
-            serverIds: suiteServers,
+            runId: run._id,
+            ...buildEvalConvexAuthPayload(accessToken),
             modelApiKeys:
-              Object.keys(modelApiKeys).length > 0 ? modelApiKeys : undefined,
-            convexAuthToken: accessToken,
+              Object.keys(executionContext.modelApiKeys).length > 0
+                ? executionContext.modelApiKeys
+                : undefined,
             passCriteria: {
-              minimumPassRate: minimumPassRate,
+              minimumPassRate,
             },
             notes: criteriaNote,
           }),
@@ -191,27 +499,382 @@ export function useEvalHandlers({
 
         if (!response.ok) {
           const errorText = await response.text();
-          throw new Error(errorText || "Failed to start eval run");
+          throw new Error(errorText || "Failed to replay eval run");
         }
 
-        // Track suite run started
-        posthog.capture("eval_suite_run_started", {
-          location: "evals_tab",
-          platform: detectPlatform(),
-          environment: detectEnvironment(),
+        const result = await response.json().catch(() => null);
+
+        track("eval_suite_run_started", {
+          location: "ci_evals_tab",
           suite_id: suite._id,
-          num_test_cases: testCases.length,
-          num_tests: tests.length,
-          num_models: providersNeeded.size,
+          num_test_cases: executionContext.testCases.length,
+          num_tests: executionContext.tests.length,
+          num_models: executionContext.providersNeeded.size,
           minimum_pass_rate: minimumPassRate,
+          replay_source_run_id: run._id,
+          replay: true,
         });
 
-        // Optionally show completion toast
-        toast.success("Eval run completed!");
+        if (result?.suiteId && result?.runId) {
+          navigateEvalRoute(
+            {
+              type: "run-detail",
+              suiteId: result.suiteId,
+              runId: result.runId,
+              insightsFocus: true,
+            },
+            "ci-evals"
+          );
+        }
+
+        toast.success("Replay started!", {
+          id: replayToastId,
+        });
+      } catch (error) {
+        console.error("Failed to replay evals:", error);
+        toast.error(
+          getBillingErrorMessage(error, "Failed to replay eval run"),
+          {
+            id: replayToastId,
+          }
+        );
+      } finally {
+        setReplayingRunId(null);
+      }
+    },
+    [
+      rerunningSuiteId,
+      replayingRunId,
+      selectedSuiteEntry,
+      getSuiteExecutionContext,
+      getAccessToken,
+    ]
+  );
+
+  // Rerun handler
+  const handleRerun = useCallback(
+    async (
+      suite: EvalSuite,
+      options?: {
+        /**
+         * Transient per-run override applied uniformly to every test in this
+         * suite run. Does NOT mutate the persisted `EvalCase.runs` default.
+         * Capped server-side at 10 per test.
+         */
+        iterationOverride?: number;
+        /**
+         * One-off match-options override for this run only. Applied to every
+         * test in the run. Does NOT mutate persisted suite/case records.
+         */
+        matchOptionsOverride?: import("@/shared/eval-matching").EvalMatchOptions;
+        /**
+         * When true, re-derives suite.hostConfigId from the current server
+         * list and persists it. Without this flag, reruns leave the frozen
+         * snapshot untouched so newly connected servers cannot contaminate
+         * existing suites.
+         */
+        refreshSnapshot?: boolean;
+      }
+    ) => {
+      if (rerunningSuiteId) return;
+
+      // Environment suites launch through the server's authoritative
+      // resolution (P0.1): the browser never knows the environment's closed
+      // server set, so the legacy server-readiness gates below are skipped —
+      // the server returns a readable auth/connection error for the exact
+      // resolved set instead.
+      const isEnvironmentSuite = (suite.environmentIds?.length ?? 0) > 0;
+
+      // Effective servers = flat env.servers ∪ resolved servers across all
+      // host attachments. Without this union, a host-only suite would fail
+      // the "no servers configured" gate even though the runner can derive
+      // servers from each attachment's snapshot at fan-out time.
+      const suiteServers = normalizeSuiteServerRefs(
+        getEffectiveSuiteServers(suite)
+      );
+      const latestRun =
+        latestRunBySuiteId?.get(suite._id) ??
+        (selectedSuiteEntry?.suite._id === suite._id
+          ? selectedSuiteEntry.latestRun
+          : null);
+      const rerunEligibility = getSuiteReplayEligibility({
+        suiteServers,
+        connectedServerNames,
+        latestRun,
+      });
+
+      if (!isEnvironmentSuite && suiteServers.length === 0) {
+        if (rerunEligibility.replayableLatestRun?._id) {
+          await handleReplayRun(suite, rerunEligibility.replayableLatestRun);
+          return;
+        }
+        toast.error("Attach a client to this suite before running it.");
+        return;
+      }
+
+      if (!isEnvironmentSuite && rerunEligibility.missingServers.length > 0) {
+        if (ensureServersReady != null) {
+          const readiness = await ensureServersReady(suiteServers);
+          if (!hasUnavailableServers(readiness)) {
+            // Continue with the live rerun now that the servers are ready.
+          } else if (rerunEligibility.replayableLatestRun?._id) {
+            await handleReplayRun(suite, rerunEligibility.replayableLatestRun);
+            return;
+          } else {
+            toast.error(
+              formatEnsureServersReadyError(
+                readiness,
+                "run this suite",
+                projectServers
+              )
+            );
+            return;
+          }
+        } else {
+          toast.error(
+            formatMcpConnectServerPrompt(rerunEligibility.missingServers, {
+              remoteServers: projectServers,
+              kind: "suite",
+            })
+          );
+          return;
+        }
+      }
+
+      const executionContext = await getSuiteExecutionContext(suite);
+      if (!executionContext) {
+        return;
+      }
+
+      setRerunningSuiteId(suite._id);
+
+      // Fan-out axis: attached project environments (one run per env, in
+      // attach order) win over hostAttachments; otherwise one run request
+      // per host so each gets its own snapshot, else the suite's flat
+      // server list once as before. Env plans carry NO serverIds — the
+      // server resolves the environment's closed set at launch.
+      const runPlans = buildSuiteRunPlans(
+        suite,
+        projectEnvironments,
+        executionContext.suiteServers
+      );
+
+      // Generate a shared group id ONLY when the rerun fans out to more
+      // than one host/environment. The inspector route threads this through
+      // the Zod schema → recorder → Convex mutation; every sibling run
+      // carries the same id so the UI can collapse them into a single
+      // parent row. Single-plan launches stay ungrouped so legacy +
+      // single-host rows render identically.
+      const runGroupId = runPlans.length > 1 ? crypto.randomUUID() : undefined;
+
+      // Show toast immediately when user clicks rerun
+      toast.success(
+        runPlans.length > 1
+          ? `Starting ${runPlans.length} runs across ${
+              isEnvironmentSuite ? "environments" : "hosts"
+            }…`
+          : "Run started successfully! Results will appear shortly."
+      );
+
+      const suiteRunStartedAt = Date.now();
+      try {
+        // Local guests authenticate via this body token (the guest bearer);
+        // hosted guests authenticate via authFetch's Authorization header and
+        // `mergeHostedServerBatch` strips convexAuthToken, so an empty string
+        // is harmless there.
+        const accessToken = (await getAccessToken()) ?? "";
+
+        // Get pass criteria from suite's defaultPassCriteria, or fall back to latest run, or default to 100%
+        const suiteDefault = suite.defaultPassCriteria?.minimumPassRate;
+        const minimumPassRate =
+          suiteDefault ?? latestRun?.passCriteria?.minimumPassRate ?? 100;
+        const criteriaNote = `Pass Criteria: Min ${minimumPassRate}% Accuracy`;
+
+        const testsPayload = executionContext.tests.map((test) => ({
+          title: test.title,
+          query: test.query,
+          runs: test.runs ?? 1,
+          model: test.model,
+          provider: test.provider,
+          expectedToolCalls: test.expectedToolCalls,
+          isNegativeTest: test.isNegativeTest,
+          scenario: test.scenario,
+          expectedOutput: test.expectedOutput,
+          // Unified `steps` are the source of truth for execution. Cap-math
+          // counts only `prompt` steps server-side, so model-free render checks
+          // (no `prompt` step) stay excluded from the LLM budget; case identity
+          // is preserved by forwarding the steps unchanged.
+          steps: (test as { steps?: unknown }).steps,
+          advancedConfig: test.advancedConfig,
+          matchOptions: (test as { matchOptions?: unknown }).matchOptions,
+          // Preserve the stable testCaseId set inside
+          // getSuiteExecutionContext so the rerun's iteration rows can be
+          // linked back to the saved case for "rerun this case" affordances.
+          // Dropping it here forced the backend to re-derive linkage by
+          // title, which silently broke after a case rename.
+          testCaseId: (test as { testCaseId?: string }).testCaseId,
+        }));
+
+        // Partial-failure tolerant: a failure on one host shouldn't cancel
+        // runs already started against other hosts. We collect failures
+        // and toast a summary at the end.
+        const settled = await Promise.allSettled(
+          runPlans.map((plan) =>
+            runEvals({
+              projectId,
+              suiteId: suite._id,
+              suiteName: suite.name,
+              suiteDescription: suite.description,
+              tests: testsPayload,
+              serverIds: plan.serverIds,
+              modelApiKeys:
+                Object.keys(executionContext.modelApiKeys).length > 0
+                  ? executionContext.modelApiKeys
+                  : undefined,
+              convexAuthToken: accessToken,
+              passCriteria: { minimumPassRate },
+              notes: criteriaNote,
+              suiteRerun: true,
+              iterationOverride: options?.iterationOverride,
+              matchOptionsOverride: options?.matchOptionsOverride,
+              refreshSnapshot: options?.refreshSnapshot,
+              ...(plan.namedHostId ? { namedHostId: plan.namedHostId } : {}),
+              // Always sent explicitly on env plans — even single-env
+              // suites — so the server's authoritative resolution runs.
+              ...(plan.environmentId
+                ? { environmentId: plan.environmentId }
+                : {}),
+              ...(runGroupId ? { runGroupId } : {}),
+            })
+          )
+        );
+
+        const failures = settled
+          .map((result, index) =>
+            result.status === "rejected"
+              ? { plan: runPlans[index], reason: result.reason }
+              : null
+          )
+          .filter(
+            (
+              entry
+            ): entry is { plan: (typeof runPlans)[number]; reason: unknown } =>
+              entry !== null
+          );
+
+        // Track suite run started (once per fan-out batch; per-target
+        // multiplicity is captured in the iteration data).
+        //
+        // `num_hosts` counts PLANS and is kept verbatim for dashboard
+        // compatibility — but for an environment suite a plan is an
+        // ENVIRONMENT, and two environments sharing one host would land in
+        // host analytics as two hosts. `fan_out_axis` + `num_environments`
+        // make the axis explicit so host metrics can exclude env fan-outs
+        // instead of silently absorbing (and double-counting) them.
+        const fanOutAxis = isEnvironmentSuite ? "environment" : "host";
+        const numEnvironments = isEnvironmentSuite ? runPlans.length : 0;
+        track("eval_suite_run_started", {
+          location: "evals_tab",
+          suite_id: suite._id,
+          num_test_cases: executionContext.testCases.length,
+          num_tests: executionContext.tests.length,
+          num_models: executionContext.providersNeeded.size,
+          minimum_pass_rate: minimumPassRate,
+          num_hosts: runPlans.length,
+          fan_out_axis: fanOutAxis,
+          num_environments: numEnvironments,
+        });
+
+        track("eval_suite_run_start_requests_completed", {
+          location: "evals_tab",
+          suite_id: suite._id,
+          num_test_cases: executionContext.testCases.length,
+          num_tests: executionContext.tests.length,
+          num_hosts: runPlans.length,
+          num_succeeded_hosts: runPlans.length - failures.length,
+          num_failed_hosts: failures.length,
+          all_succeeded: failures.length === 0,
+          duration_ms: Date.now() - suiteRunStartedAt,
+          fan_out_axis: fanOutAxis,
+          num_environments: numEnvironments,
+        });
+
+        // "client" vs "environment": a fan-out plan is one environment for an
+        // environment suite and one client otherwise — the toasts must name
+        // the axis the user actually selected.
+        const targetNoun = isEnvironmentSuite ? "environment" : "client";
+        if (failures.length === 0) {
+          toast.success(
+            runPlans.length > 1
+              ? `All ${runPlans.length} ${targetNoun} runs started.`
+              : "Eval run started!"
+          );
+
+          // Drop the user on the new run's detail page so they can see
+          // results without hunting through the runs list. Multi-host
+          // fan-outs land on the suite's runs view instead, since there
+          // are multiple sibling runs to pick from.
+          if (runPlans.length === 1) {
+            const firstSettled = settled[0];
+            const newRunId =
+              firstSettled?.status === "fulfilled"
+                ? (firstSettled.value as { runId?: unknown } | null | undefined)
+                    ?.runId
+                : undefined;
+            if (typeof newRunId === "string" && newRunId.length > 0) {
+              navigateEvalRoute(
+                {
+                  type: "run-detail",
+                  suiteId: suite._id,
+                  runId: newRunId,
+                },
+                evalsNavigationContext
+              );
+            }
+          } else {
+            navigateEvalRoute(
+              { type: "suite-overview", suiteId: suite._id, view: "runs" },
+              evalsNavigationContext
+            );
+          }
+        } else if (failures.length < runPlans.length) {
+          const failedHostNames = failures
+            .map(
+              (failure) =>
+                failure.plan.environmentName ??
+                failure.plan.hostName ??
+                "(unnamed client)"
+            )
+            .join(", ");
+          // An environment-drift 409 is retry-able and has a specific cause;
+          // the generic "N of M runs failed" summary buries it, so name it.
+          const conflict = failures
+            .map((failure) => getEnvironmentConflictMessage(failure.reason))
+            .find((message): message is string => message !== null);
+          toast.error(
+            conflict
+              ? `${failures.length} of ${runPlans.length} ${targetNoun} runs failed (${failedHostNames}): ${conflict}`
+              : `${failures.length} of ${runPlans.length} ${targetNoun} runs failed: ${failedHostNames}`
+          );
+        } else {
+          // All failed — surface one error for actionable detail. Prefer an
+          // environment-drift 409 wherever it sits in the list, exactly as the
+          // partial-failure branch above does: throwing `failures[0]` blind
+          // would bury a retry-able ENVIRONMENT_REVISION_CONFLICT carried by a
+          // later plan behind whatever generic error happened to come first.
+          const conflictFailure = failures.find(
+            (failure) => getEnvironmentConflictMessage(failure.reason) !== null
+          );
+          const firstError = (conflictFailure ?? failures[0])?.reason;
+          throw firstError instanceof Error
+            ? firstError
+            : new Error(String(firstError ?? `All ${targetNoun} runs failed`));
+        }
       } catch (error) {
         console.error("Failed to rerun evals:", error);
         toast.error(
-          error instanceof Error ? error.message : "Failed to start eval run",
+          getEnvironmentConflictMessage(error) ??
+            getBillingErrorMessage(error, "Failed to start eval run")
         );
       } finally {
         setRerunningSuiteId(null);
@@ -220,11 +883,308 @@ export function useEvalHandlers({
     [
       rerunningSuiteId,
       selectedSuiteEntry,
+      latestRunBySuiteId,
+      connectedServerNames,
+      ensureServersReady,
       getAccessToken,
-      hasToken,
-      getToken,
-      getTestCasesForRerun,
-    ],
+      projectId,
+      projectServers,
+      projectEnvironments,
+      getSuiteExecutionContext,
+      handleReplayRun,
+      evalsNavigationContext,
+    ]
+  );
+
+  const handleRunTestCase = useCallback(
+    async (
+      suite: EvalSuite,
+      testCase: EvalCase,
+      options?: {
+        location?: string;
+        selectedModel?: string | null;
+        /** When true, omits the usual per-run success toasts (errors still surface). */
+        suppressCompletionToasts?: boolean;
+        /**
+         * Transient per-run override for the number of iterations. Wired to
+         * `testCaseOverrides.runs`; does NOT mutate the persisted
+         * `EvalCase.runs` default. Capped server-side at 10.
+         */
+        iterationOverride?: number;
+        namedHostId?: string;
+      }
+    ) => {
+      if (runningTestCaseId || rerunningSuiteId || replayingRunId) {
+        return null;
+      }
+
+      // Environment suites resolve their closed server set server-side (P0.1)
+      // at Run-all fan-out; the single-case quick-run path below still derives
+      // servers from host/flat plans and can't send `environmentId`, so it
+      // would mis-launch (or trip the "attach a client" gate). Route env suites
+      // to Run all instead of silently running against the wrong servers.
+      if ((suite.environmentIds?.length ?? 0) > 0) {
+        toast.info(
+          "Run environment suites with Run all — single-case quick-run doesn't resolve environments yet."
+        );
+        return null;
+      }
+
+      // Widget probes have no single-case quick-run path yet: the
+      // run-test-case endpoints only execute model-driven cases, and probes
+      // intentionally carry no models. Without this branch the model guard
+      // below would surface a misleading "Add a model first".
+      if (isModelFree(testCase.steps)) {
+        toast.info("Render checks run with the full suite or on its schedule.");
+        return null;
+      }
+
+      const modelValuesToRun = options?.selectedModel
+        ? [options.selectedModel]
+        : getConfiguredTestCaseModelValues(testCase);
+      if (
+        modelValuesToRun.length === 0 ||
+        !getDefaultTestCaseModelValue(testCase)
+      ) {
+        toast.error("Add a model first");
+        return null;
+      }
+
+      const isMultiModelRun =
+        !options?.selectedModel && modelValuesToRun.length > 1;
+      const runPlan = getSelectedSuiteHostRunPlan(suite, options?.namedHostId);
+      const suiteServers = normalizeSuiteServerRefs(runPlan.serverIds);
+      const disconnectedSuiteServers = suiteServers.filter(
+        (serverName) => !connectedServerNames?.has(serverName)
+      );
+
+      if (suiteServers.length === 0) {
+        toast.error("Attach a client to this suite before running it.");
+        return null;
+      }
+
+      if (disconnectedSuiteServers.length > 0) {
+        if (ensureServersReady != null) {
+          const readiness = await ensureServersReady(suiteServers);
+          if (hasUnavailableServers(readiness)) {
+            toast.error(
+              formatEnsureServersReadyError(
+                readiness,
+                "run this test case",
+                projectServers
+              )
+            );
+            return null;
+          }
+        } else {
+          toast.error(
+            formatMcpConnectServerPrompt(disconnectedSuiteServers, {
+              remoteServers: projectServers,
+              kind: "test-case",
+            })
+          );
+          return null;
+        }
+      }
+
+      setRunningTestCaseId(testCase._id);
+
+      try {
+        const preparedResults = await Promise.allSettled(
+          modelValuesToRun.map((selectedModel) =>
+            prepareSingleTestCaseRun({
+              projectId: isDirectGuest ? null : projectId,
+              suite: {
+                environment: {
+                  ...suite.environment,
+                  servers: suiteServers,
+                },
+              },
+              testCase,
+              getAccessToken,
+              selectedModel,
+              namedHostId: runPlan.namedHostId,
+              testCaseOverrides:
+                options?.iterationOverride !== undefined
+                  ? { runs: options.iterationOverride }
+                  : undefined,
+            })
+          )
+        );
+        const preparedRuns = preparedResults.flatMap((result) =>
+          result.status === "fulfilled" ? [result.value] : []
+        );
+        const preparationFailures = preparedResults.flatMap((result, index) =>
+          result.status === "rejected"
+            ? [
+                {
+                  modelValue: modelValuesToRun[index]!,
+                  error: result.reason,
+                },
+              ]
+            : []
+        );
+
+        for (const failure of preparationFailures) {
+          console.error(
+            `Failed to prepare test case for model ${failure.modelValue}:`,
+            failure.error
+          );
+        }
+
+        if (preparedRuns.length === 0) {
+          toast.error(
+            getBillingErrorMessage(
+              preparationFailures[0]?.error,
+              "Failed to run test case"
+            )
+          );
+          return null;
+        }
+
+        const runResults = await Promise.all(
+          preparedRuns.map(async (preparedRun) => {
+            track("eval_test_case_run_started", {
+              location: options?.location ?? "test_case_list_sidebar",
+              suite_id: suite._id,
+              test_case_id: testCase._id,
+              model: preparedRun.modelValue,
+            });
+
+            try {
+              const data = await runEvalTestCase({
+                ...preparedRun.request,
+                skipLastMessageRunUpdate: isMultiModelRun || undefined,
+              });
+              const iteration = data?.iteration;
+
+              if (iteration) {
+                const startedAt = iteration.startedAt ?? iteration.createdAt;
+                const completedAt = iteration.updatedAt ?? iteration.createdAt;
+                const durationMs =
+                  startedAt && completedAt
+                    ? Math.max(completedAt - startedAt, 0)
+                    : 0;
+
+                track("eval_test_case_run_completed", {
+                  location: options?.location ?? "test_case_list_sidebar",
+                  suite_id: suite._id,
+                  test_case_id: testCase._id,
+                  model: preparedRun.modelValue,
+                  result: iteration.result || "unknown",
+                  duration_ms: durationMs,
+                });
+              }
+
+              return {
+                ok: true as const,
+                modelValue: preparedRun.modelValue,
+                data,
+              };
+            } catch (error) {
+              console.error(
+                `Failed to run test case for model ${preparedRun.modelValue}:`,
+                error
+              );
+              return {
+                ok: false as const,
+                modelValue: preparedRun.modelValue,
+                error,
+              };
+            }
+          })
+        );
+
+        const successfulRuns = runResults.filter(
+          (
+            result
+          ): result is {
+            ok: true;
+            modelValue: string;
+            data: any;
+          } => result.ok
+        );
+        const failedRuns = runResults.filter(
+          (
+            result
+          ): result is {
+            ok: false;
+            modelValue: string;
+            error: unknown;
+          } => !result.ok
+        );
+        const totalModelsRequested = modelValuesToRun.length;
+        const totalFailedRuns = [
+          ...preparationFailures.map(({ modelValue, error }) => ({
+            ok: false as const,
+            modelValue,
+            error,
+          })),
+          ...failedRuns,
+        ];
+
+        if (!options?.suppressCompletionToasts) {
+          if (successfulRuns.length === totalModelsRequested) {
+            toast.success(
+              isMultiModelRun
+                ? `Test completed across ${totalModelsRequested} models!`
+                : "Test completed successfully!"
+            );
+          } else if (successfulRuns.length > 0) {
+            toast.error(
+              `${successfulRuns.length}/${totalModelsRequested} model${
+                totalModelsRequested === 1 ? "" : "s"
+              } completed successfully.`
+            );
+          } else {
+            toast.error(
+              getBillingErrorMessage(
+                totalFailedRuns[0]?.error,
+                "Failed to run test case"
+              )
+            );
+          }
+        } else if (successfulRuns.length === 0) {
+          toast.error(
+            getBillingErrorMessage(
+              totalFailedRuns[0]?.error,
+              "Failed to run test case"
+            )
+          );
+        }
+
+        if (isMultiModelRun) {
+          const firstSuccessfulIteration =
+            successfulRuns.find((result) => result.data?.iteration?._id)?.data
+              ?.iteration ??
+            successfulRuns[0]?.data?.iteration ??
+            null;
+          return {
+            iteration: firstSuccessfulIteration,
+            runs: successfulRuns.map((result) => result.data),
+          };
+        }
+
+        return successfulRuns[0]?.data ?? null;
+      } catch (error) {
+        console.error("Failed to run test case:", error);
+        toast.error(getBillingErrorMessage(error, "Failed to run test case"));
+        return null;
+      } finally {
+        setRunningTestCaseId(null);
+      }
+    },
+    [
+      runningTestCaseId,
+      rerunningSuiteId,
+      replayingRunId,
+      projectId,
+      getAccessToken,
+      connectedServerNames,
+      ensureServersReady,
+      projectServers,
+      isDirectGuest,
+    ]
   );
 
   // Delete handler - opens confirmation modal
@@ -233,12 +1193,14 @@ export function useEvalHandlers({
       if (deletingSuiteId) return;
       setSuiteToDelete(suite);
     },
-    [deletingSuiteId],
+    [deletingSuiteId]
   );
 
   // Confirm deletion - actually performs the deletion
-  const confirmDelete = useCallback(async () => {
-    if (!suiteToDelete || deletingSuiteId) return;
+  // Returns whether the delete actually committed (agent tooling propagates a
+  // real failure from this; the UI dialog ignores the return).
+  const confirmDelete = useCallback(async (): Promise<boolean> => {
+    if (!suiteToDelete || deletingSuiteId) return false;
 
     setDeletingSuiteId(suiteToDelete._id);
 
@@ -248,15 +1210,15 @@ export function useEvalHandlers({
 
       // If we're viewing this suite, go back to the list
       if (selectedSuiteId === suiteToDelete._id) {
-        navigateToEvalsRoute({ type: "list" });
+        navigateEvalRoute({ type: "list" }, "evals");
       }
 
       setSuiteToDelete(null);
+      return true;
     } catch (error) {
       console.error("Failed to delete suite:", error);
-      toast.error(
-        error instanceof Error ? error.message : "Failed to delete test suite",
-      );
+      toast.error(getBillingErrorMessage(error, "Failed to delete test suite"));
+      return false;
     } finally {
       setDeletingSuiteId(null);
     }
@@ -282,10 +1244,8 @@ export function useEvalHandlers({
 
         // Track suite duplicated
         if (newSuite && newSuite._id) {
-          posthog.capture("eval_suite_duplicated", {
+          track("eval_suite_duplicated", {
             location: "evals_tab",
-            platform: detectPlatform(),
-            environment: detectEnvironment(),
             original_suite_id: suite._id,
             new_suite_id: newSuite._id,
           });
@@ -293,23 +1253,24 @@ export function useEvalHandlers({
 
         // Navigate to the new duplicated suite
         if (newSuite && newSuite._id) {
-          navigateToEvalsRoute({
-            type: "suite-overview",
-            suiteId: newSuite._id,
-          });
+          navigateEvalRoute(
+            {
+              type: "suite-overview",
+              suiteId: newSuite._id,
+            },
+            "evals"
+          );
         }
       } catch (error) {
         console.error("Failed to duplicate suite:", error);
         toast.error(
-          error instanceof Error
-            ? error.message
-            : "Failed to duplicate test suite",
+          getBillingErrorMessage(error, "Failed to duplicate test suite")
         );
       } finally {
         setDuplicatingSuiteId(null);
       }
     },
-    [duplicatingSuiteId, mutations.duplicateSuiteMutation],
+    [duplicatingSuiteId, mutations.duplicateSuiteMutation]
   );
 
   // Cancel handler
@@ -324,14 +1285,12 @@ export function useEvalHandlers({
         toast.success("Run cancelled successfully");
       } catch (error) {
         console.error("Failed to cancel run:", error);
-        toast.error(
-          error instanceof Error ? error.message : "Failed to cancel run",
-        );
+        toast.error(getBillingErrorMessage(error, "Failed to cancel run"));
       } finally {
         setCancellingRunId(null);
       }
     },
-    [cancellingRunId, mutations.cancelRunMutation],
+    [cancellingRunId, mutations.cancelRunMutation]
   );
 
   // Delete run handler - opens confirmation modal (for single run from detail view)
@@ -340,7 +1299,7 @@ export function useEvalHandlers({
       if (deletingRunId) return;
       setRunToDelete(runId);
     },
-    [deletingRunId],
+    [deletingRunId]
   );
 
   // Direct delete function - actually performs the deletion (for batch delete)
@@ -353,7 +1312,7 @@ export function useEvalHandlers({
         throw error;
       }
     },
-    [mutations.deleteRunMutation],
+    [mutations.deleteRunMutation]
   );
 
   // Confirm run deletion - actually performs the deletion
@@ -368,100 +1327,26 @@ export function useEvalHandlers({
       setRunToDelete(null);
     } catch (error) {
       console.error("Failed to delete run:", error);
-      toast.error(
-        error instanceof Error ? error.message : "Failed to delete run",
-      );
+      toast.error(getBillingErrorMessage(error, "Failed to delete run"));
     } finally {
       setDeletingRunId(null);
     }
   }, [runToDelete, deletingRunId, mutations.deleteRunMutation]);
 
-  // Handle create test case - creates directly without modal
+  // New cases are NOT written to Convex on click. Doing so polluted suites
+  // with "Untitled" cases every time the New case menu was opened. Instead we
+  // open the editor on a client-side draft (testId sentinel `draft:<kind>`);
+  // the editor persists via `createTestCase` only when the user presses Save.
+  // See ./draft-test-case.ts and test-template-editor's draft handling.
   const handleCreateTestCase = useCallback(
-    async (suiteId: string) => {
-      if (isCreatingTestCase) return;
-
-      setIsCreatingTestCase(true);
-
-      try {
-        // Get test cases for the suite to extract models
-        const testCases = await convex.query(
-          "testSuites:listTestCases" as any,
-          { suiteId },
-        );
-
-        // Extract unique models from existing test cases
-        let modelsToUse: any[] = [];
-        if (testCases && Array.isArray(testCases) && testCases.length > 0) {
-          const uniqueModels = new Map<
-            string,
-            { model: string; provider: string }
-          >();
-
-          for (const testCase of testCases) {
-            if (testCase.models && Array.isArray(testCase.models)) {
-              for (const modelConfig of testCase.models) {
-                if (modelConfig.model && modelConfig.provider) {
-                  const key = `${modelConfig.provider}:${modelConfig.model}`;
-                  if (!uniqueModels.has(key)) {
-                    uniqueModels.set(key, {
-                      model: modelConfig.model,
-                      provider: modelConfig.provider,
-                    });
-                  }
-                }
-              }
-            }
-          }
-
-          modelsToUse = Array.from(uniqueModels.values());
-        }
-
-        // Default to Haiku 4.5 if no models configured
-        if (modelsToUse.length === 0) {
-          modelsToUse = [
-            { model: "anthropic/claude-haiku-4.5", provider: "anthropic" },
-          ];
-        }
-
-        const testCaseId = await mutations.createTestCaseMutation({
-          suiteId: suiteId,
-          title: "Untitled test case",
-          query: "",
-          models: modelsToUse, // Copy models from suite configuration
-        });
-
-        toast.success("Test case created");
-
-        // Track test case created
-        posthog.capture("eval_test_case_created", {
-          location: "evals_tab",
-          platform: detectPlatform(),
-          environment: detectEnvironment(),
-          suite_id: suiteId,
-          test_case_id: testCaseId,
-          num_models: modelsToUse.length,
-        });
-
-        // Navigate to the new test case
-        navigateToEvalsRoute({
-          type: "test-detail",
-          suiteId,
-          testId: testCaseId,
-        });
-
-        return testCaseId;
-      } catch (error) {
-        console.error("Failed to create test case:", error);
-        toast.error(
-          error instanceof Error ? error.message : "Failed to create test case",
-        );
-        return null;
-      } finally {
-        setIsCreatingTestCase(false);
-      }
+    (suiteId: string) => {
+      navigateAfterTestCaseMutation({
+        type: "test-edit",
+        suiteId,
+        testId: draftTestCaseId("prompt"),
+      });
     },
-    [isCreatingTestCase, mutations.createTestCaseMutation, convex],
+    [navigateAfterTestCaseMutation]
   );
 
   // Handle delete test case - opens confirmation modal
@@ -470,7 +1355,20 @@ export function useEvalHandlers({
       if (deletingTestCaseId) return;
       setTestCaseToDelete({ id: testCaseId, title: testCaseTitle });
     },
-    [deletingTestCaseId],
+    [deletingTestCaseId]
+  );
+
+  /** Perform deletion only (no modal). Used for playground batch delete. */
+  const directDeleteTestCase = useCallback(
+    async (testCaseId: string) => {
+      await mutations.deleteTestCaseMutation({ testCaseId });
+      track("eval_test_case_deleted", {
+        location: "evals_tab_batch",
+        suite_id: selectedSuiteId ?? null,
+        test_case_id: testCaseId,
+      });
+    },
+    [mutations.deleteTestCaseMutation, selectedSuiteId]
   );
 
   // Confirm test case deletion
@@ -483,22 +1381,33 @@ export function useEvalHandlers({
       await mutations.deleteTestCaseMutation({
         testCaseId: testCaseToDelete.id,
       });
+      track("eval_test_case_deleted", {
+        location: "evals_tab",
+        suite_id: selectedSuiteId ?? null,
+        test_case_id: testCaseToDelete.id,
+      });
       toast.success("Test case deleted successfully");
 
       // If we're viewing this test case, navigate back to suite overview
       if (selectedTestId === testCaseToDelete.id && selectedSuiteId) {
-        navigateToEvalsRoute({
-          type: "suite-overview",
-          suiteId: selectedSuiteId,
-        });
+        navigateAfterTestCaseMutation(
+          evalsNavigationContext === "ci-evals"
+            ? {
+                type: "suite-overview",
+                suiteId: selectedSuiteId,
+                view: "test-cases",
+              }
+            : {
+                type: "suite-overview",
+                suiteId: selectedSuiteId,
+              }
+        );
       }
 
       setTestCaseToDelete(null);
     } catch (error) {
       console.error("Failed to delete test case:", error);
-      toast.error(
-        error instanceof Error ? error.message : "Failed to delete test case",
-      );
+      toast.error(getBillingErrorMessage(error, "Failed to delete test case"));
     } finally {
       setDeletingTestCaseId(null);
     }
@@ -508,6 +1417,8 @@ export function useEvalHandlers({
     mutations.deleteTestCaseMutation,
     selectedTestId,
     selectedSuiteId,
+    evalsNavigationContext,
+    navigateAfterTestCaseMutation,
   ]);
 
   // Duplicate test case handler
@@ -525,10 +1436,8 @@ export function useEvalHandlers({
 
         // Track test case duplicated
         if (newTestCase && newTestCase._id) {
-          posthog.capture("eval_test_case_duplicated", {
+          track("eval_test_case_duplicated", {
             location: "evals_tab",
-            platform: detectPlatform(),
-            environment: detectEnvironment(),
             suite_id: suiteId,
             original_test_case_id: testCaseId,
             new_test_case_id: newTestCase._id,
@@ -537,7 +1446,7 @@ export function useEvalHandlers({
 
         // Navigate to the new duplicated test case
         if (newTestCase && newTestCase._id) {
-          navigateToEvalsRoute({
+          navigateAfterTestCaseMutation({
             type: "test-edit",
             suiteId,
             testId: newTestCase._id,
@@ -548,134 +1457,185 @@ export function useEvalHandlers({
       } catch (error) {
         console.error("Failed to duplicate test case:", error);
         toast.error(
-          error instanceof Error
-            ? error.message
-            : "Failed to duplicate test case",
+          getBillingErrorMessage(error, "Failed to duplicate test case")
         );
         return null;
       } finally {
         setDuplicatingTestCaseId(null);
       }
     },
-    [duplicatingTestCaseId, mutations.duplicateTestCaseMutation],
+    [
+      duplicatingTestCaseId,
+      mutations.duplicateTestCaseMutation,
+      navigateAfterTestCaseMutation,
+    ]
   );
 
   // Generate tests handler - calls API and creates test cases
   const handleGenerateTests = useCallback(
-    async (suiteId: string, serverIds: string[]) => {
+    async (
+      suiteId: string,
+      serverIds: string[],
+      postOptions?: HandleGenerateEvalTestsOptions
+    ) => {
       if (isGeneratingTests) return;
+
+      const suiteServers = normalizeSuiteServerRefs(serverIds);
+      if (suiteServers.length === 0) {
+        toast.error(
+          "Add at least one server to this suite before generating cases."
+        );
+        return;
+      }
 
       setIsGeneratingTests(true);
 
       try {
-        const accessToken = await getAccessToken();
-
-        // Get existing test cases to extract models
-        const existingTestCases = await convex.query(
-          "testSuites:listTestCases" as any,
-          { suiteId },
+        const disconnected = suiteServers.filter(
+          (name) => !connectedServerNames?.has(name)
         );
-
-        // Extract unique models from existing test cases
-        let modelsToUse: Array<{ model: string; provider: string }> = [];
-        if (
-          existingTestCases &&
-          Array.isArray(existingTestCases) &&
-          existingTestCases.length > 0
-        ) {
-          const uniqueModels = new Map<
-            string,
-            { model: string; provider: string }
-          >();
-
-          for (const testCase of existingTestCases) {
-            if (testCase.models && Array.isArray(testCase.models)) {
-              for (const modelConfig of testCase.models) {
-                if (modelConfig.model && modelConfig.provider) {
-                  const key = `${modelConfig.provider}:${modelConfig.model}`;
-                  if (!uniqueModels.has(key)) {
-                    uniqueModels.set(key, {
-                      model: modelConfig.model,
-                      provider: modelConfig.provider,
-                    });
-                  }
-                }
-              }
+        if (disconnected.length > 0) {
+          if (ensureServersReady != null) {
+            const readiness = await ensureServersReady(suiteServers);
+            if (hasUnavailableServers(readiness)) {
+              toast.error(
+                formatEnsureServersReadyError(
+                  readiness,
+                  "generate test cases",
+                  projectServers
+                )
+              );
+              return;
             }
+          } else {
+            toast.error(
+              formatMcpConnectServerPrompt(disconnected, {
+                remoteServers: projectServers,
+                kind: "suite",
+              })
+            );
+            return;
           }
-
-          modelsToUse = Array.from(uniqueModels.values());
         }
 
-        // Default to Haiku 4.5 if no models configured
-        if (modelsToUse.length === 0) {
-          modelsToUse = [
-            { model: "anthropic/claude-haiku-4.5", provider: "anthropic" },
-          ];
-        }
-
-        // Call generate tests API
-        const response = await authFetch(API_ENDPOINTS.EVALS_GENERATE_TESTS, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            serverIds,
-            convexAuthToken: accessToken,
-          }),
+        const outcome = await generateAndPersistEvalTests({
+          convex,
+          getAccessToken,
+          projectId,
+          suiteId,
+          serverIds,
+          createTestCase: mutations.createTestCaseMutation as (
+            input: any
+          ) => Promise<unknown>,
+          skipIfExistingCases: false,
+          isDirectGuest,
+          listExistingCases: () =>
+            convex.query("testSuites:listTestCases" as any, {
+              suiteId,
+            }) as Promise<Array<Record<string, unknown>>>,
+          ...(postOptions?.serverAttachment
+            ? { serverAttachment: postOptions.serverAttachment }
+            : {}),
+          ...(postOptions?.generationOptions
+            ? { generationOptions: postOptions.generationOptions }
+            : {}),
         });
 
-        const result = await response.json();
-
-        if (!response.ok) {
-          throw new Error(result.error || "Failed to generate tests");
-        }
-
-        if (!result.tests || result.tests.length === 0) {
+        if (outcome.apiReturnedTests === 0) {
+          track("eval_generate_tests_completed", {
+            location: "evals_tab",
+            suite_id: suiteId,
+            generated_count: 0,
+            api_returned_tests: 0,
+            success: true,
+          });
           toast.info("No test cases were generated");
           return;
         }
 
-        // Create test cases for each generated test
-        let createdCount = 0;
-        for (const test of result.tests) {
-          try {
-            await mutations.createTestCaseMutation({
-              suiteId,
-              title: test.title || "Generated test",
-              query: test.query || "",
-              models: modelsToUse,
-              expectedToolCalls: test.expectedToolCalls || [],
-              runs: test.runs || 1,
-              isNegativeTest: test.isNegativeTest || false,
-              scenario: test.scenario,
-              expectedOutput: test.expectedOutput,
-            });
-            createdCount++;
-          } catch (err) {
-            console.error("Failed to create test case:", err);
-          }
+        const shouldAutoRun =
+          postOptions?.runNewCasesAfterGenerate === true &&
+          postOptions?.suite != null;
+
+        if (outcome.createdCount > 0) {
+          track("eval_tests_generated_from_sidebar", {
+            location: "test_case_list_sidebar",
+            suite_id: suiteId,
+            generated_count: outcome.createdCount,
+            auto_ran: Boolean(
+              shouldAutoRun && outcome.createdTestCaseIds.length > 0
+            ),
+          });
         }
 
-        if (createdCount > 0) {
-          toast.success(
-            `Generated ${createdCount} test case${createdCount > 1 ? "s" : ""}`,
-          );
+        track("eval_generate_tests_completed", {
+          location: "evals_tab",
+          suite_id: suiteId,
+          generated_count: outcome.createdCount,
+          api_returned_tests: outcome.apiReturnedTests,
+          auto_ran: Boolean(
+            shouldAutoRun && outcome.createdTestCaseIds.length > 0
+          ),
+          success: true,
+        });
 
-          // Track generation
-          posthog.capture("eval_tests_generated_from_sidebar", {
-            location: "test_case_list_sidebar",
-            platform: detectPlatform(),
-            environment: detectEnvironment(),
-            suite_id: suiteId,
-            generated_count: createdCount,
-          });
+        if (
+          shouldAutoRun &&
+          outcome.createdTestCaseIds.length > 0 &&
+          outcome.createdCount > 0
+        ) {
+          const suite = postOptions!.suite!;
+          const allCases = (await getTestCasesForRerun(suiteId)) as EvalCase[];
+          const byId = new Map<string, EvalCase>(
+            allCases.map((c) => [c._id, c])
+          );
+          const toRun: EvalCase[] = [];
+          for (const id of outcome.createdTestCaseIds) {
+            const c = byId.get(id);
+            if (c) {
+              toRun.push(c);
+            }
+          }
+          for (const testCase of toRun) {
+            await handleRunTestCase(suite, testCase, {
+              location: "post_generate_suggested_cases",
+              suppressCompletionToasts: true,
+            });
+          }
+          if (toRun.length === 0) {
+            toast.success(
+              `Generated ${outcome.createdCount} test case${
+                outcome.createdCount > 1 ? "s" : ""
+              }. Open the list to run them when they appear.`
+            );
+          } else if (toRun.length === 1) {
+            toast.success("Generated 1 new case and ran it.");
+          } else {
+            toast.success(`Generated and ran ${toRun.length} new test cases.`);
+          }
+        } else if (outcome.createdCount > 0) {
+          toast.success(
+            `Generated ${outcome.createdCount} test case${
+              outcome.createdCount > 1 ? "s" : ""
+            }`
+          );
         }
       } catch (error) {
         console.error("Failed to generate tests:", error);
+        // Cap the raw message at 200 chars so PostHog event cardinality stays
+        // bounded when backend errors include user input or random ids.
+        const rawMessage =
+          error instanceof Error ? error.message : String(error);
+        track("eval_generate_tests_completed", {
+          location: "evals_tab",
+          suite_id: suiteId,
+          generated_count: 0,
+          success: false,
+          error_name: error instanceof Error ? error.name : typeof error,
+          error_message: rawMessage.slice(0, 200),
+        });
         toast.error(
-          error instanceof Error
-            ? error.message
-            : "Failed to generate test cases",
+          getBillingErrorMessage(error, "Failed to generate test cases")
         );
       } finally {
         setIsGeneratingTests(false);
@@ -686,12 +1646,21 @@ export function useEvalHandlers({
       getAccessToken,
       convex,
       mutations.createTestCaseMutation,
-    ],
+      projectId,
+      connectedServerNames,
+      ensureServersReady,
+      projectServers,
+      isDirectGuest,
+      getTestCasesForRerun,
+      handleRunTestCase,
+    ]
   );
 
   return {
     // Handlers
     handleRerun,
+    handleRunTestCase,
+    handleReplayRun,
     handleDelete,
     confirmDelete,
     handleDuplicateSuite,
@@ -701,11 +1670,14 @@ export function useEvalHandlers({
     confirmDeleteRun,
     handleCreateTestCase,
     handleDeleteTestCase,
+    directDeleteTestCase,
     confirmDeleteTestCase,
     handleDuplicateTestCase,
     handleGenerateTests,
     // States
     rerunningSuiteId,
+    runningTestCaseId,
+    replayingRunId,
     cancellingRunId,
     deletingSuiteId,
     suiteToDelete,
@@ -714,7 +1686,6 @@ export function useEvalHandlers({
     deletingRunId,
     runToDelete,
     setRunToDelete,
-    isCreatingTestCase,
     deletingTestCaseId,
     duplicatingTestCaseId,
     testCaseToDelete,

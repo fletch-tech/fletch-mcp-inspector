@@ -1,5 +1,5 @@
-import { useState } from "react";
-import { useAuth } from "@/lib/auth/jwt-auth-context";
+import { useRef, useState } from "react";
+import { useAuth } from "@workos-inc/authkit-react";
 import { useConvexAuth, useQuery } from "convex/react";
 import {
   DropdownMenu,
@@ -8,8 +8,12 @@ import {
   DropdownMenuLabel,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
-import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
+} from "@mcpjam/design-system/dropdown-menu";
+import {
+  Avatar,
+  AvatarFallback,
+  AvatarImage,
+} from "@mcpjam/design-system/avatar";
 import {
   SidebarMenu,
   SidebarMenuButton,
@@ -18,64 +22,136 @@ import {
 } from "@/components/ui/sidebar";
 import { getInitials } from "@/lib/utils";
 import {
-  Building2,
+  Bell,
+  LogIn,
   ChevronsUpDown,
   CircleUser,
   LogOut,
-  Plus,
+  MessageCircleQuestion,
   RefreshCw,
   Settings,
   User,
 } from "lucide-react";
+import { Popover, PopoverAnchor } from "@mcpjam/design-system/popover";
+import { NotificationsPanelContent } from "@/components/notifications/NotificationsPanel";
+import { useNotifications } from "@/hooks/useNotifications";
 import { useProfilePicture } from "@/hooks/useProfilePicture";
-import { useOrganizationQueries } from "@/hooks/useOrganizations";
-import { CreateOrganizationDialog } from "@/components/organization/CreateOrganizationDialog";
+import { useAppNavigate } from "@/lib/app-navigation";
 
-export function SidebarUser() {
+interface SidebarUserProps {
+  onBeforeSignOut?: () => void | Promise<void>;
+}
+
+export function SidebarUser({ onBeforeSignOut }: SidebarUserProps = {}) {
   const { isLoading, isAuthenticated } = useConvexAuth();
-  const { user, signOut } = useAuth();
+  const { user, signIn, signOut, isLoading: isWorkOsAuthLoading } = useAuth();
   const { profilePictureUrl } = useProfilePicture();
   const convexUser = useQuery("users:getCurrentUser" as any);
   const { isMobile } = useSidebar();
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [notificationsOpen, setNotificationsOpen] = useState(false);
+  // Set when the Notifications item is selected so the dropdown's
+  // close-auto-focus handler knows to open the popover instead of returning
+  // focus to the shared trigger (which would immediately dismiss the popover).
+  const openNotificationsOnCloseRef = useRef(false);
+  const { unreadCount } = useNotifications({ isAuthenticated });
+  const appNavigate = useAppNavigate();
 
-  const [showCreateOrgDialog, setShowCreateOrgDialog] = useState(false);
-
-  const { sortedOrganizations } = useOrganizationQueries({
-    isAuthenticated,
-  });
-
-  const authName = user
+  const workOsName = user
     ? [user.firstName, user.lastName].filter(Boolean).join(" ")
     : "";
-  const displayName = convexUser?.name || authName || "User";
+  const displayName = convexUser?.name || workOsName || "User";
   const email = user?.email ?? "";
   const initials = getInitials(displayName);
 
-  const handleSignOut = () => {
-    const isElectron = (window as any).isElectron;
-    const returnTo =
-      isElectron && import.meta.env.DEV
-        ? "http://localhost:8080/callback"
-        : window.location.origin;
+  const finishSignOut = () => {
+    const returnTo = window.location.origin;
+    if (window.isElectron) {
+      void Promise.resolve(signOut({ returnTo, navigate: false })).finally(
+        () => {
+          window.location.assign(returnTo);
+        }
+      );
+      return;
+    }
+
     signOut({ returnTo });
+  };
+
+  const handleSignOut = () => {
+    setMenuOpen(false);
+
+    let cleanupResult: void | Promise<void>;
+    try {
+      cleanupResult = onBeforeSignOut?.();
+    } catch {
+      finishSignOut();
+      return;
+    }
+
+    if (
+      cleanupResult &&
+      typeof (cleanupResult as Promise<void>).finally === "function"
+    ) {
+      void (cleanupResult as Promise<void>)
+        .catch(() => undefined)
+        .finally(finishSignOut);
+      return;
+    }
+
+    finishSignOut();
   };
 
   const avatarUrl = profilePictureUrl;
 
-  // Not logged in state - auth buttons are now in the header
-  if (!user) {
-    return null;
+  // `size="lg"` drops its icon-mode padding so a 32px avatar can fill the
+  // button; the loading/guest branches hold a bare 16px icon instead, so they
+  // must center it explicitly or it parks 8px left of the rail centerline.
+  const loadingState = (
+    <SidebarMenu>
+      <SidebarMenuItem>
+        <SidebarMenuButton
+          size="lg"
+          disabled
+          className="group-data-[collapsible=icon]:justify-center"
+        >
+          <RefreshCw className="size-4 animate-spin" />
+          <span className="truncate group-data-[collapsible=icon]:hidden">
+            Loading...
+          </span>
+        </SidebarMenuButton>
+      </SidebarMenuItem>
+    </SidebarMenu>
+  );
+
+  // While WorkOS/Convex are still resolving the session, `user` is null even for
+  // signed-in users. Show the neutral loading state before the `!user` guest
+  // branch so authenticated users don't flash the "Sign in" footer on load.
+  // Applies in both modes: local/npx users can also sign in with WorkOS, so a
+  // signed-in local user would otherwise flash "Sign in" while auth resolves.
+  const authResolving = !user && (isWorkOsAuthLoading || isLoading);
+
+  if (authResolving) {
+    return loadingState;
   }
 
-  // Loading state while authenticated
-  if (isLoading) {
+  // No WorkOS user → offer sign-in. In local/npx mode the actor is an anonymous
+  // guest (the raw WorkOS `user` stays null), and the header's sign-in button is
+  // hidden on the Home route, so the sidebar footer is the only sign-in
+  // affordance there. Surface it in both modes for parity with hosted.
+  if (!user) {
     return (
       <SidebarMenu>
         <SidebarMenuItem>
-          <SidebarMenuButton size="lg" disabled>
-            <RefreshCw className="size-4 animate-spin" />
+          <SidebarMenuButton
+            size="lg"
+            onClick={() => signIn()}
+            aria-label="Sign in"
+            className="data-[state=open]:bg-sidebar-accent data-[state=open]:text-sidebar-accent-foreground group-data-[collapsible=icon]:justify-center"
+          >
+            <LogIn className="size-4" />
             <span className="truncate group-data-[collapsible=icon]:hidden">
-              Loading...
+              Sign in
             </span>
           </SidebarMenuButton>
         </SidebarMenuItem>
@@ -83,41 +159,60 @@ export function SidebarUser() {
     );
   }
 
-  // Logged in state with dropdown
+  if (isLoading) {
+    return loadingState;
+  }
+
   return (
-    <>
-      <SidebarMenu>
-        <SidebarMenuItem>
-          <DropdownMenu>
-            <DropdownMenuTrigger asChild>
-              <SidebarMenuButton
-                size="lg"
-                className="data-[state=open]:bg-sidebar-accent data-[state=open]:text-sidebar-accent-foreground"
-              >
-                <Avatar className="size-8 rounded-lg">
-                  <AvatarImage src={avatarUrl} alt={displayName} />
-                  <AvatarFallback className="rounded-lg bg-muted text-muted-foreground text-sm font-medium">
-                    {initials !== "?" ? (
-                      initials
-                    ) : (
-                      <CircleUser className="size-4" />
-                    )}
-                  </AvatarFallback>
-                </Avatar>
-                <div className="grid flex-1 text-left text-sm leading-tight group-data-[collapsible=icon]:hidden">
-                  <span className="truncate font-semibold">{displayName}</span>
-                  <span className="truncate text-xs text-muted-foreground">
-                    {email}
-                  </span>
-                </div>
-                <ChevronsUpDown className="ml-auto size-4 group-data-[collapsible=icon]:hidden" />
-              </SidebarMenuButton>
-            </DropdownMenuTrigger>
+    <SidebarMenu>
+      <SidebarMenuItem>
+        <Popover open={notificationsOpen} onOpenChange={setNotificationsOpen}>
+          <DropdownMenu open={menuOpen} onOpenChange={setMenuOpen}>
+            <PopoverAnchor asChild>
+              <DropdownMenuTrigger asChild>
+                <SidebarMenuButton
+                  size="lg"
+                  className="data-[state=open]:bg-sidebar-accent data-[state=open]:text-sidebar-accent-foreground"
+                >
+                  <Avatar className="size-8 rounded-lg">
+                    <AvatarImage src={avatarUrl} alt={displayName} />
+                    <AvatarFallback className="rounded-lg bg-muted text-muted-foreground text-sm font-medium">
+                      {initials !== "?" ? (
+                        initials
+                      ) : (
+                        <CircleUser className="size-4" />
+                      )}
+                    </AvatarFallback>
+                  </Avatar>
+                  <div className="grid flex-1 text-left text-sm leading-tight group-data-[collapsible=icon]:hidden">
+                    <span className="truncate font-semibold">
+                      {displayName}
+                    </span>
+                    <span className="truncate text-xs text-muted-foreground">
+                      {email}
+                    </span>
+                  </div>
+                  <ChevronsUpDown className="ml-auto size-4 group-data-[collapsible=icon]:hidden" />
+                </SidebarMenuButton>
+              </DropdownMenuTrigger>
+            </PopoverAnchor>
             <DropdownMenuContent
-              className="w-[--radix-dropdown-menu-trigger-width] min-w-56 rounded-lg"
+              className="w-[--radix-dropdown-menu-trigger-width] min-w-72 rounded-lg"
               side={isMobile ? "bottom" : "right"}
               align="end"
               sideOffset={4}
+              onCloseAutoFocus={(event) => {
+                // When Notifications was selected, don't return focus to the
+                // trigger — that focus move lands outside the notifications
+                // popover and Radix would dismiss it as a focus-outside event.
+                // Instead, swallow the focus-return and open the popover here,
+                // once the menu has actually closed.
+                if (openNotificationsOnCloseRef.current) {
+                  openNotificationsOnCloseRef.current = false;
+                  event.preventDefault();
+                  setNotificationsOpen(true);
+                }
+              }}
             >
               <DropdownMenuLabel className="p-0 font-normal">
                 <div className="flex items-center gap-2 px-1 py-1.5 text-left text-sm">
@@ -143,64 +238,42 @@ export function SidebarUser() {
               </DropdownMenuLabel>
               <DropdownMenuSeparator />
               <DropdownMenuItem
-                onClick={() => (window.location.hash = "profile")}
+                onClick={() => appNavigate("/profile")}
                 className="cursor-pointer"
               >
                 <User className="size-4" />
                 Profile
               </DropdownMenuItem>
               <DropdownMenuItem
-                onClick={() => (window.location.hash = "settings")}
+                onClick={() => appNavigate("/settings")}
                 className="cursor-pointer"
               >
                 <Settings className="size-4" />
                 Settings
               </DropdownMenuItem>
-              <DropdownMenuSeparator />
-              {/* Organizations Section */}
-              <DropdownMenuLabel className="text-xs text-muted-foreground uppercase tracking-wider">
-                Organizations
-              </DropdownMenuLabel>
-              {sortedOrganizations.length > 0 ? (
-                sortedOrganizations.map((org) => (
-                  <DropdownMenuItem
-                    key={org._id}
-                    onClick={() =>
-                      (window.location.hash = `organizations/${org._id}`)
-                    }
-                    className="cursor-pointer"
-                  >
-                    <Avatar className="size-6 rounded">
-                      <AvatarImage src={org.logoUrl} alt={org.name} />
-                      <AvatarFallback className="rounded bg-primary/10 text-primary text-xs font-semibold">
-                        {org.name.charAt(0).toUpperCase()}
-                      </AvatarFallback>
-                    </Avatar>
-                    <span className="flex-1 truncate">{org.name}</span>
-                    <Settings
-                      className="size-4 text-muted-foreground hover:text-foreground"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        window.location.hash = `organizations/${org._id}`;
-                      }}
-                    />
-                  </DropdownMenuItem>
-                ))
-              ) : (
-                <DropdownMenuItem
-                  onClick={() => setShowCreateOrgDialog(true)}
-                  className="cursor-pointer text-muted-foreground"
-                >
-                  <Building2 className="size-4" />
-                  No organizations yet
-                </DropdownMenuItem>
-              )}
               <DropdownMenuItem
-                onClick={() => setShowCreateOrgDialog(true)}
+                onSelect={() => {
+                  // Flag the intent, then let the menu close normally; the
+                  // popover is opened from the dropdown's onCloseAutoFocus so
+                  // the focus-return doesn't dismiss it. See the handler above.
+                  openNotificationsOnCloseRef.current = true;
+                }}
                 className="cursor-pointer"
               >
-                <Plus className="size-4" />
-                New organization
+                <Bell className="size-4" />
+                Notifications
+                {unreadCount > 0 ? (
+                  <span className="ml-auto flex h-4 min-w-4 items-center justify-center rounded-full bg-destructive px-1 text-[10px] font-medium text-white">
+                    {unreadCount > 9 ? "9+" : unreadCount}
+                  </span>
+                ) : null}
+              </DropdownMenuItem>
+              <DropdownMenuItem
+                onClick={() => appNavigate("/support")}
+                className="cursor-pointer"
+              >
+                <MessageCircleQuestion className="size-4" />
+                Support
               </DropdownMenuItem>
               <DropdownMenuSeparator />
               <DropdownMenuItem
@@ -213,12 +286,12 @@ export function SidebarUser() {
               </DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>
-        </SidebarMenuItem>
-      </SidebarMenu>
-      <CreateOrganizationDialog
-        open={showCreateOrgDialog}
-        onOpenChange={setShowCreateOrgDialog}
-      />
-    </>
+          <NotificationsPanelContent
+            side={isMobile ? "bottom" : "right"}
+            align="end"
+          />
+        </Popover>
+      </SidebarMenuItem>
+    </SidebarMenu>
   );
 }

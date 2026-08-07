@@ -1,40 +1,40 @@
+import { memo } from "react";
 import { UIMessage } from "@ai-sdk/react";
 import { MessageCircle } from "lucide-react";
-import type { ContentBlock } from "@modelcontextprotocol/sdk/types.js";
+import type { ContentBlock } from "@modelcontextprotocol/client";
 
 import { UserMessageBubble } from "./user-message-bubble";
 import { PartSwitch } from "./part-switch";
+import type { RecorderProps } from "./recorder-types";
 import { ModelDefinition } from "@/shared/types";
 import { type DisplayMode } from "@/stores/ui-playground-store";
 import { usePreferencesStore } from "@/stores/preferences/preferences-provider";
-import { getProviderLogoFromModel } from "@/components/chat-v2/shared/chat-helpers";
-import { groupAssistantPartsIntoSteps } from "./thread-helpers";
+import {
+  useChatboxHostStyle,
+  useChatboxHostTheme,
+} from "@/contexts/chatbox-client-style-context";
+import {
+  groupAssistantPartsIntoSteps,
+  isHiddenInternalMessage,
+} from "./thread-helpers";
 import { ToolServerMap } from "@/lib/apis/mcp-tools-api";
-import { UIType } from "@/lib/mcp-ui/mcp-apps-utils";
 import { ToolRenderOverride } from "@/components/chat-v2/thread/tool-render-overrides";
+import { type ReasoningDisplayMode } from "./parts/reasoning-part";
+import { ClaudeLoadingIndicator } from "@/lib/client-styles/indicators/claude-mark";
+import { MCPJamMarkIndicator } from "@/lib/client-styles/indicators/mcpjam-mark";
+import { MistralStaticAvatar } from "@/lib/client-styles/mistral-avatar";
+import type { McpToolResultImageRenderingPolicy } from "@/lib/client-config-v2";
+import { getAssistantAvatarDescriptor } from "@/components/chat-v2/shared/assistant-avatar";
+import { SenderAvatar } from "@/components/chat-v2/shared/sender-avatar";
+import type { ProjectThreadOwnerAvatar } from "@/components/chat-v2/history/project-thread-owner-avatar";
+import { CopilotMessageHeader } from "./copilot-message-header";
+import type { AppToolInvocationUpdate } from "./app-tool-invocations";
 
-export function MessageView({
-  message,
-  model,
-  onSendFollowUp,
-  toolsMetadata,
-  toolServerMap,
-  onWidgetStateChange,
-  onModelContextUpdate,
-  pipWidgetId,
-  fullscreenWidgetId,
-  onRequestPip,
-  onExitPip,
-  onRequestFullscreen,
-  onExitFullscreen,
-  displayMode,
-  onDisplayModeChange,
-  selectedProtocolOverrideIfBothExists,
-  onToolApprovalResponse,
-  toolRenderOverrides,
-  showSaveViewButton = true,
-  minimalMode = false,
-}: {
+type ClaudeFooterMode = "none" | "animated" | "static";
+type MessagePart = UIMessage["parts"][number];
+
+interface MessageViewProps {
+  chatSessionId?: string;
   message: UIMessage;
   model: ModelDefinition;
   onSendFollowUp: (text: string) => void;
@@ -46,28 +46,203 @@ export function MessageView({
     context: {
       content?: ContentBlock[];
       structuredContent?: Record<string, unknown>;
-    },
+    }
   ) => void;
+  onAppToolInvocationChange?: (invocation: AppToolInvocationUpdate) => void;
   pipWidgetId: string | null;
   fullscreenWidgetId: string | null;
   onRequestPip: (toolCallId: string) => void;
   onExitPip: (toolCallId: string) => void;
   onRequestFullscreen: (toolCallId: string) => void;
   onExitFullscreen: (toolCallId: string) => void;
+  onRequestTeardown?: (toolCallId: string, displayWidgetId?: string) => void;
+  tornDownWidgetIds?: ReadonlySet<string>;
   displayMode?: DisplayMode;
   onDisplayModeChange?: (mode: DisplayMode) => void;
-  selectedProtocolOverrideIfBothExists?: UIType;
   onToolApprovalResponse?: (options: { id: string; approved: boolean }) => void;
   toolRenderOverrides?: Record<string, ToolRenderOverride>;
-  showSaveViewButton?: boolean;
+  showInlineEdit?: boolean;
   minimalMode?: boolean;
-}) {
+  interactive?: boolean;
+  reasoningDisplayMode?: ReasoningDisplayMode;
+  mcpToolResultImageRendering?: McpToolResultImageRenderingPolicy;
+  claudeFooterMode?: ClaudeFooterMode;
+  /** MCPJam host: pulsing dots beneath the streaming assistant bubble. */
+  mcpjamFooterActive?: boolean;
+  /**
+   * Optional slot rendered below each user message's bubble. The host
+   * (ChatTabV2) wires this when it has a persisted chat session, so a
+   * per-message "Save as test case" affordance can render with access to
+   * sessionId + per-message id.
+   */
+  renderUserMessageActions?: (message: UIMessage) => React.ReactNode;
+  /** Tier 3 recorder bundle, forwarded to the assistant tool PartSwitch. */
+  recorder?: RecorderProps;
+  /**
+   * Resolved sender for this message (shared sessions only). When absent, the
+   * transcript renders today's identical-bubble behavior.
+   */
+  senderAvatar?: ProjectThreadOwnerAvatar;
+  /**
+   * Render the avatar above the bubble. Used by `TranscriptThread` to
+   * coalesce consecutive prompts from the same sender (Slack/Linear style).
+   */
+  showSenderAvatar?: boolean;
+}
+
+function shouldRerenderMessage(prevMessage: UIMessage, nextMessage: UIMessage) {
+  return !(
+    prevMessage === nextMessage ||
+    (prevMessage.id === nextMessage.id &&
+      prevMessage.role === nextMessage.role &&
+      prevMessage.parts === nextMessage.parts)
+  );
+}
+
+// A React key for an assistant "step" group that is STABLE across re-derivations
+// of the same logical message. The trace adapter can split one assistant turn
+// into a different number of steps between the streaming envelope and the
+// persisted blob; keying the step <div> by array index then shifts the widget's
+// step key on completion, remounting the step (and its mounted MCP App widget
+// iframe, wiping live widget state). Derive the key from the first part that
+// carries a stable id (toolCallId / part.id) — for a widget-bearing step that's
+// the tool's `tool-<toolCallId>`, identical in both representations. Steps with
+// no stable part (plain text) fall back to the index; they hold no widget, so a
+// remount there is a harmless text re-render.
+function getStepKey(stepParts: MessagePart[], stepIndex: number) {
+  for (let i = 0; i < stepParts.length; i++) {
+    const key = getPartKey(stepParts[i], stepIndex, i);
+    if (!key.startsWith(`${stepIndex}-`)) return `step-${key}`;
+  }
+  return `step-idx-${stepIndex}`;
+}
+
+function getPartKey(part: MessagePart, stepIndex: number, partIndex: number) {
+  const candidate = part as {
+    type?: string;
+    toolCallId?: unknown;
+    id?: unknown;
+  };
+  if (
+    typeof candidate.toolCallId === "string" &&
+    candidate.toolCallId.length > 0
+  ) {
+    return `tool-${candidate.toolCallId}`;
+  }
+  if (typeof candidate.id === "string" && candidate.id.length > 0) {
+    return `${candidate.type ?? "part"}-${candidate.id}`;
+  }
+  return `${stepIndex}-${partIndex}`;
+}
+
+function isSameSenderAvatar(
+  prev: ProjectThreadOwnerAvatar | undefined,
+  next: ProjectThreadOwnerAvatar | undefined
+) {
+  if (prev === next) return true;
+  if (!prev || !next) return false;
+  if (prev.status !== next.status) return false;
+  if (prev.status === "show" && next.status === "show") {
+    return (
+      prev.displayName === next.displayName && prev.imageUrl === next.imageUrl
+    );
+  }
+  return true;
+}
+
+function areMessageViewPropsEqual(
+  prev: Readonly<MessageViewProps>,
+  next: Readonly<MessageViewProps>
+) {
+  return (
+    !shouldRerenderMessage(prev.message, next.message) &&
+    prev.model === next.model &&
+    prev.onSendFollowUp === next.onSendFollowUp &&
+    prev.toolsMetadata === next.toolsMetadata &&
+    prev.chatSessionId === next.chatSessionId &&
+    prev.toolServerMap === next.toolServerMap &&
+    prev.onWidgetStateChange === next.onWidgetStateChange &&
+    prev.onModelContextUpdate === next.onModelContextUpdate &&
+    prev.onAppToolInvocationChange === next.onAppToolInvocationChange &&
+    prev.pipWidgetId === next.pipWidgetId &&
+    prev.fullscreenWidgetId === next.fullscreenWidgetId &&
+    prev.onRequestPip === next.onRequestPip &&
+    prev.onExitPip === next.onExitPip &&
+    prev.onRequestFullscreen === next.onRequestFullscreen &&
+    prev.onExitFullscreen === next.onExitFullscreen &&
+    prev.onRequestTeardown === next.onRequestTeardown &&
+    prev.tornDownWidgetIds === next.tornDownWidgetIds &&
+    prev.displayMode === next.displayMode &&
+    prev.onDisplayModeChange === next.onDisplayModeChange &&
+    prev.onToolApprovalResponse === next.onToolApprovalResponse &&
+    prev.toolRenderOverrides === next.toolRenderOverrides &&
+    prev.showInlineEdit === next.showInlineEdit &&
+    prev.minimalMode === next.minimalMode &&
+    prev.interactive === next.interactive &&
+    prev.reasoningDisplayMode === next.reasoningDisplayMode &&
+    prev.mcpToolResultImageRendering === next.mcpToolResultImageRendering &&
+    prev.claudeFooterMode === next.claudeFooterMode &&
+    prev.mcpjamFooterActive === next.mcpjamFooterActive &&
+    prev.renderUserMessageActions === next.renderUserMessageActions &&
+    isSameSenderAvatar(prev.senderAvatar, next.senderAvatar) &&
+    prev.showSenderAvatar === next.showSenderAvatar &&
+    // Tier 3: arming/disarming recording flips the recorder bundle's identity;
+    // without this the memo skips the re-render and recordMode never reaches
+    // the widget (the recorder appears "unavailable").
+    prev.recorder === next.recorder
+  );
+}
+
+function MessageViewImpl({
+  chatSessionId,
+  message,
+  model,
+  onSendFollowUp,
+  toolsMetadata,
+  toolServerMap,
+  onWidgetStateChange,
+  onModelContextUpdate,
+  onAppToolInvocationChange,
+  pipWidgetId,
+  fullscreenWidgetId,
+  onRequestPip,
+  onExitPip,
+  onRequestFullscreen,
+  onExitFullscreen,
+  onRequestTeardown,
+  tornDownWidgetIds,
+  displayMode,
+  onDisplayModeChange,
+  onToolApprovalResponse,
+  toolRenderOverrides,
+  showInlineEdit = true,
+  minimalMode = false,
+  interactive = true,
+  reasoningDisplayMode = "inline",
+  mcpToolResultImageRendering,
+  claudeFooterMode = "none",
+  mcpjamFooterActive = false,
+  renderUserMessageActions,
+  senderAvatar,
+  showSenderAvatar = false,
+  recorder,
+}: MessageViewProps) {
   const themeMode = usePreferencesStore((s) => s.themeMode);
-  const logoSrc = getProviderLogoFromModel(model, themeMode);
-  // Hide widget state messages (these are internal and sent to the model)
-  if (message.id?.startsWith("widget-state-")) return null;
-  // Hide model context messages (these are internal and sent to the model)
-  if (message.id?.startsWith("model-context-")) return null;
+  const chatboxHostStyle = useChatboxHostStyle();
+  const chatboxHostTheme = useChatboxHostTheme();
+  const assistantAvatar = getAssistantAvatarDescriptor({
+    model,
+    themeMode: chatboxHostTheme ?? themeMode,
+    chatboxHostStyle,
+  });
+  const shouldRenderMistralAssistantAvatar = chatboxHostStyle === "mistral";
+  const shouldRenderAssistantAvatar =
+    chatboxHostStyle === null || shouldRenderMistralAssistantAvatar;
+  // Copilot mimics show their own "Copilot + mascot" row above the
+  // message content (faithful to real M365 Copilot's avatar/name header).
+  // Other host styles keep the inspector's existing layout.
+  const shouldRenderCopilotHeader = chatboxHostStyle === "copilot";
+  if (isHiddenInternalMessage(message)) return null;
   const role = message.role;
   if (role !== "user" && role !== "assistant") return null;
 
@@ -79,34 +254,43 @@ export function MessageView({
       message.parts?.filter((part) => part.type !== "file") ?? [];
 
     return (
-      <div className="flex flex-col items-end gap-2">
+      <div className="group/user-message flex w-full min-w-0 flex-col items-end gap-2">
+        {showSenderAvatar && senderAvatar ? (
+          <div className="flex max-w-[min(100%,48rem)] justify-end">
+            <SenderAvatar avatar={senderAvatar} />
+          </div>
+        ) : null}
         {/* File attachments above the bubble */}
         {fileParts.length > 0 && (
-          <div className="flex flex-wrap justify-end gap-2 max-w-3xl">
+          <div className="flex max-w-[min(100%,48rem)] flex-wrap justify-end gap-2">
             {fileParts.map((part, i) => (
               <PartSwitch
                 key={`file-${i}`}
                 part={part}
                 role={role}
+                chatSessionId={chatSessionId}
                 onSendFollowUp={onSendFollowUp}
                 toolsMetadata={toolsMetadata}
                 toolServerMap={toolServerMap}
                 onWidgetStateChange={onWidgetStateChange}
                 onModelContextUpdate={onModelContextUpdate}
+                onAppToolInvocationChange={onAppToolInvocationChange}
                 pipWidgetId={pipWidgetId}
                 fullscreenWidgetId={fullscreenWidgetId}
                 onRequestPip={onRequestPip}
                 onExitPip={onExitPip}
                 onRequestFullscreen={onRequestFullscreen}
                 onExitFullscreen={onExitFullscreen}
+                onRequestTeardown={onRequestTeardown}
+                tornDownWidgetIds={tornDownWidgetIds}
                 displayMode={displayMode}
                 onDisplayModeChange={onDisplayModeChange}
-                selectedProtocolOverrideIfBothExists={
-                  selectedProtocolOverrideIfBothExists
-                }
                 toolRenderOverrides={toolRenderOverrides}
-                showSaveViewButton={showSaveViewButton}
+                showInlineEdit={showInlineEdit}
                 minimalMode={minimalMode}
+                interactive={interactive}
+                reasoningDisplayMode={reasoningDisplayMode}
+                mcpToolResultImageRendering={mcpToolResultImageRendering}
               />
             ))}
           </div>
@@ -119,82 +303,140 @@ export function MessageView({
                 key={i}
                 part={part}
                 role={role}
+                chatSessionId={chatSessionId}
                 onSendFollowUp={onSendFollowUp}
                 toolsMetadata={toolsMetadata}
                 toolServerMap={toolServerMap}
                 onWidgetStateChange={onWidgetStateChange}
                 onModelContextUpdate={onModelContextUpdate}
+                onAppToolInvocationChange={onAppToolInvocationChange}
                 pipWidgetId={pipWidgetId}
                 fullscreenWidgetId={fullscreenWidgetId}
                 onRequestPip={onRequestPip}
                 onExitPip={onExitPip}
                 onRequestFullscreen={onRequestFullscreen}
                 onExitFullscreen={onExitFullscreen}
+                onRequestTeardown={onRequestTeardown}
+                tornDownWidgetIds={tornDownWidgetIds}
                 displayMode={displayMode}
                 onDisplayModeChange={onDisplayModeChange}
-                selectedProtocolOverrideIfBothExists={
-                  selectedProtocolOverrideIfBothExists
-                }
                 toolRenderOverrides={toolRenderOverrides}
-                showSaveViewButton={showSaveViewButton}
+                showInlineEdit={showInlineEdit}
                 minimalMode={minimalMode}
+                interactive={interactive}
+                reasoningDisplayMode={reasoningDisplayMode}
+                mcpToolResultImageRendering={mcpToolResultImageRendering}
               />
             ))}
           </UserMessageBubble>
         )}
+        {renderUserMessageActions ? (
+          <div className="flex max-w-[min(100%,48rem)] justify-end gap-1 opacity-0 transition-opacity duration-150 group-hover/user-message:opacity-100 focus-within:opacity-100">
+            {renderUserMessageActions(message)}
+          </div>
+        ) : null}
       </div>
     );
   }
 
   const steps = groupAssistantPartsIntoSteps(message.parts ?? []);
+  const showClaudeFooter = claudeFooterMode !== "none";
   return (
-    <article className="flex gap-4 w-full">
-      <div className="mt-1 flex h-8 w-8 shrink-0 items-center justify-center rounded-full border border-border/40 bg-muted/40">
-        {logoSrc ? (
-          <img
-            src={logoSrc}
-            alt={`${model.id} logo`}
-            className="h-4 w-4 object-contain"
-          />
-        ) : (
-          <MessageCircle className="h-4 w-4 text-muted-foreground" />
-        )}
-      </div>
+    <article
+      className={
+        shouldRenderAssistantAvatar
+          ? "flex w-full min-w-0 gap-4"
+          : "w-full min-w-0"
+      }
+    >
+      {shouldRenderMistralAssistantAvatar ? (
+        <MistralStaticAvatar
+          ariaLabel="Mistral assistant"
+          className="mt-1 size-7 shrink-0 self-start"
+        />
+      ) : shouldRenderAssistantAvatar ? (
+        <div
+          className={`mt-1 flex h-8 w-8 shrink-0 items-center justify-center rounded-full border ${assistantAvatar.avatarClasses}`}
+          aria-label={assistantAvatar.ariaLabel}
+        >
+          {assistantAvatar.logoSrc ? (
+            <img
+              src={assistantAvatar.logoSrc}
+              alt={assistantAvatar.logoAlt ?? ""}
+              className="h-4 w-4 object-contain"
+            />
+          ) : (
+            <MessageCircle
+              className="h-4 w-4 text-muted-foreground"
+              aria-hidden
+            />
+          )}
+        </div>
+      ) : null}
 
-      <div className="flex-1 min-w-0 space-y-6 text-sm leading-6">
-        {steps.map((stepParts, sIdx) => (
-          <div key={sIdx} className="space-y-3">
-            {stepParts.map((part, pIdx) => (
-              <PartSwitch
-                key={`${sIdx}-${pIdx}`}
-                part={part}
-                role={role}
-                onSendFollowUp={onSendFollowUp}
-                toolsMetadata={toolsMetadata}
-                toolServerMap={toolServerMap}
-                onWidgetStateChange={onWidgetStateChange}
-                onModelContextUpdate={onModelContextUpdate}
-                pipWidgetId={pipWidgetId}
-                fullscreenWidgetId={fullscreenWidgetId}
-                onRequestPip={onRequestPip}
-                onExitPip={onExitPip}
-                onRequestFullscreen={onRequestFullscreen}
-                onExitFullscreen={onExitFullscreen}
-                displayMode={displayMode}
-                onDisplayModeChange={onDisplayModeChange}
-                selectedProtocolOverrideIfBothExists={
-                  selectedProtocolOverrideIfBothExists
-                }
-                onToolApprovalResponse={onToolApprovalResponse}
-                messageParts={message.parts}
-                toolRenderOverrides={toolRenderOverrides}
-                showSaveViewButton={showSaveViewButton}
-                minimalMode={minimalMode}
-              />
-            ))}
+      <div className="flex-1 min-w-0">
+        {shouldRenderCopilotHeader ? (
+          <div className="mb-2">
+            <CopilotMessageHeader />
           </div>
-        ))}
+        ) : null}
+        <div className="space-y-6 text-sm leading-6">
+          {steps.map((stepParts, sIdx) => (
+            <div key={getStepKey(stepParts, sIdx)} className="space-y-3">
+              {stepParts.map((part, pIdx) => (
+                <PartSwitch
+                  key={getPartKey(part, sIdx, pIdx)}
+                  part={part}
+                  role={role}
+                  chatSessionId={chatSessionId}
+                  onSendFollowUp={onSendFollowUp}
+                  toolsMetadata={toolsMetadata}
+                  toolServerMap={toolServerMap}
+                  onWidgetStateChange={onWidgetStateChange}
+                  onModelContextUpdate={onModelContextUpdate}
+                  onAppToolInvocationChange={onAppToolInvocationChange}
+                  pipWidgetId={pipWidgetId}
+                  fullscreenWidgetId={fullscreenWidgetId}
+                  onRequestPip={onRequestPip}
+                  onExitPip={onExitPip}
+                  onRequestFullscreen={onRequestFullscreen}
+                  onExitFullscreen={onExitFullscreen}
+                  onRequestTeardown={onRequestTeardown}
+                  tornDownWidgetIds={tornDownWidgetIds}
+                  displayMode={displayMode}
+                  onDisplayModeChange={onDisplayModeChange}
+                  onToolApprovalResponse={onToolApprovalResponse}
+                  messageParts={message.parts}
+                  toolRenderOverrides={toolRenderOverrides}
+                  showInlineEdit={showInlineEdit}
+                  minimalMode={minimalMode}
+                  interactive={interactive}
+                  reasoningDisplayMode={reasoningDisplayMode}
+                  mcpToolResultImageRendering={mcpToolResultImageRendering}
+                  {...recorder}
+                />
+              ))}
+            </div>
+          ))}
+        </div>
+        {mcpjamFooterActive ? (
+          <div data-testid="mcpjam-message-footer" className="pt-4">
+            <MCPJamMarkIndicator />
+          </div>
+        ) : null}
+        {showClaudeFooter ? (
+          <div
+            data-testid={`claude-message-footer-${claudeFooterMode}`}
+            className="pt-4"
+          >
+            <ClaudeLoadingIndicator mode={claudeFooterMode} />
+          </div>
+        ) : null}
       </div>
     </article>
   );
 }
+
+export const MessageView = memo(MessageViewImpl, areMessageViewPropsEqual);
+
+MessageView.displayName = "MessageView";

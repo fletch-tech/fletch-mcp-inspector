@@ -43,12 +43,28 @@ export interface JsonEditorProps {
   // Soft-wrap long lines in edit mode while preserving logical line numbers
   wrapLongLinesInEdit?: boolean;
 
+  // Edit surface. CodeMirror is the default; legacy remains as a fallback.
+  editSurface?: "legacy" | "codemirror";
+
+  // Soft-wrap long lines in read-only flat view. Enabled by default because
+  // most product surfaces use the viewer for inspection rather than raw code.
+  wrapLongLinesInView?: boolean;
+
   // Show or hide the line number gutter
   showLineNumbers?: boolean;
 
   // Custom toolbar content
   toolbarLeftContent?: ReactNode;
   toolbarRightContent?: ReactNode;
+
+  // External error message to surface in the toolbar (e.g. JSON parse error
+  // from the consumer's own validation pipeline).
+  error?: string | null;
+
+  // Whether the editor's built-in validation error should also render in the
+  // bottom status bar. Disable this when the parent already renders the same
+  // validation message elsewhere to avoid duplicates.
+  showValidationErrorInStatusBar?: boolean;
 }
 
 export interface CursorPosition {

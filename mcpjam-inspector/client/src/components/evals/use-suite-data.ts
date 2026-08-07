@@ -1,14 +1,12 @@
 import { useMemo } from "react";
+import { desanitizeFromConvexTransport } from "@/shared/convex-sanitize";
 import {
   formatTime,
   formatRunId,
   computeIterationSummary,
   getTemplateKey,
 } from "./helpers";
-import {
-  computeIterationResult,
-  computeIterationPassed,
-} from "./pass-criteria";
+import { computeIterationResult } from "./pass-criteria";
 import {
   EvalCase,
   EvalIteration,
@@ -17,20 +15,39 @@ import {
   SuiteAggregate,
 } from "./types";
 
+function desanitizeEvalIteration(iter: EvalIteration): EvalIteration {
+  return {
+    ...iter,
+    actualToolCalls: desanitizeFromConvexTransport(iter.actualToolCalls),
+    testCaseSnapshot: iter.testCaseSnapshot
+      ? {
+          ...iter.testCaseSnapshot,
+          expectedToolCalls: desanitizeFromConvexTransport(
+            iter.testCaseSnapshot.expectedToolCalls,
+          ),
+        }
+      : undefined,
+  };
+}
+
 export function useSuiteData(
   suite: EvalSuite,
   cases: EvalCase[],
-  iterations: EvalIteration[],
-  allIterations: EvalIteration[],
+  rawIterations: EvalIteration[],
+  rawAllIterations: EvalIteration[],
   runs: EvalSuiteRun[],
   aggregate: SuiteAggregate | null,
 ) {
-  // Calculate active run IDs once (memoized separately for better performance)
+  const iterations = useMemo(
+    () => rawIterations.map(desanitizeEvalIteration),
+    [rawIterations],
+  );
+  const allIterations = useMemo(
+    () => rawAllIterations.map(desanitizeEvalIteration),
+    [rawAllIterations],
+  );
   const activeRunIds = useMemo(
-    () =>
-      new Set(
-        runs.filter((run) => run.isActive !== false).map((run) => run._id),
-      ),
+    () => new Set(runs.map((run) => run._id)),
     [runs],
   );
 
@@ -62,11 +79,8 @@ export function useSuiteData(
     };
   }, [aggregate]);
 
-  // Run trend data for accuracy chart
   const runTrendData = useMemo(() => {
-    const activeRuns = runs.filter((run) => run.isActive !== false);
-
-    const data = activeRuns
+    const data = [...runs]
       .slice()
       .reverse()
       .map((run) => {
@@ -93,11 +107,23 @@ export function useSuiteData(
           return null;
         }
 
+        const passed =
+          realTimeTotal > 0
+            ? realTimePassed
+            : (run.summary?.passed ?? 0);
+        const total =
+          realTimeTotal > 0
+            ? realTimeTotal
+            : (run.summary?.total ?? 0);
+
         return {
           runId: run._id,
           runIdDisplay: formatRunId(run._id),
           passRate,
+          passed,
+          total,
           label: formatTime(run.completedAt ?? run.createdAt),
+          runNumber: run.runNumber,
         };
       })
       .filter(
@@ -107,13 +133,15 @@ export function useSuiteData(
           runId: string;
           runIdDisplay: string;
           passRate: number;
+          passed: number;
+          total: number;
           label: string;
+          runNumber: number;
         } => item !== null,
       );
     return data;
   }, [runs, allIterations]);
 
-  // Calculate per-model statistics (only from active runs)
   const modelStats = useMemo(() => {
     const activeIterations = allIterations.filter(
       (iteration) =>
@@ -129,10 +157,14 @@ export function useSuiteData(
       const model = iteration.testCaseSnapshot?.model || "Unknown";
       const modelName = iteration.testCaseSnapshot?.model || "Unknown Model";
 
-      // Only count completed iterations - exclude pending/cancelled
+      // Only count terminal pass/fail iterations - exclude pending/cancelled.
       const result = computeIterationResult(iteration);
-      if (result !== "passed" && result !== "failed") {
-        return; // Skip pending/cancelled iterations
+      if (
+        result !== "passed" &&
+        result !== "failed" &&
+        result !== "timed_out"
+      ) {
+        return;
       }
 
       if (!modelMap.has(model)) {
@@ -149,7 +181,7 @@ export function useSuiteData(
       }
     });
 
-    const data = Array.from(modelMap.entries()).map(([model, stats]) => ({
+    const data = Array.from(modelMap.entries()).map(([_model, stats]) => ({
       model: stats.modelName,
       passRate:
         stats.total > 0 ? Math.round((stats.passed / stats.total) * 100) : 0,
@@ -241,12 +273,17 @@ export function useSuiteData(
         if (!groups.has(snapshotKey)) {
           const virtualTestCase: EvalCase = {
             _id: snapshotKey,
-            evalTestSuiteId: suite._id,
+            testSuiteId: suite._id,
             createdBy: iteration.createdBy || "",
             title: iteration.testCaseSnapshot.title,
             query: iteration.testCaseSnapshot.query,
-            provider: iteration.testCaseSnapshot.provider,
-            model: iteration.testCaseSnapshot.model,
+            models: [
+              {
+                model: iteration.testCaseSnapshot.model,
+                provider: iteration.testCaseSnapshot.provider,
+              },
+            ],
+            runs: 1,
             expectedToolCalls: iteration.testCaseSnapshot.expectedToolCalls,
           };
           groups.set(snapshotKey, {
@@ -323,39 +360,6 @@ export function useSuiteData(
       }
     >();
 
-    // First, add templates from suite config
-    const configTests = suite.config?.tests || [];
-    configTests.forEach((test: any) => {
-      const templateTitle = test.title.replace(/\s*\[.*?\]\s*$/, "").trim();
-      const templateKey = `template:${templateTitle}-${test.query}`;
-
-      if (!groups.has(templateKey)) {
-        groups.set(templateKey, {
-          title: templateTitle,
-          query: test.query,
-          testCaseIds: [],
-          iterations: [],
-          summary: {
-            runs: 0,
-            passed: 0,
-            failed: 0,
-            cancelled: 0,
-            pending: 0,
-            tokens: 0,
-            avgDuration: null,
-          },
-        });
-      }
-
-      if (test.testCaseId) {
-        const group = groups.get(templateKey)!;
-        if (!group.testCaseIds.includes(test.testCaseId)) {
-          group.testCaseIds.push(test.testCaseId);
-        }
-      }
-    });
-
-    // Then, group by testTemplateKey from schema
     caseGroups.forEach((group) => {
       if (!group.testCase) return;
 
@@ -363,14 +367,9 @@ export function useSuiteData(
       const templateTitle = group.testCase.title
         .replace(/\s*\[.*?\]\s*$/, "")
         .trim();
-      const configTemplateKey = `template:${templateTitle}-${group.testCase.query}`;
 
-      const keyToUse = groups.has(configTemplateKey)
-        ? configTemplateKey
-        : templateKey;
-
-      if (!groups.has(keyToUse)) {
-        groups.set(keyToUse, {
+      if (!groups.has(templateKey)) {
+        groups.set(templateKey, {
           title: templateTitle,
           query: group.testCase.query,
           testCaseIds: [],
@@ -387,7 +386,7 @@ export function useSuiteData(
         });
       }
 
-      const templateGroup = groups.get(keyToUse)!;
+      const templateGroup = groups.get(templateKey)!;
       if (!templateGroup.testCaseIds.includes(group.testCase._id)) {
         templateGroup.testCaseIds.push(group.testCase._id);
       }
@@ -398,7 +397,7 @@ export function useSuiteData(
       ...group,
       summary: computeIterationSummary(group.iterations),
     }));
-  }, [caseGroups, suite.config?.tests]);
+  }, [caseGroups]);
 
   return {
     activeRunIds,
@@ -412,9 +411,14 @@ export function useSuiteData(
 
 export function useRunDetailData(
   selectedRunId: string | null,
-  allIterations: EvalIteration[],
+  rawAllIterations: EvalIteration[],
   runDetailSortBy: "model" | "test" | "result",
 ) {
+  const allIterations = useMemo(
+    () => rawAllIterations.map(desanitizeEvalIteration),
+    [rawAllIterations],
+  );
+
   // Iterations for selected run
   const iterationsForSelectedRun = useMemo(() => {
     if (!selectedRunId) return [];
@@ -471,175 +475,8 @@ export function useRunDetailData(
     return sorted.map((item) => item.iteration);
   }, [selectedRunId, iterationsForSelectedRun, runDetailSortBy]);
 
-  // Data for run detail charts
-  const selectedRunChartData = useMemo(() => {
-    if (!selectedRunId || caseGroupsForSelectedRun.length === 0) {
-      return { donutData: [], durationData: [], tokensData: [], modelData: [] };
-    }
-
-    let totalPassed = 0;
-    let totalFailed = 0;
-    let totalPending = 0;
-    let totalCancelled = 0;
-
-    const modelMap = new Map<
-      string,
-      { passed: number; failed: number; total: number; modelName: string }
-    >();
-
-    iterationsForSelectedRun.forEach((iteration) => {
-      const model = iteration.testCaseSnapshot?.model || "Unknown";
-      const modelName = iteration.testCaseSnapshot?.model || "Unknown Model";
-
-      // Only count completed iterations - exclude pending/cancelled
-      const result = computeIterationResult(iteration);
-      if (result !== "passed" && result !== "failed") {
-        return; // Skip pending/cancelled iterations
-      }
-
-      if (!modelMap.has(model)) {
-        modelMap.set(model, { passed: 0, failed: 0, total: 0, modelName });
-      }
-
-      const stats = modelMap.get(model)!;
-      stats.total += 1;
-
-      if (result === "passed") {
-        stats.passed += 1;
-      } else {
-        stats.failed += 1;
-      }
-    });
-
-    // Sort alphabetically by model name for consistent, fixed ordering
-    const modelData = Array.from(modelMap.entries())
-      .map(([model, stats]) => ({
-        model: stats.modelName,
-        passRate:
-          stats.total > 0 ? Math.round((stats.passed / stats.total) * 100) : 0,
-        passed: stats.passed,
-        failed: stats.failed,
-        total: stats.total,
-      }))
-      .sort((a, b) => a.model.localeCompare(b.model));
-
-    const testMap = new Map<
-      string,
-      {
-        title: string;
-        durations: number[];
-        tokens: number[];
-        passed: number;
-        failed: number;
-        pending: number;
-        cancelled: number;
-      }
-    >();
-
-    caseGroupsForSelectedRun.forEach((iteration) => {
-      const testKey = iteration.testCaseSnapshot?.title || "Unknown";
-
-      if (!testMap.has(testKey)) {
-        testMap.set(testKey, {
-          title: testKey,
-          durations: [],
-          tokens: [],
-          passed: 0,
-          failed: 0,
-          pending: 0,
-          cancelled: 0,
-        });
-      }
-
-      const test = testMap.get(testKey)!;
-
-      // Use computeIterationPassed for accurate pass/fail with negative test support
-      if (iteration.result === "pending") test.pending++;
-      else if (iteration.result === "cancelled") test.cancelled++;
-      else if (computeIterationPassed(iteration)) test.passed++;
-      else test.failed++;
-
-      const startedAt = iteration.startedAt ?? iteration.createdAt;
-      const completedAt = iteration.updatedAt ?? iteration.createdAt;
-      if (startedAt && completedAt && iteration.result !== "pending") {
-        test.durations.push(Math.max(completedAt - startedAt, 0));
-      }
-
-      // Track tokens used
-      if (iteration.result !== "pending" && iteration.tokensUsed) {
-        test.tokens.push(iteration.tokensUsed);
-      }
-    });
-
-    testMap.forEach((test) => {
-      totalPassed += test.passed;
-      totalFailed += test.failed;
-      totalPending += test.pending;
-      totalCancelled += test.cancelled;
-    });
-
-    const durationData = Array.from(testMap.values()).map((test) => {
-      const avgDuration =
-        test.durations.length > 0
-          ? test.durations.reduce((sum, d) => sum + d, 0) /
-            test.durations.length
-          : 0;
-
-      return {
-        name: test.title,
-        duration: avgDuration,
-        durationSeconds: avgDuration / 1000,
-      };
-    });
-
-    const tokensData = Array.from(testMap.values()).map((test) => {
-      const avgTokens =
-        test.tokens.length > 0
-          ? test.tokens.reduce((sum, t) => sum + t, 0) / test.tokens.length
-          : 0;
-
-      return {
-        name: test.title,
-        tokens: avgTokens,
-      };
-    });
-
-    const donutData = [];
-    if (totalPassed > 0) {
-      donutData.push({
-        name: "Passed",
-        value: totalPassed,
-        fill: "hsl(142.1 76.2% 36.3%)",
-      });
-    }
-    if (totalFailed > 0) {
-      donutData.push({
-        name: "Failed",
-        value: totalFailed,
-        fill: "hsl(0 84.2% 60.2%)",
-      });
-    }
-    if (totalPending > 0) {
-      donutData.push({
-        name: "Pending",
-        value: totalPending,
-        fill: "hsl(45.4 93.4% 47.5%)",
-      });
-    }
-    if (totalCancelled > 0) {
-      donutData.push({
-        name: "Cancelled",
-        value: totalCancelled,
-        fill: "hsl(240 3.7% 15.9%)",
-      });
-    }
-
-    return { donutData, durationData, tokensData, modelData };
-  }, [selectedRunId, caseGroupsForSelectedRun, iterationsForSelectedRun]);
-
   return {
     iterationsForSelectedRun,
     caseGroupsForSelectedRun,
-    selectedRunChartData,
   };
 }

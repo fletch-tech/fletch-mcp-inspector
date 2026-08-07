@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { ToolPart } from "../tool-part";
+import { useHostContextStore } from "@/stores/client-context-store";
 
 // Mock lucide-react icons
 vi.mock("lucide-react", () => {
@@ -23,7 +24,9 @@ vi.mock("lucide-react", () => {
     Minimize2: s,
     Pencil: s,
     PictureInPicture2: s,
+    Play: s,
     Redo2: s,
+    RotateCcw: s,
     Shield: s,
     Undo2: s,
   };
@@ -60,12 +63,12 @@ vi.mock("@/lib/mcp-ui/mcp-apps-utils", () => ({
   UIType: { MCP_APPS: "mcp-apps", OPENAI_SDK: "openai-apps" },
 }));
 
-vi.mock("@/components/ui/badge", () => ({
+vi.mock("@mcpjam/design-system/badge", () => ({
   Badge: ({ children, ...props }: any) => <span {...props}>{children}</span>,
 }));
 
-vi.mock("../../csp-debug-panel", () => ({
-  CspDebugPanel: () => null,
+vi.mock("../../csp-workbench", () => ({
+  CspWorkbench: () => null,
 }));
 
 // Mock JsonEditor to avoid pulling in additional lucide icons
@@ -90,11 +93,24 @@ describe("ToolPart display mode controls", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     onDisplayModeChange = vi.fn();
+    useHostContextStore.setState({
+      activeProjectId: null,
+      defaultHostContext: {},
+      savedHostContext: undefined,
+      draftHostContext: {},
+      hostContextText: "{}",
+      hostContextError: null,
+      isSaving: false,
+      isDirty: false,
+      pendingProjectId: null,
+      pendingSavedHostContext: undefined,
+      isAwaitingRemoteEcho: false,
+    });
   });
 
   const renderWithDisplayModes = (
     appSupportedDisplayModes?: ("inline" | "pip" | "fullscreen")[],
-    options?: { minimalMode?: boolean; onSaveView?: () => void },
+    options?: { minimalMode?: boolean; allowInlineEdit?: boolean },
   ) =>
     render(
       <ToolPart
@@ -104,7 +120,7 @@ describe("ToolPart display mode controls", () => {
         onDisplayModeChange={onDisplayModeChange}
         appSupportedDisplayModes={appSupportedDisplayModes}
         minimalMode={options?.minimalMode}
-        onSaveView={options?.onSaveView}
+        allowInlineEdit={options?.allowInlineEdit}
       />,
     );
 
@@ -158,6 +174,31 @@ describe("ToolPart display mode controls", () => {
     expect(disabledButtons).toHaveLength(0);
   });
 
+  it("disables modes that the host does not advertise even when the app supports them", () => {
+    useHostContextStore.setState({
+      draftHostContext: {
+        availableDisplayModes: ["inline"],
+      },
+      hostContextText: JSON.stringify(
+        {
+          availableDisplayModes: ["inline"],
+        },
+        null,
+        2,
+      ),
+    });
+
+    renderWithDisplayModes(["inline", "pip", "fullscreen"]);
+
+    const disabledButtons = screen
+      .getAllByRole("button")
+      .filter((b) => b.disabled);
+    expect(disabledButtons).toHaveLength(2);
+    expect(screen.getByLabelText("Inline")).not.toBeDisabled();
+    expect(screen.getByLabelText("PiP")).toBeDisabled();
+    expect(screen.getByLabelText("Fullscreen")).toBeDisabled();
+  });
+
   it("allows clicking enabled display mode buttons", async () => {
     renderWithDisplayModes(["inline", "pip"]);
     const user = userEvent.setup();
@@ -195,15 +236,17 @@ describe("ToolPart display mode controls", () => {
     expect(screen.getByLabelText("Fullscreen")).toBeInTheDocument();
   });
 
-  it("hides debug tabs and save view in minimal mode", () => {
+  it("hides debug tabs and edit controls in minimal mode", () => {
     renderWithDisplayModes(["inline", "pip", "fullscreen"], {
       minimalMode: true,
-      onSaveView: vi.fn(),
+      allowInlineEdit: true,
     });
 
     expect(screen.queryByLabelText("Data")).not.toBeInTheDocument();
     expect(screen.queryByLabelText("Widget State")).not.toBeInTheDocument();
     expect(screen.queryByLabelText("CSP")).not.toBeInTheDocument();
-    expect(screen.queryByLabelText("Save as View")).not.toBeInTheDocument();
+    expect(
+      screen.queryByLabelText("Edit input and output"),
+    ).not.toBeInTheDocument();
   });
 });

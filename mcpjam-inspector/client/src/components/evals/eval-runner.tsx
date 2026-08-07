@@ -2,8 +2,9 @@ import { useEffect, useMemo, useState } from "react";
 import { ChevronLeft, ChevronRight, Plus, X } from "lucide-react";
 import { toast } from "sonner";
 import { useConvexAuth } from "convex/react";
-import { useAuth } from "@/lib/auth/jwt-auth-context";
-import { Button } from "@/components/ui/button";
+import { useAuth } from "@workos-inc/authkit-react";
+import { navigateApp } from "@/lib/app-navigation";
+import { Button } from "@mcpjam/design-system/button";
 import {
   Dialog,
   DialogContent,
@@ -11,27 +12,21 @@ import {
   DialogHeader,
   DialogTitle,
   DialogTrigger,
-} from "@/components/ui/dialog";
-import { useAppState } from "@/hooks/use-app-state";
+} from "@mcpjam/design-system/dialog";
 import {
   useAiProviderKeys,
   type ProviderTokens,
 } from "@/hooks/use-ai-provider-keys";
 import { cn } from "@/lib/utils";
-import { ModelDefinition, isMCPJamProvidedModel } from "@/shared/types";
-import { detectEnvironment, detectPlatform } from "@/lib/PosthogUtils";
-import posthog from "posthog-js";
+import { ModelDefinition } from "@/shared/types";
+import { isMCPJamProvidedModelMenuItem } from "@/components/chat-v2/shared/model-helpers";
+import { track } from "@/lib/analytics";
 import {
   Tooltip,
   TooltipContent,
   TooltipTrigger,
-} from "@/components/ui/tooltip";
-import {
-  WIZARD_STEPS,
-  STORAGE_KEYS,
-  DEFAULTS,
-  API_ENDPOINTS,
-} from "./constants";
+} from "@mcpjam/design-system/tooltip";
+import { WIZARD_STEPS, STORAGE_KEYS, DEFAULTS } from "./constants";
 import { ServersStep } from "./eval-runner/ServersStep";
 import { ModelStep } from "./eval-runner/ModelStep";
 import { TestsStep } from "./eval-runner/TestsStep";
@@ -42,12 +37,26 @@ import type {
   ExpectedToolCall,
 } from "./eval-runner/types";
 import { useSharedAppState } from "@/state/app-state-context";
+import { getBillingErrorMessage } from "@/lib/billing-entitlements";
+import {
+  generateEvalTests,
+  generateNegativeEvalTests,
+  listEvalTools,
+  runEvals,
+  type GeneratedEvalTestCase,
+} from "@/lib/apis/evals-api";
+import { resolvePromptTurns, type PromptTurn } from "@/shared/steps";
+import { promptTurnsToSteps } from "@/shared/steps";
+import { notifyCaseUpsertPartial } from "./case-upsert-toast";
 
 interface EvalRunnerProps {
   availableModels: ModelDefinition[];
+  projectId: string;
   inline?: boolean;
   onSuccess?: (suiteId?: string) => void;
   preselectedServer?: string;
+  /** Pre-populate model selection from suite.defaultConfig.modelId. User can still change it. */
+  defaultModelId?: string;
 }
 
 type StepKey = (typeof WIZARD_STEPS)[number]["key"];
@@ -95,11 +104,59 @@ const validateExpectedToolCalls = (toolCalls: ExpectedToolCall[]): boolean => {
   return true;
 };
 
+function getFirstPromptTurn(
+  promptTurns: PromptTurn[] | undefined,
+): PromptTurn | undefined {
+  return Array.isArray(promptTurns) && promptTurns.length > 0
+    ? promptTurns[0]
+    : undefined;
+}
+
+function promptTurnsRepresentNegativeCase(
+  promptTurns: PromptTurn[] | undefined,
+): boolean {
+  return (
+    Array.isArray(promptTurns) &&
+    promptTurns.length > 0 &&
+    promptTurns.every((turn) => turn.expectedToolCalls.length === 0)
+  );
+}
+
+function mapGeneratedTemplate(
+  test: GeneratedEvalTestCase,
+  index: number,
+): TestTemplate {
+  const promptTurns =
+    Array.isArray(test.promptTurns) && test.promptTurns.length > 0
+      ? test.promptTurns
+      : undefined;
+  const firstTurn = getFirstPromptTurn(promptTurns);
+
+  return {
+    title: test.title || `Generated test ${index + 1}`,
+    query: test.query || firstTurn?.prompt || "",
+    runs: Number(test.runs) > 0 ? Number(test.runs) : 1,
+    expectedToolCalls: firstTurn?.expectedToolCalls
+      ? firstTurn.expectedToolCalls
+      : Array.isArray(test.expectedToolCalls)
+        ? test.expectedToolCalls
+        : [],
+    isNegativeTest:
+      test.isNegativeTest === true ||
+      promptTurnsRepresentNegativeCase(promptTurns),
+    scenario: test.scenario || "",
+    expectedOutput: test.expectedOutput || firstTurn?.expectedOutput,
+    promptTurns,
+  };
+}
+
 export function EvalRunner({
   availableModels,
+  projectId,
   inline = false,
   onSuccess,
   preselectedServer,
+  defaultModelId,
 }: EvalRunnerProps) {
   const [open, setOpen] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -209,6 +266,18 @@ export function EvalRunner({
       return;
     }
 
+    // Suite defaultConfig takes precedence over stored preferences when present
+    if (defaultModelId) {
+      const suiteDefault = availableModels.find(
+        (m) => String(m.id) === defaultModelId,
+      );
+      if (suiteDefault) {
+        setSelectedModels([suiteDefault]);
+        setHasRestoredPreferences(true);
+        return;
+      }
+    }
+
     if (savedPreferences?.modelIds && savedPreferences.modelIds.length > 0) {
       const matches = availableModels.filter((model) =>
         savedPreferences.modelIds.includes(model.id),
@@ -219,7 +288,7 @@ export function EvalRunner({
     }
 
     setHasRestoredPreferences(true);
-  }, [availableModels, savedPreferences, hasRestoredPreferences]);
+  }, [availableModels, savedPreferences, hasRestoredPreferences, defaultModelId]);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -249,23 +318,18 @@ export function EvalRunner({
       }
 
       try {
-        const response = await fetch(API_ENDPOINTS.LIST_TOOLS, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ serverIds: selectedServers }),
+        const data = await listEvalTools({
+          projectId,
+          serverIds: selectedServers,
         });
-
-        if (response.ok) {
-          const data = await response.json();
-          setAvailableTools(data.tools || []);
-        }
+        setAvailableTools(data.tools || []);
       } catch (error) {
         console.error("Failed to fetch tools:", error);
       }
     }
 
     fetchTools();
-  }, [selectedServers]);
+  }, [selectedServers, projectId]);
 
   useEffect(() => {
     if (!inline && !open) {
@@ -283,7 +347,7 @@ export function EvalRunner({
   const stepCompletion = useMemo(() => {
     // Check that all selected models have credentials
     const allModelsHaveCredentials = selectedModels.every((model) => {
-      const isJam = isMCPJamProvidedModel(model.id);
+      const isJam = isMCPJamProvidedModelMenuItem(model);
       return isJam || hasToken(model.provider as keyof ProviderTokens);
     });
 
@@ -370,19 +434,47 @@ export function EvalRunner({
   ) => {
     setTestTemplates((prev) => {
       const next = [...prev];
-      next[index] = {
-        ...next[index],
+      const currentTemplate = next[index];
+      if (!currentTemplate) {
+        return prev;
+      }
+
+      const nextTemplate: TestTemplate = {
+        ...currentTemplate,
         [field]: value,
       };
+
+      const firstTurn = getFirstPromptTurn(nextTemplate.promptTurns);
+      if (firstTurn) {
+        if (field === "query") {
+          nextTemplate.promptTurns = [
+            {
+              ...firstTurn,
+              prompt: typeof value === "string" ? value : firstTurn.prompt,
+            },
+            ...nextTemplate.promptTurns!.slice(1),
+          ];
+        } else if (field === "expectedToolCalls") {
+          nextTemplate.promptTurns = [
+            {
+              ...firstTurn,
+              expectedToolCalls: Array.isArray(value)
+                ? (value as ExpectedToolCall[])
+                : firstTurn.expectedToolCalls,
+            },
+            ...nextTemplate.promptTurns!.slice(1),
+          ];
+        }
+      }
+
+      next[index] = nextTemplate;
       return next;
     });
   };
 
   const handleGenerateTests = async () => {
-    posthog.capture("eval_generate_tests_button_clicked", {
+    track("eval_generate_tests_button_clicked", {
       location: "eval_runner",
-      platform: detectPlatform(),
-      environment: detectEnvironment(),
       step: currentStep,
     });
 
@@ -400,33 +492,14 @@ export function EvalRunner({
 
     try {
       const accessToken = await getAccessToken();
-
-      const response = await fetch(API_ENDPOINTS.EVALS_GENERATE_TESTS, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          serverIds: selectedServers,
-          convexAuthToken: accessToken,
-        }),
+      const result = await generateEvalTests({
+        projectId,
+        serverIds: selectedServers,
+        convexAuthToken: accessToken,
       });
 
-      const result = await response.json();
-
-      if (!response.ok) {
-        throw new Error(result.error || "Failed to generate tests");
-      }
-
       if (result.tests && result.tests.length > 0) {
-        const generatedTemplates = result.tests.map(
-          (test: any, index: number) => ({
-            title: test.title || `Generated test ${index + 1}`,
-            query: test.query || "",
-            runs: Number(test.runs) > 0 ? Number(test.runs) : 1,
-            expectedToolCalls: Array.isArray(test.expectedToolCalls)
-              ? test.expectedToolCalls
-              : [],
-          }),
-        );
+        const generatedTemplates = result.tests.map(mapGeneratedTemplate);
 
         setTestTemplates(generatedTemplates);
         setCurrentStep(2);
@@ -437,9 +510,7 @@ export function EvalRunner({
     } catch (error) {
       console.error("Failed to generate tests:", error);
       toast.error(
-        error instanceof Error
-          ? error.message
-          : "Failed to generate test cases",
+        getBillingErrorMessage(error, "Failed to generate test cases"),
       );
     } finally {
       setIsGenerating(false);
@@ -447,10 +518,8 @@ export function EvalRunner({
   };
 
   const handleGenerateNegativeTests = async () => {
-    posthog.capture("eval_generate_negative_tests_button_clicked", {
+    track("eval_generate_negative_tests_button_clicked", {
       location: "eval_runner",
-      platform: detectPlatform(),
-      environment: detectEnvironment(),
       step: currentStep,
     });
 
@@ -468,41 +537,18 @@ export function EvalRunner({
 
     try {
       const accessToken = await getAccessToken();
-
-      const response = await fetch(
-        API_ENDPOINTS.EVALS_GENERATE_NEGATIVE_TESTS,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            serverIds: selectedServers,
-            convexAuthToken: accessToken,
-          }),
-        },
-      );
-
-      const result = await response.json();
-
-      if (!response.ok) {
-        throw new Error(result.error || "Failed to generate negative tests");
-      }
+      const result = await generateNegativeEvalTests({
+        projectId,
+        serverIds: selectedServers,
+        convexAuthToken: accessToken,
+      });
 
       if (result.tests && result.tests.length > 0) {
-        const generatedNegativeTemplates: TestTemplate[] = result.tests.map(
-          (test: {
-            title: string;
-            scenario: string;
-            query: string;
-            runs: number;
-          }) => ({
-            title: test.title || "Untitled Negative Test",
-            query: test.query || "",
-            runs: Number(test.runs) > 0 ? Number(test.runs) : 1,
-            expectedToolCalls: [],
-            isNegativeTest: true,
-            scenario: test.scenario || "",
-          }),
-        );
+        const generatedNegativeTemplates = result.tests.map((test, index) => ({
+          ...mapGeneratedTemplate(test, index),
+          expectedToolCalls: [],
+          isNegativeTest: true,
+        }));
 
         // Append to existing templates instead of replacing
         setTestTemplates((prev) => [...prev, ...generatedNegativeTemplates]);
@@ -514,9 +560,7 @@ export function EvalRunner({
     } catch (error) {
       console.error("Failed to generate negative tests:", error);
       toast.error(
-        error instanceof Error
-          ? error.message
-          : "Failed to generate negative test cases",
+        getBillingErrorMessage(error, "Failed to generate negative test cases"),
       );
     } finally {
       setIsGeneratingNegativeTests(false);
@@ -555,7 +599,7 @@ export function EvalRunner({
     // Collect API keys for all selected models
     const modelApiKeys: Record<string, string> = {};
     for (const model of selectedModels) {
-      if (!isMCPJamProvidedModel(model.id)) {
+      if (!isMCPJamProvidedModelMenuItem(model)) {
         const key = getToken(model.provider as keyof ProviderTokens);
         if (!key) {
           toast.error(
@@ -586,7 +630,7 @@ export function EvalRunner({
     // Switch view immediately before starting the API call
     if (!inline) {
       setOpen(false);
-      window.location.hash = "evals";
+      navigateApp("/evals");
     } else {
       // In inline mode, call the callback to switch view immediately
       onSuccess?.();
@@ -602,6 +646,18 @@ export function EvalRunner({
         // Generate a UUID for this test template to group variants
         const testTemplateKey = crypto.randomUUID();
 
+        // The Convex mutation rejects `promptTurns`; describe the case as
+        // unified `steps` derived from the template's turns (or its
+        // query/expectedToolCalls when no explicit turns were authored).
+        const steps = promptTurnsToSteps(
+          resolvePromptTurns({
+            promptTurns: template.promptTurns,
+            query: template.query,
+            expectedToolCalls: template.expectedToolCalls,
+            expectedOutput: template.expectedOutput,
+          }),
+        );
+
         return selectedModels.map((model) => ({
           title: template.title,
           query: template.query,
@@ -611,6 +667,8 @@ export function EvalRunner({
           expectedToolCalls: template.expectedToolCalls,
           isNegativeTest: template.isNegativeTest,
           scenario: template.scenario,
+          expectedOutput: template.expectedOutput,
+          steps,
           testTemplateKey,
         }));
       });
@@ -618,42 +676,30 @@ export function EvalRunner({
       // Build pass criteria description for notes
       const criteriaNote = `Pass Criteria: Min ${minimumPassRate}% Accuracy`;
 
-      const response = await fetch(API_ENDPOINTS.EVALS_RUN, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          suiteName: suiteName.trim(),
-          suiteDescription: suiteDescription.trim() || undefined,
-          tests: expandedTests,
-          serverIds: selectedServers,
-          modelApiKeys,
-          convexAuthToken: accessToken,
-          passCriteria: {
-            minimumPassRate: minimumPassRate,
-          },
-          notes: criteriaNote,
-        }),
+      const result = await runEvals({
+        projectId,
+        suiteName: suiteName.trim(),
+        suiteDescription: suiteDescription.trim() || undefined,
+        tests: expandedTests,
+        serverIds: selectedServers,
+        modelApiKeys,
+        convexAuthToken: accessToken,
+        passCriteria: {
+          minimumPassRate: minimumPassRate,
+        },
+        notes: criteriaNote,
       });
-
-      if (!response.ok) {
-        let errorMessage = "Failed to start evals";
-        try {
-          const result = await response.json();
-          errorMessage = result.error || errorMessage;
-        } catch (parseError) {
-          console.error("Failed to parse error response:", parseError);
-        }
-        throw new Error(errorMessage);
+      const hadPartialFailure = notifyCaseUpsertPartial(
+        (result as { caseUpsert?: unknown })?.caseUpsert,
+        { context: "Saved" },
+      );
+      if (!hadPartialFailure) {
+        toast.success(result.message || "Evals started successfully!");
       }
 
-      const result = await response.json();
-      toast.success(result.message || "Evals started successfully!");
-
       // Track suite created
-      posthog.capture("eval_suite_created", {
+      track("eval_suite_created", {
         location: "eval_runner",
-        platform: detectPlatform(),
-        environment: detectEnvironment(),
         suite_id: result.suiteId,
         num_test_cases: validTestTemplates.length,
         num_models: selectedModels.length,
@@ -666,9 +712,7 @@ export function EvalRunner({
       setShowNameError(false);
       setCurrentStep(3);
     } catch (error) {
-      toast.error(
-        error instanceof Error ? error.message : "Failed to start evals",
-      );
+      toast.error(getBillingErrorMessage(error, "Failed to start evals"));
     } finally {
       setIsSubmitting(false);
     }
@@ -891,23 +935,16 @@ export function EvalRunner({
                   variant={nextVariant}
                   onClick={() => {
                     if (currentStep < WIZARD_STEPS.length - 1) {
-                      posthog.capture("eval_setup_next_step_button_clicked", {
+                      track("eval_setup_next_step_button_clicked", {
                         location: "eval_runner",
-                        platform: detectPlatform(),
-                        environment: detectEnvironment(),
                         step: currentStep,
                       });
                       handleNext();
                     } else {
-                      posthog.capture(
-                        "eval_setup_start_eval_run_button_clicked",
-                        {
-                          location: "eval_runner",
-                          platform: detectPlatform(),
-                          environment: detectEnvironment(),
-                          step: currentStep,
-                        },
-                      );
+                      track("eval_setup_start_eval_run_button_clicked", {
+                        location: "eval_runner",
+                        step: currentStep,
+                      });
                       void handleSubmit();
                     }
                   }}
@@ -933,18 +970,14 @@ export function EvalRunner({
             variant={nextVariant}
             onClick={() => {
               if (currentStep < WIZARD_STEPS.length - 1) {
-                posthog.capture("eval_setup_next_step_button_clicked", {
+                track("eval_setup_next_step_button_clicked", {
                   location: "eval_runner",
-                  platform: detectPlatform(),
-                  environment: detectEnvironment(),
                   step: currentStep,
                 });
                 handleNext();
               } else {
-                posthog.capture("eval_setup_start_eval_run_button_clicked", {
+                track("eval_setup_start_eval_run_button_clicked", {
                   location: "eval_runner",
-                  platform: detectPlatform(),
-                  environment: detectEnvironment(),
                   step: currentStep,
                 });
                 void handleSubmit();
